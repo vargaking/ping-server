@@ -1,8 +1,12 @@
-from fastapi import APIRouter, HTTPException, status
+import logging
+from fastapi import APIRouter, HTTPException, status, Depends
 from typing import List, Optional
 from pydantic import BaseModel
 from datetime import datetime
-from app.models.Server import Server
+from ..models.Server import Server
+from ..models.UserToServer import UserToServer
+from ..models.User import User
+from ..middleware import get_current_user
 
 router = APIRouter(prefix="/servers", tags=["servers"])
 
@@ -49,6 +53,14 @@ async def get_servers():
     return [ServerResponse.from_server(server) for server in servers]
 
 
+@router.get("/me", response_model=List[ServerResponse])
+async def get_my_servers(current_user: User = Depends(get_current_user)):
+    # Return servers the current user belongs to
+    user_server_relations = await UserToServer.filter(user=current_user).prefetch_related("server")
+    servers = [relation.server for relation in user_server_relations]
+    return [ServerResponse.from_server(server) for server in servers]
+
+
 @router.get("/{server_id}", response_model=ServerResponse)
 async def get_server(server_id: int):
     server = await Server.get_or_none(id=server_id)
@@ -62,7 +74,7 @@ async def update_server(server_id: int, server_update: ServerUpdate):
     server = await Server.get_or_none(id=server_id)
     if not server:
         raise HTTPException(status_code=404, detail="Server not found")
-    
+
     update_data = server_update.model_dump(exclude_unset=True)
     await server.update_from_dict(update_data)
     await server.save()

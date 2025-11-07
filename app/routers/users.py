@@ -2,7 +2,7 @@ from fastapi import APIRouter, HTTPException, status
 from typing import List, Optional
 from pydantic import BaseModel
 from datetime import datetime
-from app.models.User import User
+from ..models.User import User
 
 router = APIRouter(prefix="/users", tags=["users"])
 
@@ -69,11 +69,11 @@ async def update_user(user_id: int, user_update: UserUpdate):
     user = await User.get_or_none(id=user_id)
     if not user:
         raise HTTPException(status_code=404, detail="User not found")
-    
+
     update_data = user_update.model_dump(exclude_unset=True)
     if 'password' in update_data:
         user.set_password(update_data.pop('password'))
-    
+
     await user.update_from_dict(update_data)
     await user.save()
     return UserResponse.from_user(user)

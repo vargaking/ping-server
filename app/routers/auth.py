@@ -4,9 +4,9 @@ from typing import Optional
 from datetime import datetime, timedelta, timezone
 import jwt as jose
 import os
-from app.models.User import User
-from app.middleware import get_current_user
-from app.routers.users import UserResponse
+from ..models.User import User
+from ..middleware import get_current_user
+from .users import UserResponse
 
 
 router = APIRouter(prefix="/auth", tags=["authentication"])
@@ -86,10 +86,10 @@ async def register(user_data: RegisterRequest, response: Response):
     response.set_cookie(
         key="access_token",
         value=access_token,
-        max_age=ACCESS_TOKEN_EXPIRE_MINUTES * 60,
+        max_age=ACCESS_TOKEN_EXPIRE_MINUTES * 360,
         httponly=True,
         secure=True,
-        samesite="strict"
+        samesite="lax"
     )
 
     return TokenResponse(
@@ -123,8 +123,8 @@ async def login(login_data: LoginRequest, response: Response):
         value=access_token,
         max_age=ACCESS_TOKEN_EXPIRE_MINUTES * 60,
         httponly=True,
-        secure=True,
-        samesite="strict"
+        secure=False,
+        samesite="lax"
     )
 
     return TokenResponse(

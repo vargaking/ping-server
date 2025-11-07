@@ -2,10 +2,14 @@ from fastapi import Request, HTTPException, status, Depends
 from fastapi.responses import JSONResponse
 import jwt as jose
 import os
-from app.models.User import User
+from .models.User import User
 from typing import Optional
+import logging
 
-SECRET_KEY = os.getenv("JWT_SECRET_KEY", "your-secret-key-change-this-in-production")
+logger = logging.getLogger("app.middleware")
+
+SECRET_KEY = os.getenv(
+    "JWT_SECRET_KEY", "your-secret-key-change-this-in-production")
 ALGORITHM = "HS256"
 
 
@@ -16,38 +20,39 @@ async def auth_middleware(request: Request, call_next):
     user information when available.
     """
     # Skip auth for public endpoints
-    public_paths = ["/", "/docs", "/redoc", "/openapi.json", "/auth/login", "/auth/register"]
-    
+    public_paths = ["/", "/docs", "/redoc",
+                    "/openapi.json", "/auth/login", "/auth/register"]
+
     if request.url.path in public_paths:
         response = await call_next(request)
         return response
-    
+
     # Try to get user from token
     user = None
     token = None
-    
+
     # Try to get token from Authorization header first
     auth_header = request.headers.get("Authorization")
     if auth_header and auth_header.startswith("Bearer "):
         token = auth_header.split(" ")[1]
-    
+
     # If no header token, try to get from cookie
     if not token:
         token = request.cookies.get("access_token")
-    
+
     if token:
         try:
             payload = jose.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
             username: str = payload.get("sub")
             if username:
                 user = await User.get_or_none(username=username)
-        except jose.PyJWTError:
-            # Invalid token, but we don't block the request
-            pass
-    
+        except jose.PyJWTError as e:
+            # Invalid token, but we don't block the request; log at debug level
+            logger.debug("Invalid JWT token: %s", e)
+
     # Add user to request state
     request.state.user = user
-    
+
     response = await call_next(request)
     return response
 
