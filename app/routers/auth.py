@@ -7,9 +7,10 @@ import os
 from ..models.User import User
 from ..models.Message import Message
 from ..models.UserToServer import UserToServer
+from ..models.Token import Token
 from ..middleware import get_current_user
 from .users import UserResponse
-
+import uuid
 
 router = APIRouter(prefix="/auth", tags=["authentication"])
 
@@ -34,7 +35,6 @@ class RegisterRequest(BaseModel):
 class TokenResponse(BaseModel):
     access_token: str
     token_type: str = "bearer"
-    expires_in: int
 
 
 def create_access_token(data: dict, expires_delta: Optional[timedelta] = None):
@@ -115,15 +115,16 @@ async def login(login_data: LoginRequest, response: Response):
             detail="User account is disabled"
         )
 
-    access_token_expires = timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES)
-    access_token = create_access_token(
-        data={"sub": user.username}, expires_delta=access_token_expires
+    access_token = uuid.uuid4().hex
+
+    await Token.create(
+        user_id=user.id,
+        token=access_token
     )
 
     response.set_cookie(
         key="access_token",
         value=access_token,
-        max_age=ACCESS_TOKEN_EXPIRE_MINUTES * 60,
         httponly=True,
         secure=False,
         samesite="lax"
@@ -131,7 +132,6 @@ async def login(login_data: LoginRequest, response: Response):
 
     return TokenResponse(
         access_token=access_token,
-        expires_in=ACCESS_TOKEN_EXPIRE_MINUTES * 60
     )
 
 

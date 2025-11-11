@@ -3,6 +3,7 @@ from fastapi.responses import JSONResponse
 import jwt as jose
 import os
 from .models.User import User
+from .models.Token import Token
 from typing import Optional
 import logging
 
@@ -31,24 +32,16 @@ async def auth_middleware(request: Request, call_next):
     user = None
     token = None
 
-    # Try to get token from Authorization header first
-    auth_header = request.headers.get("Authorization")
-    if auth_header and auth_header.startswith("Bearer "):
-        token = auth_header.split(" ")[1]
-
-    # If no header token, try to get from cookie
-    if not token:
-        token = request.cookies.get("access_token")
+    # get token from cookie
+    token = request.cookies.get("access_token")
 
     if token:
         try:
-            payload = jose.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
-            username: str = payload.get("sub")
-            if username:
-                user = await User.get_or_none(username=username)
-        except jose.PyJWTError as e:
-            # Invalid token, but we don't block the request; log at debug level
-            logger.debug("Invalid JWT token: %s", e)
+            token_obj = await Token.get(token=token).prefetch_related('user')
+            user = token_obj.user
+        except Exception as e:
+            logger.warning(f"Invalid token: {e}")
+            user = None
 
     # Add user to request state
     request.state.user = user
