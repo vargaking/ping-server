@@ -5,6 +5,8 @@ from datetime import datetime, timedelta, timezone
 import jwt as jose
 import os
 from ..models.User import User
+from ..models.Message import Message
+from ..models.UserToServer import UserToServer
 from ..middleware import get_current_user
 from .users import UserResponse
 
@@ -136,3 +138,41 @@ async def login(login_data: LoginRequest, response: Response):
 @router.get("/me")
 async def get_current_user_info(current_user: User = Depends(get_current_user)):
     return UserResponse.from_user(current_user)
+
+
+@router.get("/messages/{last_updated}")
+async def get_messages(
+    last_updated: datetime,
+    current_user: User = Depends(get_current_user)
+):
+    """Fetch messages from servers the user belongs to, updated after last_updated."""
+    # Get servers the user belongs to
+    user_servers = await UserToServer.filter(user=current_user).values_list(
+        'server_id',
+        flat=True
+    )
+
+    # Fetch messages from those servers updated after last_updated
+    messages = await Message.filter(
+        server_id__in=user_servers,
+        created_at__gt=last_updated
+    ).order_by('created_at').values(
+        'uuid',
+        'content',
+        'author_id',
+        'channel_id',
+        'server_id',
+        'timestamp'
+    )
+
+    return [
+        {
+            "id": message["uuid"],
+            "content": message["content"],
+            "user_id": message["author_id"],
+            "channel_id": message["channel_id"],
+            "server_id": message["server_id"],
+            "timestamp": message["timestamp"],
+        }
+        for message in messages
+    ]

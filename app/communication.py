@@ -2,6 +2,7 @@ from datetime import datetime
 from fastapi import WebSocket
 
 from app.models.UserToServer import UserToServer
+from app.models.Message import Message
 
 
 class Communication:
@@ -34,6 +35,17 @@ class Communication:
             if user_id in self.user_to_websocket and user_id != message.get("user_id"):
                 websocket = self.user_to_websocket[user_id]
                 await websocket.send_json(message)
+
+        # Save message to database
+        await Message.create(
+            uuid=message.get("id"),
+            content=message.get("content"),
+            author_id=message.get("user_id"),
+            server_id=server_id,
+            channel_id=channel_id,
+            timestamp=message.get("timestamp"),
+            metadata=message.get("metadata", {})
+        )
 
     async def message_switch(self, message: dict, websocket: WebSocket):
         user_id = message.get("user_id")
