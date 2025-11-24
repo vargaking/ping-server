@@ -15,13 +15,15 @@ class ChannelResponse(BaseModel):
     id: int
     name: str
     channel_settings: dict
+    type: str
 
     @classmethod
     def from_channel(cls, channel: Channel):
         return cls(
             id=channel.id,
             name=channel.name,
-            channel_settings=channel.channel_settings
+            channel_settings=channel.channel_settings,
+            type=channel.type
         )
 
 
@@ -43,7 +45,7 @@ async def get_channels(server_id: int, current_user: User = Depends(get_current_
 
 
 @router.post("/{server_id}/create", response_model=ChannelResponse)
-async def create_channel(server_id: int, channel_name: str, current_user: User = Depends(get_current_user)):
+async def create_channel(server_id: int, channel_name: str, type: str = "text", current_user: User = Depends(get_current_user)):
     # Get server
     server = await Server.get_or_none(id=server_id)
 
@@ -56,7 +58,8 @@ async def create_channel(server_id: int, channel_name: str, current_user: User =
     # Create channel
     channel = await Channel.create(
         name=channel_name,
-        channel_settings={}
+        channel_settings={},
+        type=type
     )
 
     # Link channel to server

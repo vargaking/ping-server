@@ -6,6 +6,7 @@ class Channel(models.Model):
     name = fields.CharField(max_length=100)
     created_at = fields.DatetimeField(auto_now_add=True)
     channel_settings = fields.JSONField(default={})
+    type = fields.CharField(max_length=10, default="text") # text or voice
 
     def __str__(self):
         return self.name
