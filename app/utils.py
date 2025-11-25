@@ -22,7 +22,8 @@ MEDIA_SERVER_URL = os.getenv("MEDIA_SERVER_URL")
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     # Initialize the client when the app starts
-    app.requests_client = httpx.AsyncClient(base_url=MEDIA_SERVER_URL)
+    headers = {"x-api-key": os.getenv("MEDIA_SERVER_API_KEY", "default-insecure-key")}
+    app.requests_client = httpx.AsyncClient(base_url=MEDIA_SERVER_URL, headers=headers)
     yield
     # Close the client when the app shuts down
     await app.requests_client.aclose()
