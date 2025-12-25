@@ -4,14 +4,14 @@ from tortoise.contrib.fastapi import register_tortoise
 from dotenv import load_dotenv
 import os
 
+load_dotenv()
+
 import uvicorn
 from app.communication import Communication
 from app.models import User
 from app.routers import users, servers, auth, channels, media
 from app.utils import call_media_server, lifespan
 from .middleware import auth_middleware, get_current_user
-
-load_dotenv()
 # Initialize application logging (configures file logging)
 from . import logging_config  # noqa: F401
 
@@ -20,7 +20,12 @@ app = FastAPI(debug=True, lifespan=lifespan)
 # Add CORS middleware
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:5173", os.getenv("DEV_IP", "")],
+    allow_origins=[
+        "http://localhost:5173",
+        "http://127.0.0.1:5173",
+        "https://192.168.1.249:5173",
+        os.getenv("DEV_IP", "")
+    ],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -60,6 +65,7 @@ async def root():
 app.include_router(media.router)
 
 comms = Communication()
+app.state.comms = comms
 
 
 @app.websocket("/ws")

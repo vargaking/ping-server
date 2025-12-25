@@ -88,8 +88,9 @@ async def register(user_data: RegisterRequest, response: Response):
         value=access_token,
         max_age=ACCESS_TOKEN_EXPIRE_MINUTES * 360,
         httponly=True,
-        secure=True,
-        samesite="lax"
+        secure=False,
+        samesite="lax",
+        path="/"
     )
 
     return TokenResponse(
@@ -125,7 +126,8 @@ async def login(login_data: LoginRequest, response: Response):
         value=access_token,
         httponly=True,
         secure=False,
-        samesite="lax"
+        samesite="lax",
+        path="/"
     )
 
     return TokenResponse(

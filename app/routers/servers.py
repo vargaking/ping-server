@@ -7,6 +7,8 @@ from ..models.Server import Server
 from ..models.UserToServer import UserToServer
 from ..models.User import User
 from ..middleware import get_current_user
+from fastapi import UploadFile, File
+from ..services.storage import storage_service
 
 router = APIRouter(prefix="/servers", tags=["servers"])
 
@@ -87,3 +89,24 @@ async def delete_server(server_id: int):
     if not server:
         raise HTTPException(status_code=404, detail="Server not found")
     await server.delete()
+
+
+@router.post("/{server_id}/icon", response_model=ServerResponse)
+async def upload_server_icon(server_id: int, file: UploadFile = File(...)):
+    server = await Server.get_or_none(id=server_id)
+    if not server:
+        raise HTTPException(status_code=404, detail="Server not found")
+
+    content = await file.read()
+    url = await storage_service.upload_file(
+        content,
+        file.content_type,
+        f"servers/{server_id}/icon"
+    )
+
+    if not url:
+        raise HTTPException(status_code=500, detail="Failed to upload file")
+
+    server.server_profile['icon'] = url
+    await server.save()
+    return ServerResponse.from_server(server)

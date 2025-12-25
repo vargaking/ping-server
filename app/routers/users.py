@@ -1,8 +1,10 @@
-from fastapi import APIRouter, HTTPException, status
+from fastapi import APIRouter, HTTPException, status, Request
 from typing import List, Optional
 from pydantic import BaseModel
 from datetime import datetime
 from ..models.User import User
+from fastapi import UploadFile, File
+from ..services.storage import storage_service
 
 router = APIRouter(prefix="/users", tags=["users"])
 
@@ -65,7 +67,7 @@ async def get_user(user_id: int):
 
 
 @router.put("/{user_id}", response_model=UserResponse)
-async def update_user(user_id: int, user_update: UserUpdate):
+async def update_user(user_id: int, user_update: UserUpdate, request: Request):
     user = await User.get_or_none(id=user_id)
     if not user:
         raise HTTPException(status_code=404, detail="User not found")
@@ -76,6 +78,12 @@ async def update_user(user_id: int, user_update: UserUpdate):
 
     await user.update_from_dict(update_data)
     await user.save()
+    
+    # Broadcast update
+    if hasattr(request.app.state, "comms"):
+        user_response = UserResponse.from_user(user)
+        await request.app.state.comms.broadcast_user_update(user_response.model_dump())
+
     return UserResponse.from_user(user)
 
 
@@ -85,3 +93,33 @@ async def delete_user(user_id: int):
     if not user:
         raise HTTPException(status_code=404, detail="User not found")
     await user.delete()
+
+
+@router.post("/{user_id}/avatar", response_model=UserResponse)
+async def upload_user_avatar(user_id: int, request: Request, file: UploadFile = File(...)):
+    user = await User.get_or_none(id=user_id)
+    if not user:
+        raise HTTPException(status_code=404, detail="User not found")
+
+    content = await file.read()
+    url = await storage_service.upload_file(
+        content,
+        file.content_type,
+        f"users/{user_id}/avatar"
+    )
+
+    if not url:
+        raise HTTPException(status_code=500, detail="Failed to upload file")
+
+    # Create a copy of the profile to ensure Tortoise ORM detects the change
+    profile = user.profile.copy() if user.profile else {}
+    profile['avatar'] = url
+    user.profile = profile
+    await user.save()
+
+    # Broadcast update
+    if hasattr(request.app.state, "comms"):
+        user_response = UserResponse.from_user(user)
+        await request.app.state.comms.broadcast_user_update(user_response.model_dump())
+
+    return UserResponse.from_user(user)

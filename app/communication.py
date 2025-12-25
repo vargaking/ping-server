@@ -41,3 +41,20 @@ class Communication:
             await self.voice_manager.handle_producer_created(message, websocket)
         elif message_type == "voice_signal":
             await self.voice_manager.handle_voice_signal(message, websocket)
+
+    async def broadcast_user_update(self, user_data: dict):
+        """Broadcast user update to all connected clients"""
+        message = {
+            "type": "user_updated",
+            "user": user_data
+        }
+        
+        # Iterate over all connected websockets
+        # We need to copy values to avoid runtime error if dictionary changes during iteration
+        websockets = list(self.connection_manager.user_to_websocket.values())
+        
+        for ws in websockets:
+            try:
+                await ws.send_json(message)
+            except Exception as e:
+                print(f"Failed to send user update to websocket: {e}")
