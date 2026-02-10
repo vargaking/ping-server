@@ -21,14 +21,12 @@ class UserUpdate(BaseModel):
     password: Optional[str] = None
     public_key: Optional[str] = None
     profile: Optional[dict] = None
-    is_active: Optional[bool] = None
 
 
 class UserResponse(BaseModel):
     id: int
     username: str
     created_at: datetime
-    is_active: bool
     public_key: Optional[str] = None
     profile: dict
 
@@ -38,7 +36,6 @@ class UserResponse(BaseModel):
             id=user.id,
             username=user.username,
             created_at=user.created_at,
-            is_active=user.is_active,
             public_key=user.public_key,
             profile=user.profile
         )
@@ -78,7 +75,7 @@ async def update_user(user_id: int, user_update: UserUpdate, request: Request):
 
     await user.update_from_dict(update_data)
     await user.save()
-    
+
     # Broadcast update
     if hasattr(request.app.state, "comms"):
         user_response = UserResponse.from_user(user)
