@@ -7,7 +7,7 @@ class Channel(models.Model):
     created_at = fields.DatetimeField(auto_now_add=True)
     channel_settings = fields.JSONField(default={})
     type = fields.CharField(max_length=10, default="text")  # text or voice
-    server_id = fields.ForeignKeyField(
+    server = fields.ForeignKeyField(
         "models.Server", related_name="channels")
 
     def __str__(self):

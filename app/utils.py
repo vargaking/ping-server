@@ -5,9 +5,6 @@ from fastapi import FastAPI, HTTPException
 # Needed for accessing the client instance
 from starlette.requests import Request
 import os
-from dotenv import load_dotenv
-
-load_dotenv()
 
 # --- Configuration ---
 # Set the base URL for your deployed Node.js Mediasoup Server (e.g., on GCP VM)

@@ -1,50 +1,48 @@
-from fastapi import Depends, FastAPI, Request, WebSocket, WebSocketDisconnect
-from fastapi.middleware.cors import CORSMiddleware
-from tortoise.contrib.fastapi import register_tortoise
-from dotenv import load_dotenv
 import os
 
-load_dotenv()
-
+from fastapi import FastAPI, WebSocket, WebSocketDisconnect
+from fastapi.middleware.cors import CORSMiddleware
+from tortoise.contrib.fastapi import register_tortoise
 import uvicorn
+
 from app.communication import Communication
-from app.models import User
+from app.db import TORTOISE_CONFIG
 from app.routers import users, servers, auth, channels, media
-from app.utils import call_media_server, lifespan
-from .middleware import auth_middleware, get_current_user
+from app.utils import lifespan
+from .middleware import auth_middleware
 # Initialize application logging (configures file logging)
 from . import logging_config  # noqa: F401
 
 app = FastAPI(debug=True, lifespan=lifespan)
 
-# Add CORS middleware
+# CORS middleware
 app.add_middleware(
     CORSMiddleware,
     allow_origins=[
         "http://localhost:5173",
         "http://127.0.0.1:5173",
         "https://192.168.1.249:5173",
-        os.getenv("DEV_IP", "")
+        os.getenv("DEV_IP", ""),
     ],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
-# Add authentication middleware
+# Authentication middleware
 app.middleware("http")(auth_middleware)
 
+# Routers
 app.include_router(auth.router)
 app.include_router(users.router)
 app.include_router(servers.router)
 app.include_router(channels.router)
+app.include_router(media.router)
 
-from app.db import TORTOISE_CONFIG
-
+# Database
 register_tortoise(
     app,
     config=TORTOISE_CONFIG,
-    # Set to True to auto-create tables (not recommended for production)
     generate_schemas=False,
     add_exception_handlers=True,
 )
@@ -54,7 +52,6 @@ register_tortoise(
 async def root():
     return {"message": "Hello World"}
 
-app.include_router(media.router)
 
 comms = Communication()
 app.state.comms = comms
