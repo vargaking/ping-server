@@ -5,8 +5,7 @@ from .RoleToUser import RoleToUser
 from .UserToServer import UserToServer
 from .Channel import Channel
 from .Message import Message
-from .MessageToChannel import MessageToChannel
 from .Token import Token
 
 __all__ = ["Role", "User", "Server", "RoleToUser", "UserToServer",
-           "Channel", "Message", "MessageToChannel", "Token"]
+           "Channel", "Message", "Token"]
