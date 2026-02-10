@@ -39,15 +39,7 @@ app.include_router(users.router)
 app.include_router(servers.router)
 app.include_router(channels.router)
 
-TORTOISE_CONFIG = {
-    "connections": {"default": os.getenv("DB_CONNECTION_STRING")},
-    "apps": {
-        "models": {
-            "models": ["app.models"],
-            "default_connection": "default",
-        },
-    },
-}
+from app.db import TORTOISE_CONFIG
 
 register_tortoise(
     app,
