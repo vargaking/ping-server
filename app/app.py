@@ -22,6 +22,7 @@ app.add_middleware(
         "http://localhost:5173",
         "http://127.0.0.1:5173",
         "https://192.168.1.249:5173",
+        "https://192.168.1.84:5173",
         os.getenv("DEV_IP", ""),
     ],
     allow_credentials=True,

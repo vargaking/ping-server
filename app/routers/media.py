@@ -1,7 +1,9 @@
-from fastapi import APIRouter, Request
+from fastapi import APIRouter, Depends, Request
+from app.middleware import get_current_user
+from app.models.User import User
 from app.utils import call_media_server
 
-router = APIRouter(prefix="/api/media", tags=["media"])
+router = APIRouter(prefix="/api/media", tags=["media"], dependencies=[Depends(get_current_user)])
 
 @router.get("/router_capabilities")
 async def get_router_capabilities_proxy(request: Request):

@@ -108,12 +108,6 @@ async def login(login_data: LoginRequest, response: Response):
             detail="Incorrect username or password"
         )
 
-    if not user.is_active:
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="User account is disabled"
-        )
-
     access_token = uuid.uuid4().hex
 
     await Token.create(
@@ -138,5 +132,3 @@ async def login(login_data: LoginRequest, response: Response):
 @router.get("/me")
 async def get_current_user_info(current_user: User = Depends(get_current_user)):
     return UserResponse.from_user(current_user)
-
-

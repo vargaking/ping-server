@@ -1,19 +1,13 @@
-from fastapi import APIRouter, HTTPException, status, Request
+from fastapi import APIRouter, HTTPException, status, Request, Depends
 from typing import List, Optional
 from pydantic import BaseModel
 from datetime import datetime
 from ..models.User import User
+from ..middleware import get_current_user
 from fastapi import UploadFile, File
 from ..services.storage import storage_service
 
 router = APIRouter(prefix="/users", tags=["users"])
-
-
-class UserCreate(BaseModel):
-    username: str
-    password: str
-    public_key: Optional[str] = None
-    profile: dict = {}
 
 
 class UserUpdate(BaseModel):
@@ -41,22 +35,14 @@ class UserResponse(BaseModel):
         )
 
 
-@router.post("/", response_model=UserResponse, status_code=status.HTTP_201_CREATED)
-async def create_user(user: UserCreate):
-    user_data = user.model_dump()
-    password = user_data.pop('password')
-    user_obj = await User.create_with_password(password=password, **user_data)
-    return UserResponse.from_user(user_obj)
-
-
 @router.get("/", response_model=List[UserResponse])
-async def get_users():
+async def get_users(current_user: User = Depends(get_current_user)):
     users = await User.all()
     return [UserResponse.from_user(user) for user in users]
 
 
 @router.get("/{user_id}", response_model=UserResponse)
-async def get_user(user_id: int):
+async def get_user(user_id: int, current_user: User = Depends(get_current_user)):
     user = await User.get_or_none(id=user_id)
     if not user:
         raise HTTPException(status_code=404, detail="User not found")
@@ -64,7 +50,10 @@ async def get_user(user_id: int):
 
 
 @router.put("/{user_id}", response_model=UserResponse)
-async def update_user(user_id: int, user_update: UserUpdate, request: Request):
+async def update_user(user_id: int, user_update: UserUpdate, request: Request, current_user: User = Depends(get_current_user)):
+    if current_user.id != user_id:
+        raise HTTPException(status_code=403, detail="You can only update your own profile")
+
     user = await User.get_or_none(id=user_id)
     if not user:
         raise HTTPException(status_code=404, detail="User not found")
@@ -85,7 +74,10 @@ async def update_user(user_id: int, user_update: UserUpdate, request: Request):
 
 
 @router.delete("/{user_id}", status_code=status.HTTP_204_NO_CONTENT)
-async def delete_user(user_id: int):
+async def delete_user(user_id: int, current_user: User = Depends(get_current_user)):
+    if current_user.id != user_id:
+        raise HTTPException(status_code=403, detail="You can only delete your own account")
+
     user = await User.get_or_none(id=user_id)
     if not user:
         raise HTTPException(status_code=404, detail="User not found")
@@ -93,7 +85,10 @@ async def delete_user(user_id: int):
 
 
 @router.post("/{user_id}/avatar", response_model=UserResponse)
-async def upload_user_avatar(user_id: int, request: Request, file: UploadFile = File(...)):
+async def upload_user_avatar(user_id: int, request: Request, file: UploadFile = File(...), current_user: User = Depends(get_current_user)):
+    if current_user.id != user_id:
+        raise HTTPException(status_code=403, detail="You can only update your own avatar")
+
     user = await User.get_or_none(id=user_id)
     if not user:
         raise HTTPException(status_code=404, detail="User not found")

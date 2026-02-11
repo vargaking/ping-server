@@ -44,13 +44,15 @@ class ServerResponse(BaseModel):
 
 
 @router.post("/", response_model=ServerResponse, status_code=status.HTTP_201_CREATED)
-async def create_server(server: ServerCreate):
+async def create_server(server: ServerCreate, current_user: User = Depends(get_current_user)):
     server_obj = await Server.create(**server.model_dump())
+    # Automatically add the creator as a member
+    await UserToServer.create(user=current_user, server=server_obj)
     return ServerResponse.from_server(server_obj)
 
 
 @router.get("/", response_model=List[ServerResponse])
-async def get_servers():
+async def get_servers(current_user: User = Depends(get_current_user)):
     servers = await Server.all()
     return [ServerResponse.from_server(server) for server in servers]
 
@@ -64,7 +66,7 @@ async def get_my_servers(current_user: User = Depends(get_current_user)):
 
 
 @router.get("/{server_id}", response_model=ServerResponse)
-async def get_server(server_id: int):
+async def get_server(server_id: int, current_user: User = Depends(get_current_user)):
     server = await Server.get_or_none(id=server_id)
     if not server:
         raise HTTPException(status_code=404, detail="Server not found")
@@ -72,10 +74,14 @@ async def get_server(server_id: int):
 
 
 @router.put("/{server_id}", response_model=ServerResponse)
-async def update_server(server_id: int, server_update: ServerUpdate):
+async def update_server(server_id: int, server_update: ServerUpdate, current_user: User = Depends(get_current_user)):
     server = await Server.get_or_none(id=server_id)
     if not server:
         raise HTTPException(status_code=404, detail="Server not found")
+
+    membership = await UserToServer.filter(user=current_user, server=server).first()
+    if not membership:
+        raise HTTPException(status_code=403, detail="Not a member of this server")
 
     update_data = server_update.model_dump(exclude_unset=True)
     await server.update_from_dict(update_data)
@@ -84,18 +90,27 @@ async def update_server(server_id: int, server_update: ServerUpdate):
 
 
 @router.delete("/{server_id}", status_code=status.HTTP_204_NO_CONTENT)
-async def delete_server(server_id: int):
+async def delete_server(server_id: int, current_user: User = Depends(get_current_user)):
     server = await Server.get_or_none(id=server_id)
     if not server:
         raise HTTPException(status_code=404, detail="Server not found")
+
+    membership = await UserToServer.filter(user=current_user, server=server).first()
+    if not membership:
+        raise HTTPException(status_code=403, detail="Not a member of this server")
+
     await server.delete()
 
 
 @router.post("/{server_id}/icon", response_model=ServerResponse)
-async def upload_server_icon(server_id: int, file: UploadFile = File(...)):
+async def upload_server_icon(server_id: int, file: UploadFile = File(...), current_user: User = Depends(get_current_user)):
     server = await Server.get_or_none(id=server_id)
     if not server:
         raise HTTPException(status_code=404, detail="Server not found")
+
+    membership = await UserToServer.filter(user=current_user, server=server).first()
+    if not membership:
+        raise HTTPException(status_code=403, detail="Not a member of this server")
 
     content = await file.read()
     url = await storage_service.upload_file(
