@@ -1,10 +1,11 @@
-from fastapi import APIRouter, HTTPException, status, Request, Depends
-from typing import List, Optional
-from pydantic import BaseModel
 from datetime import datetime
-from ..models.User import User
+from typing import List, Optional
+
+from fastapi import APIRouter, Depends, HTTPException, Request, UploadFile, File, status
+from pydantic import BaseModel
+
 from ..middleware import get_current_user
-from fastapi import UploadFile, File
+from ..models.User import User
 from ..services.storage import storage_service
 
 router = APIRouter(prefix="/users", tags=["users"])

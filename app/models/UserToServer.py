@@ -6,3 +6,7 @@ class UserToServer(models.Model):
     server = fields.ForeignKeyField(
         "models.Server", related_name="server_users")
     created_at = fields.DatetimeField(auto_now_add=True)
+
+    class Meta:
+        table = "user_to_server"
+        unique_together = (("user", "server"),)

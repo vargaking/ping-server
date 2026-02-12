@@ -8,7 +8,7 @@ class Role(models.Model):
     server = fields.ForeignKeyField(
         "models.Server", related_name="roles")
     created_at = fields.DatetimeField(auto_now_add=True)
-    settings = fields.JSONField(default={})
+    settings = fields.JSONField(default=dict)
 
     class Meta:
         table = "roles"

@@ -7,7 +7,7 @@ class User(models.Model):
     username = fields.CharField(max_length=50, unique=True)
     created_at = fields.DatetimeField(auto_now_add=True)
     public_key = fields.TextField(null=True)
-    profile = fields.JSONField(default={})
+    profile = fields.JSONField(default=dict)
     password_hash = fields.TextField()
 
     def set_password(self, password: str):

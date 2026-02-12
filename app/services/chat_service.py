@@ -1,12 +1,20 @@
-from app.services.connection_manager import ConnectionManager
-from app.models.UserToServer import UserToServer
+import logging
+
 from app.models.Message import Message
+from app.models.UserToServer import UserToServer
+from app.services.connection_manager import ConnectionManager
+
+logger = logging.getLogger("app.services.chat_service")
+
 
 class ChatService:
-    def __init__(self, connection_manager: ConnectionManager):
+    """Handles incoming chat messages: broadcasts to server members and persists to DB."""
+
+    def __init__(self, connection_manager: ConnectionManager) -> None:
         self.connection_manager = connection_manager
 
-    async def handle_message(self, message: dict):
+    async def handle_message(self, message: dict) -> None:
+        """Broadcast *message* to other server members and save it to the database."""
         server_id = message.get("server_id")
         channel_id = message.get("channel_id")
         user_id = message.get("user_id")

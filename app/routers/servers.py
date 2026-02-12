@@ -1,13 +1,13 @@
-import logging
 from fastapi import APIRouter, HTTPException, status, Depends
 from typing import List, Optional
+
+from fastapi import APIRouter, Depends, HTTPException, UploadFile, File, status
 from pydantic import BaseModel
-from datetime import datetime
-from ..models.Server import Server
-from ..models.UserToServer import UserToServer
-from ..models.User import User
+
 from ..middleware import get_current_user
-from fastapi import UploadFile, File
+from ..models.Server import Server
+from ..models.User import User
+from ..models.UserToServer import UserToServer
 from ..services.storage import storage_service
 
 router = APIRouter(prefix="/servers", tags=["servers"])

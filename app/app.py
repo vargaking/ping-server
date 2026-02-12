@@ -1,19 +1,21 @@
+import logging
 import os
 
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from tortoise.contrib.fastapi import register_tortoise
-import uvicorn
 
 from app.communication import Communication
 from app.db import TORTOISE_CONFIG
-from app.routers import users, servers, auth, channels, media
+from app.routers import auth, channels, media, servers, users
 from app.utils import lifespan
 from .middleware import auth_middleware
 # Initialize application logging (configures file logging)
 from . import logging_config  # noqa: F401
 
-app = FastAPI(debug=True, lifespan=lifespan)
+logger = logging.getLogger("app")
+
+app = FastAPI(debug=os.getenv("DEBUG", "").lower() == "true", lifespan=lifespan)
 
 # CORS middleware
 app.add_middleware(
@@ -67,10 +69,11 @@ async def websocket_endpoint(websocket: WebSocket):
             data = await websocket.receive_json()
             await comms.message_switch(data, websocket)
     except WebSocketDisconnect:
-        print("WebSocket disconnected")
+        logger.info("WebSocket disconnected")
         await comms.remove_connection_by_websocket(websocket)
 
+
 if __name__ == "__main__":
-    # When running as a module (`python -m app.app`) or with uvicorn, use the module path
-    # This avoids re-import issues when the package isn't on sys.path.
+    import uvicorn
+
     uvicorn.run("app.app:app", host="0.0.0.0", port=8000)

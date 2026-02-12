@@ -1,19 +1,25 @@
+import logging
+
 from fastapi import WebSocket
 
 from app.services.connection_manager import ConnectionManager
 from app.services.voice_manager import VoiceManager
 from app.services.chat_service import ChatService
 
+logger = logging.getLogger("app.communication")
+
+
 class Communication:
-    def __init__(self):
+    """Orchestrates WebSocket message routing across chat and voice services."""
+    def __init__(self) -> None:
         self.connection_manager = ConnectionManager()
         self.voice_manager = VoiceManager(self.connection_manager)
         self.chat_service = ChatService(self.connection_manager)
 
-    def add_connection(self, user_id, websocket):
+    def add_connection(self, user_id: int, websocket: WebSocket) -> None:
         self.connection_manager.add_connection(user_id, websocket)
 
-    async def remove_connection_by_user_id(self, user_id):
+    async def remove_connection_by_user_id(self, user_id: int) -> None:
         self.connection_manager.remove_connection_by_user_id(user_id)
         await self.voice_manager.cleanup_user(user_id)
 
@@ -56,5 +62,5 @@ class Communication:
         for ws in websockets:
             try:
                 await ws.send_json(message)
-            except Exception as e:
-                print(f"Failed to send user update to websocket: {e}")
+            except Exception:
+                logger.warning("Failed to send user update to websocket", exc_info=True)

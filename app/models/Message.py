@@ -10,7 +10,7 @@ class Message(models.Model):
     server = fields.ForeignKeyField("models.Server", related_name="messages")
     channel = fields.ForeignKeyField("models.Channel", related_name="messages")
     timestamp = fields.DatetimeField()
-    metadata = fields.JSONField(default={})
+    metadata = fields.JSONField(default=dict)
 
     def __str__(self):
         return f"Message by {self.author.username} in {self.channel.name}"

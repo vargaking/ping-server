@@ -1,21 +1,27 @@
+import logging
+
 from fastapi import WebSocket
+
+from app.models.User import User
+from app.models.UserToServer import UserToServer
 from app.services.connection_manager import ConnectionManager
 
-class VoiceManager:
-    def __init__(self, connection_manager: ConnectionManager):
-        self.connection_manager = connection_manager
-        # Track voice participants: {channel_id: {user_id: user_data}}
-        self.voice_channels = {}
-        # Track producers: {channel_id: {user_id: producer_id}}
-        self.channel_producers = {}
+logger = logging.getLogger("app.services.voice_manager")
 
-    async def handle_voice_join(self, message: dict, websocket: WebSocket):
+
+class VoiceManager:
+    """Manages voice channel state and signaling between participants."""
+
+    def __init__(self, connection_manager: ConnectionManager) -> None:
+        self.connection_manager = connection_manager
+        self.voice_channels: dict[int, dict[int, dict]] = {}
+        self.channel_producers: dict[int, dict[int, str]] = {}
+
+    async def handle_voice_join(self, message: dict, websocket: WebSocket) -> None:
         user_id = message.get("user_id")
         channel_id = message.get("channel_id")
         server_id = message.get("server_id")
         
-        # Fetch user details
-        from app.models.User import User
         user = await User.get_or_none(id=user_id)
         user_data = {
             "id": user_id,
@@ -51,10 +57,9 @@ class VoiceManager:
                             "userId": str(other_user_id),
                             "channelId": channel_id
                         })
-                        print(f"Sent existing producer {producer_id} from user {other_user_id} to new joiner {user_id}")
+                        logger.debug("Sent existing producer %s from user %s to new joiner %s", producer_id, other_user_id, user_id)
 
         # Notify others in the server that someone joined
-        from app.models.UserToServer import UserToServer
         users_in_server = await UserToServer.filter(
             server_id=server_id).values_list('user_id', flat=True)
 
@@ -71,14 +76,19 @@ class VoiceManager:
             if ws and uid != user_id:
                 await ws.send_json(broadcast_msg)
 
-    async def handle_voice_leave(self, message: dict, websocket: WebSocket):
+    async def handle_voice_leave(self, message: dict, websocket: WebSocket) -> None:
         user_id = message.get("user_id")
         channel_id = message.get("channel_id")
         server_id = message.get("server_id")
 
         await self._remove_user_from_voice(user_id, channel_id, server_id)
 
-    async def _remove_user_from_voice(self, user_id, channel_id, server_id=None):
+    async def _remove_user_from_voice(
+        self,
+        user_id: int,
+        channel_id: int,
+        server_id: int | None = None,
+    ) -> None:
         # Remove from voice channel tracking
         if channel_id in self.voice_channels:
             self.voice_channels[channel_id].pop(user_id, None)
@@ -103,7 +113,6 @@ class VoiceManager:
         }
 
         if server_id:
-            from app.models.UserToServer import UserToServer
             users_in_server = await UserToServer.filter(
                 server_id=server_id).values_list('user_id', flat=True)
             for uid in users_in_server:
@@ -111,17 +120,15 @@ class VoiceManager:
                 if ws and uid != user_id:
                     await ws.send_json(broadcast_msg)
         else:
-             # Fallback: notify just the people in the channel (if we knew who they were, but we just removed the user)
-             # Ideally we should always have server_id.
-             pass
+            pass  # Cannot broadcast without server_id
 
-    async def handle_producer_created(self, message: dict, websocket: WebSocket):
+    async def handle_producer_created(self, message: dict, websocket: WebSocket) -> None:
         """Broadcast new producer to other users in the same voice channel"""
         user_id = message.get("user_id")
         channel_id = message.get("channel_id")
         producer_id = message.get("producer_id")
         
-        print(f"Producer created by user {user_id} in channel {channel_id}: {producer_id}")
+        logger.info("Producer created by user %s in channel %s: %s", user_id, channel_id, producer_id)
         
         # Store producer
         if channel_id not in self.channel_producers:
@@ -130,7 +137,7 @@ class VoiceManager:
         
         # Get all users in this voice channel
         if channel_id not in self.voice_channels:
-            print(f"Warning: Channel {channel_id} not found in voice_channels")
+            logger.warning("Channel %s not found in voice_channels", channel_id)
             return
             
         voice_users = self.voice_channels[channel_id].keys()
@@ -142,19 +149,17 @@ class VoiceManager:
             "channelId": channel_id
         }
         
-        print(f"Broadcasting new_producer to {len(voice_users)} users in channel {channel_id}")
-        
-        # Notify all users in the voice channel (except the producer)
+        logger.debug("Broadcasting new_producer to %d users in channel %s", len(list(voice_users)), channel_id)
+
         for uid in voice_users:
             if uid != user_id:
                 ws = self.connection_manager.get_websocket(uid)
                 if ws:
                     await ws.send_json(broadcast_msg)
-                    print(f"  -> Sent to user {uid}")
+                    logger.debug("Sent new_producer to user %s", uid)
 
-    async def handle_voice_signal(self, message: dict, websocket: WebSocket):
-        # Relay signaling messages (offer, answer, ice-candidate, etc.)
-        # Target user is usually specified in the message
+    async def handle_voice_signal(self, message: dict, websocket: WebSocket) -> None:
+        """Relay signaling messages (offer, answer, ICE candidates) to the target user."""
         target_user_id = message.get("target_user_id")
         
         if target_user_id:
@@ -163,20 +168,10 @@ class VoiceManager:
                 # Forward the message exactly as is
                 await target_ws.send_json(message)
 
-    async def cleanup_user(self, user_id):
-        # Clean up voice channels and notify others
+    async def cleanup_user(self, user_id: int) -> None:
+        """Remove a user from all voice channels and notify remaining participants."""
         for channel_id in list(self.voice_channels.keys()):
             if user_id in self.voice_channels[channel_id]:
-                # Notify others in this channel before removing
-                # We might not know server_id here easily without looking it up or storing it.
-                # For now, let's try to broadcast to the channel participants.
-                
-                # We need to find server_id to do a proper broadcast if we want to follow the pattern
-                # But for now, let's just remove and notify channel members.
-                
-                # Actually, the original code broadcasted to the whole server? 
-                # "Notify others in this channel before removing" -> _broadcast_user_left_voice
-                
                 await self._broadcast_user_left_voice(user_id, channel_id)
                 
                 del self.voice_channels[channel_id][user_id]
@@ -190,8 +185,8 @@ class VoiceManager:
                 if not self.channel_producers[channel_id]:
                     del self.channel_producers[channel_id]
 
-    async def _broadcast_user_left_voice(self, user_id, channel_id):
-        """Helper to broadcast user_left_voice to all connected users in voice channel"""
+    async def _broadcast_user_left_voice(self, user_id: int, channel_id: int) -> None:
+        """Notify remaining voice channel participants that a user left."""
         if channel_id not in self.voice_channels:
             return
             
@@ -201,7 +196,7 @@ class VoiceManager:
             "channel_id": channel_id
         }
         
-        print(f"Broadcasting user_left_voice for user {user_id} in channel {channel_id}")
+        logger.debug("Broadcasting user_left_voice for user %s in channel %s", user_id, channel_id)
         
         # Notify all remaining users in the voice channel
         for uid in list(self.voice_channels[channel_id].keys()):
@@ -209,4 +204,4 @@ class VoiceManager:
                 ws = self.connection_manager.get_websocket(uid)
                 if ws:
                     await ws.send_json(broadcast_msg)
-                    print(f"  -> Notified user {uid}")
+                    logger.debug("Notified user %s of voice leave", uid)

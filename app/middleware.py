@@ -1,8 +1,10 @@
-from fastapi import Request, HTTPException, status
-from .models.User import User
-from .models.Token import Token
-from typing import Optional
 import logging
+from typing import Optional
+
+from fastapi import HTTPException, Request, status
+
+from .models.Token import Token
+from .models.User import User
 
 logger = logging.getLogger("app.middleware")
 
@@ -28,7 +30,7 @@ async def auth_middleware(request: Request, call_next):
             token_obj = await Token.get(token=token).prefetch_related('user')
             user = token_obj.user
         except Exception as e:
-            logger.warning(f"Invalid token: {e}")
+            logger.warning("Invalid token: %s", e)
 
     request.state.user = user
 

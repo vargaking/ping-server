@@ -1,11 +1,17 @@
+import logging
 import os
-from google.cloud import storage
 import uuid
 from typing import Optional
 
+from google.cloud import storage
+
+logger = logging.getLogger("app.services.storage")
+
 
 class StorageService:
-    def __init__(self):
+    """Handles file uploads to Google Cloud Storage."""
+
+    def __init__(self) -> None:
         self.bucket_name = os.getenv("GOOGLE_STORAGE_BUCKET")
         self.project_id = os.getenv("GOOGLE_CLOUD_PROJECT")
         self.client = None
@@ -15,17 +21,15 @@ class StorageService:
             try:
                 self.client = storage.Client(project=self.project_id)
                 self.bucket = self.client.bucket(self.bucket_name)
-            except Exception as e:
-                print(f"Failed to initialize StorageService: {e}")
+            except Exception:
+                logger.error("Failed to initialize StorageService", exc_info=True)
 
     async def upload_file(self, file_content: bytes, content_type: str, destination_path: str) -> Optional[str]:
         if not self.bucket:
-            print("StorageService not initialized")
+            logger.warning("StorageService not initialized — skipping upload")
             return None
 
         try:
-            # Generate a unique filename to prevent caching issues on updates
-            # while allowing caching for the specific URL
             filename = f"{uuid.uuid4()}-{destination_path}"
             blob = self.bucket.blob(filename)
 
@@ -36,8 +40,8 @@ class StorageService:
 
             # Return the public URL
             return blob.public_url
-        except Exception as e:
-            print(f"Failed to upload file: {e}")
+        except Exception:
+            logger.error("Failed to upload file to %s", destination_path, exc_info=True)
             return None
 
 
