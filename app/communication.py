@@ -2,6 +2,7 @@ import logging
 
 from fastapi import WebSocket
 
+from app.models.UserToServer import UserToServer
 from app.services.connection_manager import ConnectionManager
 from app.services.voice_manager import VoiceManager
 from app.services.chat_service import ChatService
@@ -48,19 +49,38 @@ class Communication:
         elif message_type == "voice_signal":
             await self.voice_manager.handle_voice_signal(message, websocket)
 
-    async def broadcast_user_update(self, user_data: dict):
-        """Broadcast user update to all connected clients"""
+    async def notify_user_invalidate(self, user_id: int):
+        """Notify related users that a user's profile has changed.
+
+        Sends a lightweight invalidation message (just the user_id) to users
+        who share a server with the updated user. Clients should fetch the
+        updated profile via REST if they need the new data.
+        """
+        # Find all servers the user belongs to
+        user_server_ids = await UserToServer.filter(
+            user_id=user_id
+        ).values_list("server_id", flat=True)
+
+        # Find all users in those servers (excluding the user themselves)
+        related_user_ids = set(
+            await UserToServer.filter(
+                server_id__in=user_server_ids
+            ).values_list("user_id", flat=True)
+        ) - {user_id}
+
         message = {
-            "type": "user_updated",
-            "user": user_data
+            "type": "user_invalidate",
+            "user_id": user_id,
         }
-        
-        # Iterate over all connected websockets
-        # We need to copy values to avoid runtime error if dictionary changes during iteration
-        websockets = list(self.connection_manager.user_to_websocket.values())
-        
-        for ws in websockets:
-            try:
-                await ws.send_json(message)
-            except Exception:
-                logger.warning("Failed to send user update to websocket", exc_info=True)
+
+        for uid in related_user_ids:
+            ws = self.connection_manager.get_websocket(uid)
+            if ws:
+                try:
+                    await ws.send_json(message)
+                except Exception:
+                    logger.warning(
+                        "Failed to send user invalidate to user %s",
+                        uid,
+                        exc_info=True,
+                    )

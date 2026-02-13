@@ -66,10 +66,9 @@ async def update_user(user_id: int, user_update: UserUpdate, request: Request, c
     await user.update_from_dict(update_data)
     await user.save()
 
-    # Broadcast update
+    # Notify related users that this profile changed
     if hasattr(request.app.state, "comms"):
-        user_response = UserResponse.from_user(user)
-        await request.app.state.comms.broadcast_user_update(user_response.model_dump())
+        await request.app.state.comms.notify_user_invalidate(user_id)
 
     return UserResponse.from_user(user)
 
@@ -110,9 +109,8 @@ async def upload_user_avatar(user_id: int, request: Request, file: UploadFile = 
     user.profile = profile
     await user.save()
 
-    # Broadcast update
+    # Notify related users that this profile changed
     if hasattr(request.app.state, "comms"):
-        user_response = UserResponse.from_user(user)
-        await request.app.state.comms.broadcast_user_update(user_response.model_dump())
+        await request.app.state.comms.notify_user_invalidate(user_id)
 
     return UserResponse.from_user(user)
