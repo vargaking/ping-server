@@ -119,4 +119,12 @@ async def create_channel(
         server=server,
     )
 
+    # Add the channel to the channel_order in server settings
+    server_settings = server.server_settings or {}
+    channel_order = server_settings.get("channel_order", [])
+    channel_order.append(channel.id)
+    server_settings["channel_order"] = channel_order
+    server.server_settings = server_settings
+    await server.save()
+
     return ChannelResponse.from_channel(channel)
