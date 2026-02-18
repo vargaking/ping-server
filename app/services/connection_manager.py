@@ -29,3 +29,6 @@ class ConnectionManager:
 
     def get_user_id(self, websocket: WebSocket) -> int | None:
         return self.websocket_to_user.get(websocket)
+
+    def is_online(self, user_id: int) -> bool:
+        return user_id in self.user_to_websocket
