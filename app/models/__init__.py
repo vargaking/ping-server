@@ -6,6 +6,7 @@ from .UserToServer import UserToServer
 from .Channel import Channel
 from .Message import Message
 from .Token import Token
+from .Invite import Invite
 
 __all__ = ["Role", "User", "Server", "RoleToUser", "UserToServer",
-           "Channel", "Message", "Token"]
+           "Channel", "Message", "Token", "Invite"]

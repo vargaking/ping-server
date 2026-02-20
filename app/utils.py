@@ -53,3 +53,10 @@ async def call_media_server(
     if response.status_code == 204:
         return {}
     return response.json()
+
+
+async def require_membership(user, server):
+    from .models.UserToServer import UserToServer
+    membership = await UserToServer.filter(user=user, server=server).first()
+    if not membership:
+        raise HTTPException(status_code=403, detail="Not a member of this server")

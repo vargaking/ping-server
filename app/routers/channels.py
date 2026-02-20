@@ -11,6 +11,7 @@ from ..models.Message import Message
 from ..models.Server import Server
 from ..models.User import User
 from ..models.UserToServer import UserToServer
+from ..utils import require_membership
 
 logger = logging.getLogger("app.routers.channels")
 
@@ -32,28 +33,6 @@ class ChannelResponse(BaseModel):
             type=channel.type,
         )
 
-
-async def _get_server_for_member(
-    server_id: int, user_id: int
-) -> Server:
-    """Return the server if it exists and the user is a member, else raise 404."""
-    server = await Server.get_or_none(id=server_id)
-    if not server:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail="Server not found",
-        )
-
-    user_server_relation = await UserToServer.filter(
-        user_id=user_id, server_id=server.id
-    ).first()
-    if not user_server_relation:
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail="You are not a member of this server",
-        )
-
-    return server
 
 
 @router.get("/messages")
@@ -97,7 +76,10 @@ async def get_channels(
     server_id: int,
     current_user: User = Depends(get_current_user),
 ):
-    server = await _get_server_for_member(server_id, current_user.id)
+    server = await Server.get_or_none(id=server_id)
+    if not server:
+        raise HTTPException(status_code=404, detail="Server not found")
+    await require_membership(current_user, server)
 
     channels = await Channel.filter(server_id=server.id).all()
     return [ChannelResponse.from_channel(channel) for channel in channels]
@@ -110,7 +92,10 @@ async def create_channel(
     channel_type: str = "text",
     current_user: User = Depends(get_current_user),
 ):
-    server = await _get_server_for_member(server_id, current_user.id)
+    server = await Server.get_or_none(id=server_id)
+    if not server:
+        raise HTTPException(status_code=404, detail="Server not found")
+    await require_membership(current_user, server)
 
     channel = await Channel.create(
         name=channel_name,

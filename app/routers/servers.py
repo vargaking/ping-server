@@ -9,6 +9,7 @@ from ..models.Server import Server
 from ..models.User import User
 from ..models.UserToServer import UserToServer
 from ..services.storage import storage_service
+from ..utils import require_membership
 
 router = APIRouter(prefix="/servers", tags=["servers"])
 
@@ -79,9 +80,7 @@ async def update_server(server_id: int, server_update: ServerUpdate, current_use
     if not server:
         raise HTTPException(status_code=404, detail="Server not found")
 
-    membership = await UserToServer.filter(user=current_user, server=server).first()
-    if not membership:
-        raise HTTPException(status_code=403, detail="Not a member of this server")
+    await require_membership(current_user, server)
 
     update_data = server_update.model_dump(exclude_unset=True)
     await server.update_from_dict(update_data)
@@ -95,9 +94,7 @@ async def delete_server(server_id: int, current_user: User = Depends(get_current
     if not server:
         raise HTTPException(status_code=404, detail="Server not found")
 
-    membership = await UserToServer.filter(user=current_user, server=server).first()
-    if not membership:
-        raise HTTPException(status_code=403, detail="Not a member of this server")
+    await require_membership(current_user, server)
 
     await server.delete()
 
@@ -108,9 +105,7 @@ async def upload_server_icon(server_id: int, file: UploadFile = File(...), curre
     if not server:
         raise HTTPException(status_code=404, detail="Server not found")
 
-    membership = await UserToServer.filter(user=current_user, server=server).first()
-    if not membership:
-        raise HTTPException(status_code=403, detail="Not a member of this server")
+    await require_membership(current_user, server)
 
     content = await file.read()
     url = await storage_service.upload_file(
