@@ -1,3 +1,4 @@
+import os
 import uuid
 
 from fastapi import APIRouter, Depends, HTTPException, Response, status
@@ -45,12 +46,13 @@ async def register(user_data: RegisterRequest, response: Response):
     access_token = uuid.uuid4().hex
     await Token.create(user_id=user.id, token=access_token)
 
+    is_dev = os.getenv("DEBUG", "").lower() == "true"
     response.set_cookie(
         key="access_token",
         value=access_token,
         httponly=True,
-        secure=False,
-        samesite="lax",
+        secure=not is_dev,
+        samesite="lax" if is_dev else "none",
         path="/"
     )
 
@@ -73,12 +75,13 @@ async def login(login_data: LoginRequest, response: Response):
         token=access_token
     )
 
+    is_dev = os.getenv("DEBUG", "").lower() == "true"
     response.set_cookie(
         key="access_token",
         value=access_token,
         httponly=True,
-        secure=False,
-        samesite="lax",
+        secure=not is_dev,
+        samesite="lax" if is_dev else "none",
         path="/"
     )
 
