@@ -10,6 +10,7 @@ from ..models.User import User
 from ..models.UserToServer import UserToServer
 from ..services.storage import storage_service
 from ..utils import require_membership
+from .users import UserResponse
 
 router = APIRouter(prefix="/servers", tags=["servers"])
 
@@ -25,13 +26,11 @@ class ServerUpdate(BaseModel):
     server_profile: Optional[dict] = None
     server_settings: Optional[dict] = None
 
-
-class ServerResponse(BaseModel):
+class ServerPublicResponse(BaseModel):
     id: int
     name: str
     created_at: datetime
     server_profile: dict
-    server_settings: dict
 
     @classmethod
     def from_server(cls, server: Server):
@@ -40,7 +39,31 @@ class ServerResponse(BaseModel):
             name=server.name,
             created_at=server.created_at,
             server_profile=server.server_profile,
-            server_settings=server.server_settings
+        )
+
+
+class ServerResponse(BaseModel):
+    id: int
+    name: str
+    created_at: datetime
+    server_profile: dict
+    server_settings: dict
+    members: List[UserResponse] = []
+
+    @classmethod
+    def from_server(cls, server: Server):
+        members = []
+        for relation in server.server_users:
+            if relation.user:
+                members.append(UserResponse.from_user(relation.user))
+
+        return cls(
+            id=server.id,
+            name=server.name,
+            created_at=server.created_at,
+            server_profile=server.server_profile,
+            server_settings=server.server_settings,
+            members=members
         )
 
 
@@ -49,32 +72,33 @@ async def create_server(server: ServerCreate, current_user: User = Depends(get_c
     server_obj = await Server.create(**server.model_dump())
     # Automatically add the creator as a member
     await UserToServer.create(user=current_user, server=server_obj)
+    await server_obj.fetch_related('server_users__user')
     return ServerResponse.from_server(server_obj)
 
 
-@router.get("/", response_model=List[ServerResponse])
+@router.get("/", response_model=List[ServerPublicResponse])
 async def get_servers(current_user: User = Depends(get_current_user)):
     servers = await Server.all()
-    return [ServerResponse.from_server(server) for server in servers]
+    return [ServerPublicResponse.from_server(server) for server in servers]
 
 
 @router.get("/me", response_model=List[ServerResponse])
 async def get_my_servers(current_user: User = Depends(get_current_user)):
     # Return servers the current user belongs to
-    user_server_relations = await UserToServer.filter(user=current_user).prefetch_related("server")
+    user_server_relations = await UserToServer.filter(user=current_user).prefetch_related("server__server_users__user")
     servers = [relation.server for relation in user_server_relations]
     return [ServerResponse.from_server(server) for server in servers]
 
 
 @router.get("/{server_id}", response_model=ServerResponse)
 async def get_server(server_id: int, current_user: User = Depends(get_current_user)):
-    server = await Server.get_or_none(id=server_id)
+    server = await Server.get_or_none(id=server_id).prefetch_related('server_users__user')
     if not server:
         raise HTTPException(status_code=404, detail="Server not found")
     return ServerResponse.from_server(server)
 
 
-@router.put("/{server_id}", response_model=ServerResponse)
+@router.put("/{server_id}", response_model=ServerPublicResponse)
 async def update_server(server_id: int, server_update: ServerUpdate, current_user: User = Depends(get_current_user)):
     server = await Server.get_or_none(id=server_id)
     if not server:
@@ -85,7 +109,7 @@ async def update_server(server_id: int, server_update: ServerUpdate, current_use
     update_data = server_update.model_dump(exclude_unset=True)
     await server.update_from_dict(update_data)
     await server.save()
-    return ServerResponse.from_server(server)
+    return ServerPublicResponse.from_server(server)
 
 
 @router.delete("/{server_id}", status_code=status.HTTP_204_NO_CONTENT)
@@ -99,7 +123,7 @@ async def delete_server(server_id: int, current_user: User = Depends(get_current
     await server.delete()
 
 
-@router.post("/{server_id}/icon", response_model=ServerResponse)
+@router.post("/{server_id}/icon", response_model=ServerPublicResponse)
 async def upload_server_icon(server_id: int, file: UploadFile = File(...), current_user: User = Depends(get_current_user)):
     server = await Server.get_or_none(id=server_id)
     if not server:
@@ -119,4 +143,4 @@ async def upload_server_icon(server_id: int, file: UploadFile = File(...), curre
 
     server.server_profile['icon'] = url
     await server.save()
-    return ServerResponse.from_server(server)
+    return ServerPublicResponse.from_server(server)
