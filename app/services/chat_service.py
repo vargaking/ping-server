@@ -1,3 +1,4 @@
+import json
 import logging
 
 from app.models.Message import Message
@@ -29,10 +30,15 @@ class ChatService:
                 if websocket:
                     await websocket.send_json(message)
 
+        content_payload = message.get("content")
+        
+        if isinstance(content_payload, dict):
+            content_payload = json.dumps(content_payload)
+
         # Save message to database
         await Message.create(
             uuid=message.get("id"),
-            content=message.get("content"),
+            content=content_payload,
             author_id=user_id,
             server_id=server_id,
             channel_id=channel_id,
