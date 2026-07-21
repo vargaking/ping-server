@@ -3,6 +3,7 @@ import os
 
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.staticfiles import StaticFiles
 from tortoise.contrib.fastapi import register_tortoise
 
 from app.communication import Communication
@@ -42,6 +43,15 @@ app.include_router(servers.router)
 app.include_router(channels.router)
 app.include_router(media.router)
 app.include_router(invites.router)
+
+# Serve uploaded media from local disk (avatars, server icons).
+# storage.py writes into MEDIA_ROOT and returns URLs prefixed with MEDIA_BASE_URL;
+# this mount serves that same directory at MEDIA_MOUNT_PATH (the path portion of
+# MEDIA_BASE_URL). For higher throughput, Nginx can serve MEDIA_ROOT directly.
+_media_root = os.getenv("MEDIA_ROOT", "media")
+_media_mount = os.getenv("MEDIA_MOUNT_PATH", "/media")
+os.makedirs(_media_root, exist_ok=True)
+app.mount(_media_mount, StaticFiles(directory=_media_root), name="media")
 
 # Database
 register_tortoise(
