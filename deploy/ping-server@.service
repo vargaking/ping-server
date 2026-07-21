@@ -1,0 +1,38 @@
+[Unit]
+# systemd template unit. Instantiate per environment:
+#   ping-server@production  ->  /opt/ping-server,         port 8000
+#   ping-server@staging     ->  /opt/ping-server-staging, port 8001
+# The instance name (%i) selects the directory and env file.
+Description=ping-server [%i] (FastAPI + Gunicorn/Uvicorn)
+After=network.target
+
+[Service]
+Type=simple
+User=ping
+Group=ping
+
+# %i is the instance name (production|staging). Each environment lives in its
+# own directory and carries its own .env (which sets GUNICORN_BIND per env).
+WorkingDirectory=/opt/ping-server-%i
+EnvironmentFile=/opt/ping-server-%i/.env
+
+ExecStart=/opt/ping-server-%i/venv/bin/gunicorn -c /opt/ping-server-%i/deploy/gunicorn.conf.py app.app:app
+
+Restart=on-failure
+RestartSec=3
+KillMode=mixed
+TimeoutStopSec=30
+
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=ping-server-%i
+
+# --- Hardening (safe defaults; loosen if something breaks) ---
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=full
+ProtectHome=true
+ReadWritePaths=/opt/ping-server-%i/logs
+
+[Install]
+WantedBy=multi-user.target

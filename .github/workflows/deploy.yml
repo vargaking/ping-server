@@ -1,0 +1,75 @@
+name: Deploy ping-server
+
+on:
+  push:
+    branches: [master, staging]
+  workflow_dispatch:
+    inputs:
+      run_migrations:
+        description: "Run DB migrations (staging shares prod DB — use with care)"
+        type: boolean
+        default: false
+
+concurrency:
+  # Serialize deploys per environment.
+  group: deploy-${{ github.ref_name }}
+  cancel-in-progress: false
+
+jobs:
+  test:
+    name: Test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+          cache: pip
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Compile-check sources
+        run: python -m compileall app
+
+      # Add your real test suite here, e.g.:
+      # - name: Run tests
+      #   run: pytest
+
+  deploy:
+    name: Deploy
+    needs: test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Select environment
+        id: env
+        run: |
+          if [ "${{ github.ref_name }}" = "master" ]; then
+            echo "environment=production" >> "$GITHUB_OUTPUT"
+            echo "run_migrations=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "environment=staging" >> "$GITHUB_OUTPUT"
+            # Staging shares the prod DB: migrations OFF unless manually requested.
+            echo "run_migrations=${{ github.event.inputs.run_migrations || 'false' }}" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Configure SSH
+        run: |
+          mkdir -p ~/.ssh
+          echo "${{ secrets.DEPLOY_SSH_KEY }}" > ~/.ssh/id_deploy
+          chmod 600 ~/.ssh/id_deploy
+          ssh-keyscan -p "${{ secrets.DEPLOY_SSH_PORT || 22 }}" -H "${{ secrets.DEPLOY_HOST }}" >> ~/.ssh/known_hosts 2>/dev/null
+
+      - name: Deploy over SSH
+        run: |
+          ssh -i ~/.ssh/id_deploy \
+              -p "${{ secrets.DEPLOY_SSH_PORT || 22 }}" \
+              "${{ secrets.DEPLOY_USER }}@${{ secrets.DEPLOY_HOST }}" \
+              "ENVIRONMENT='${{ steps.env.outputs.environment }}' RUN_MIGRATIONS='${{ steps.env.outputs.run_migrations }}' bash -s" \
+              < scripts/deploy.sh

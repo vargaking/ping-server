@@ -126,3 +126,7 @@ dmypy.json
 .pyre/
 
 gcloud-key.json
+
+# ssh keys
+*.pub
+*.pem
