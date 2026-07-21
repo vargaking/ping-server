@@ -43,10 +43,10 @@ jobs:
   deploy:
     name: Deploy
     needs: test
-    runs-on: ubuntu-latest
+    # Runs on the self-hosted runner installed on the server itself, so the
+    # deploy is a local operation — no SSH, no inbound network from GitHub.
+    runs-on: [self-hosted, ping-server]
     steps:
-      - uses: actions/checkout@v4
-
       - name: Select environment
         id: env
         run: |
@@ -59,17 +59,15 @@ jobs:
             echo "run_migrations=${{ github.event.inputs.run_migrations || 'false' }}" >> "$GITHUB_OUTPUT"
           fi
 
-      - name: Configure SSH
+      - name: Deploy locally
+        env:
+          ENVIRONMENT: ${{ steps.env.outputs.environment }}
+          RUN_MIGRATIONS: ${{ steps.env.outputs.run_migrations }}
         run: |
-          mkdir -p ~/.ssh
-          echo "${{ secrets.DEPLOY_SSH_KEY }}" > ~/.ssh/id_deploy
-          chmod 600 ~/.ssh/id_deploy
-          ssh-keyscan -p "${{ secrets.DEPLOY_SSH_PORT || 22 }}" -H "${{ secrets.DEPLOY_HOST }}" >> ~/.ssh/known_hosts 2>/dev/null
-
-      - name: Deploy over SSH
-        run: |
-          ssh -i ~/.ssh/id_deploy \
-              -p "${{ secrets.DEPLOY_SSH_PORT || 22 }}" \
-              "${{ secrets.DEPLOY_USER }}@${{ secrets.DEPLOY_HOST }}" \
-              "ENVIRONMENT='${{ steps.env.outputs.environment }}' RUN_MIGRATIONS='${{ steps.env.outputs.run_migrations }}' bash -s" \
-              < scripts/deploy.sh
+          # deploy.sh lives in the target environment's checkout on this box;
+          # run that copy so the script always matches the deployed code.
+          case "$ENVIRONMENT" in
+            production) APP_DIR=/opt/ping-server-production ;;
+            staging)    APP_DIR=/opt/ping-server-staging ;;
+          esac
+          ENVIRONMENT="$ENVIRONMENT" RUN_MIGRATIONS="$RUN_MIGRATIONS" bash "$APP_DIR/scripts/deploy.sh"
