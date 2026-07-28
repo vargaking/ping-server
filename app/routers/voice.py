@@ -1,3 +1,4 @@
+import json
 import os
 from datetime import timedelta
 
@@ -69,6 +70,8 @@ async def create_voice_token(
         api.AccessToken(LIVEKIT_API_KEY, LIVEKIT_API_SECRET)
         .with_identity(str(current_user.id))
         .with_name(current_user.username)
+        # Carry the user's profile so peers can render avatars without a lookup.
+        .with_metadata(json.dumps(current_user.profile or {}))
         .with_ttl(timedelta(seconds=TOKEN_TTL_SECONDS))
         .with_grants(grant)
         .to_jwt()
