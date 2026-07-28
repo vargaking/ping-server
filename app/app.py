@@ -8,7 +8,7 @@ from tortoise.contrib.fastapi import register_tortoise
 
 from app.communication import Communication
 from app.db import TORTOISE_CONFIG
-from app.routers import auth, channels, invites, media, servers, users, voice
+from app.routers import auth, channels, invites, servers, users, voice
 from app.utils import lifespan
 from .middleware import auth_middleware
 # Initialize application logging (configures file logging)
@@ -41,7 +41,6 @@ app.include_router(auth.router)
 app.include_router(users.router)
 app.include_router(servers.router)
 app.include_router(channels.router)
-app.include_router(media.router)
 app.include_router(invites.router)
 app.include_router(voice.router)
 

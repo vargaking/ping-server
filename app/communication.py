@@ -4,7 +4,6 @@ from fastapi import WebSocket
 
 from app.models.UserToServer import UserToServer
 from app.services.connection_manager import ConnectionManager
-from app.services.voice_manager import VoiceManager
 from app.services.chat_service import ChatService
 
 logger = logging.getLogger("app.communication")
@@ -15,7 +14,6 @@ class Communication:
 
     def __init__(self) -> None:
         self.connection_manager = ConnectionManager()
-        self.voice_manager = VoiceManager(self.connection_manager)
         self.chat_service = ChatService(self.connection_manager)
 
     def add_connection(self, user_id: int, websocket: WebSocket) -> None:
@@ -23,14 +21,12 @@ class Communication:
 
     async def remove_connection_by_user_id(self, user_id: int) -> None:
         self.connection_manager.remove_connection_by_user_id(user_id)
-        await self.voice_manager.cleanup_user(user_id)
         await self._notify_presence(user_id, online=False)
 
     async def remove_connection_by_websocket(self, websocket: WebSocket):
         user_id = self.connection_manager.remove_connection_by_websocket(
             websocket)
         if user_id:
-            await self.voice_manager.cleanup_user(user_id)
             await self._notify_presence(user_id, online=False)
 
     async def message_switch(self, message: dict, websocket: WebSocket):
@@ -45,14 +41,6 @@ class Communication:
             await self.remove_connection_by_user_id(user_id)
         elif message_type == "message":
             await self.chat_service.handle_message(message)
-        elif message_type == "join_voice":
-            await self.voice_manager.handle_voice_join(message, websocket)
-        elif message_type == "leave_voice":
-            await self.voice_manager.handle_voice_leave(message, websocket)
-        elif message_type == "producer_created":
-            await self.voice_manager.handle_producer_created(message, websocket)
-        elif message_type == "voice_signal":
-            await self.voice_manager.handle_voice_signal(message, websocket)
 
     @staticmethod
     async def get_related_user_ids(user_id: int) -> set[int]:
