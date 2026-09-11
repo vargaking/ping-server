@@ -56,7 +56,23 @@ pip install -r requirements.txt
 
 if [ "$RUN_MIGRATIONS" = "true" ]; then
   echo "==> Running database migrations (aerich upgrade)"
-  aerich upgrade
+  # The Supabase pooler occasionally returns a transient "Tenant or user not
+  # found" on a fresh connect; retry a few times before giving up so a single
+  # flake doesn't abort the deploy (and skip the restart) for nothing.
+  migration_ok=0
+  for attempt in 1 2 3 4 5; do
+    if aerich upgrade; then
+      migration_ok=1
+      break
+    fi
+    echo "   migration attempt $attempt/5 failed; retrying in 5s..."
+    sleep 5
+  done
+  if [ "$migration_ok" != "1" ]; then
+    echo "!! Migrations failed after 5 attempts — aborting deploy without restart."
+    echo "!! (Is the database reachable? A paused Supabase project reports 'Tenant or user not found'.)"
+    exit 1
+  fi
 else
   echo "==> Skipping migrations (RUN_MIGRATIONS=false for $ENVIRONMENT)"
 fi
