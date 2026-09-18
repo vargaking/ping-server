@@ -21,7 +21,12 @@ class ConnectionManager:
     def remove_connection_by_websocket(self, websocket: WebSocket) -> int | None:
         user_id = self.websocket_to_user.pop(websocket, None)
         if user_id is not None:
-            self.user_to_websocket.pop(user_id, None)
+            # Only clear the user->socket mapping if it still points at THIS
+            # socket. A newer connection (e.g. a page refresh racing the old
+            # socket's close) may have already replaced it, and evicting it
+            # would wrongly mark the still-connected user as offline.
+            if self.user_to_websocket.get(user_id) is websocket:
+                self.user_to_websocket.pop(user_id, None)
         return user_id
 
     def get_websocket(self, user_id: int) -> WebSocket | None:

@@ -26,7 +26,10 @@ class Communication:
     async def remove_connection_by_websocket(self, websocket: WebSocket):
         user_id = self.connection_manager.remove_connection_by_websocket(
             websocket)
-        if user_id:
+        # Only announce offline if the user has no remaining live socket: a
+        # refresh may have already reconnected them on a new socket, in which
+        # case the old socket's close must not flap their presence.
+        if user_id and not self.connection_manager.is_online(user_id):
             await self._notify_presence(user_id, online=False)
 
     async def message_switch(self, message: dict, websocket: WebSocket):
