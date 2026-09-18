@@ -19,6 +19,7 @@ jobs:
   test:
     name: Test
     runs-on: ubuntu-latest
+    timeout-minutes: 10 # a hung WebSocket test must not burn Actions minutes
     steps:
       - uses: actions/checkout@v4
 
