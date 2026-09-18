@@ -55,10 +55,12 @@ os.makedirs(_media_root, exist_ok=True)
 app.mount(_media_mount, StaticFiles(directory=_media_root), name="media")
 
 # Database
+# Schemas are owned by Aerich migrations. DB_GENERATE_SCHEMAS=true is only for
+# throwaway databases (the test suite, a scratch local SQLite file).
 register_tortoise(
     app,
     config=TORTOISE_CONFIG,
-    generate_schemas=False,
+    generate_schemas=os.getenv("DB_GENERATE_SCHEMAS", "").lower() == "true",
     add_exception_handlers=True,
 )
 
