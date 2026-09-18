@@ -1,6 +1,7 @@
 import logging
 import os
 
+import anyio
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
@@ -9,8 +10,9 @@ from tortoise.contrib.fastapi import register_tortoise
 from app.communication import Communication
 from app.db import TORTOISE_CONFIG
 from app.routers import auth, channels, invites, servers, users, voice
+from app.settings import ALLOWED_ORIGINS
 from app.utils import lifespan
-from .middleware import auth_middleware
+from .middleware import auth_middleware, resolve_user_from_token
 # Initialize application logging (configures file logging)
 from . import logging_config  # noqa: F401
 
@@ -21,14 +23,7 @@ app = FastAPI(debug=os.getenv("DEBUG", "").lower() == "true", lifespan=lifespan)
 # CORS middleware
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=[
-        "http://localhost:5173",
-        "http://127.0.0.1:5173",
-        "https://192.168.1.249:5173",
-        "https://192.168.1.84:5173",
-        "https://dpkchat.vercel.app",
-        os.getenv("DEV_IP", ""),
-    ],
+    allow_origins=ALLOWED_ORIGINS,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -74,17 +69,46 @@ comms = Communication()
 app.state.comms = comms
 
 
+# Application-level close code: "no valid session". The frontend must not
+# auto-reconnect on this one (it would loop forever); it should go to login.
+WS_CLOSE_UNAUTHENTICATED = 4401
+
+
 @app.websocket("/ws")
 async def websocket_endpoint(websocket: WebSocket):
-    await websocket.accept()
+    # CORS does not apply to WebSockets and the session cookie is SameSite=None
+    # in production, so without this check any website could open an
+    # authenticated socket on behalf of a logged-in visitor (CSWSH).
+    # Non-browser clients send no Origin header and carry no ambient cookies.
+    origin = websocket.headers.get("origin")
+    if origin is not None and origin not in ALLOWED_ORIGINS:
+        logger.warning("Rejected WebSocket from disallowed origin %s", origin)
+        await websocket.close(code=1008)  # before accept() -> HTTP 403
+        return
 
+    user = await resolve_user_from_token(websocket.cookies.get("access_token"))
+
+    # Accept first even when unauthenticated: a close code only reaches the
+    # browser after the handshake completed.
+    await websocket.accept()
+    if user is None:
+        await websocket.close(code=WS_CLOSE_UNAUTHENTICATED)
+        return
+
+    await comms.connect(user.id, websocket)
     try:
         while True:
             data = await websocket.receive_json()
             await comms.message_switch(data, websocket)
     except WebSocketDisconnect:
-        logger.info("WebSocket disconnected")
-        await comms.remove_connection_by_websocket(websocket)
+        logger.info("WebSocket disconnected (user %s)", user.id)
+    finally:
+        # Also runs when a handler raises, so a crashed connection can't leave
+        # a stale "online" entry behind. Shielded so that cancellation of this
+        # task (server shutdown, the test client) can't interrupt the cleanup
+        # halfway and skip the "went offline" broadcast.
+        with anyio.CancelScope(shield=True):
+            await comms.remove_connection_by_websocket(websocket)
 
 
 if __name__ == "__main__":
