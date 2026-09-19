@@ -5,6 +5,13 @@ from fastapi import WebSocket
 from app.models.UserToServer import UserToServer
 from app.services.connection_manager import ConnectionManager
 from app.services.chat_service import ChatService
+from app.ws_schemas import (
+    ConnectionInitFrame,
+    DisconnectFrame,
+    MessageFrame,
+    ValidationError,
+    parse_frame,
+)
 
 logger = logging.getLogger("app.communication")
 
@@ -34,24 +41,39 @@ class Communication:
         if user_id and not self.connection_manager.is_online(user_id):
             await self._notify_presence(user_id, online=False)
 
-    async def message_switch(self, message: dict, websocket: WebSocket):
+    async def message_switch(self, message, websocket: WebSocket):
         # Identity is whatever the handshake established for this socket. Any
         # ``user_id`` inside the frame is ignored.
         user_id = self.connection_manager.get_user_id(websocket)
-        if user_id is None or not isinstance(message, dict):
+        if user_id is None:
             return
 
-        message_type = message.get("type")
+        # Validate the frame before doing anything with it. A malformed frame
+        # gets a single error frame back and the socket stays open — a bad
+        # message must never crash the connection loop.
+        try:
+            frame = parse_frame(message)
+        except ValidationError:
+            ref = message.get("id") if isinstance(message, dict) else None
+            await self._send_error(websocket, "invalid_frame", ref)
+            return
 
-        if message_type == "connection_init":
+        if isinstance(frame, ConnectionInitFrame):
             # Legacy frame: registration now happens at handshake. Older
             # frontends still send it, so answer with a fresh presence snapshot
             # instead of erroring.
             await self._send_presence_snapshot(user_id, websocket)
-        elif message_type == "disconnect":
+        elif isinstance(frame, DisconnectFrame):
             await self.remove_connection_by_websocket(websocket)
-        elif message_type == "message":
-            await self.chat_service.handle_message(user_id, message, websocket)
+        elif isinstance(frame, MessageFrame):
+            await self.chat_service.handle_message(user_id, frame, websocket)
+
+    @staticmethod
+    async def _send_error(websocket: WebSocket, code: str, ref: str | None) -> None:
+        try:
+            await websocket.send_json({"type": "error", "code": code, "ref": ref})
+        except Exception:
+            logger.warning("Failed to send error frame", exc_info=True)
 
     @staticmethod
     async def get_related_user_ids(user_id: int) -> set[int]:
