@@ -25,6 +25,15 @@ Each env is served by Gunicorn (Uvicorn workers) on `127.0.0.1:<port>`, managed
 by a systemd **template** unit, with Nginx reverse-proxying and handling TLS +
 the `/ws` WebSocket upgrade.
 
+> ⚠️ **Single Gunicorn worker required (ZET-6).** `deploy/gunicorn.conf.py`
+> pins `workers = 1` (overridable via `GUNICORN_WORKERS`, but leave it at 1).
+> Live WebSocket connections are tracked in an in-process `ConnectionManager`
+> dict that is **not** shared across workers, so with >1 worker a message or
+> presence update only reaches users on the sender's worker — delivery silently
+> breaks ("refresh to see it") while messages still persist. Scaling past one
+> worker is safe only once a cross-worker Redis pub/sub backplane lands
+> (tracked separately).
+
 > ⚠️ **Staging shares the production database.** `deploy.sh` therefore
 > **skips migrations on staging by default** (`RUN_MIGRATIONS=false`) so a WIP
 > migration on the `staging` branch can't alter prod data. To run a migration
