@@ -5,17 +5,14 @@ import re
 # Browser origins allowed to call the API with credentials. Used by the CORS
 # middleware *and* by the WebSocket handshake: WebSockets are not covered by
 # CORS, so the /ws endpoint has to check the Origin header itself.
+#
+# Configured entirely via the ALLOWED_ORIGINS env var (comma-separated) — no
+# hardcoded hosts, so dev/staging/prod each set their own. Example:
+#   ALLOWED_ORIGINS=http://localhost:5173,https://dpkchat.vercel.app
 ALLOWED_ORIGINS: list[str] = [
-    origin
-    for origin in (
-        "http://localhost:5173",
-        "http://127.0.0.1:5173",
-        "https://192.168.1.249:5173",
-        "https://192.168.1.84:5173",
-        "https://dpkchat.vercel.app",
-        os.getenv("DEV_IP", ""),
-    )
-    if origin
+    origin.strip()
+    for origin in os.getenv("ALLOWED_ORIGINS", "").split(",")
+    if origin.strip()
 ]
 
 # Regex for origins allowed in addition to the explicit list above (ZET-59).

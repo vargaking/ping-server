@@ -110,31 +110,28 @@ is `GUNICORN_BIND` (port) — and for staging, remember it points at the **same*
 # staging:    /opt/ping-server-staging/.env     (GUNICORN_BIND=127.0.0.1:8001)
 sudo -u <deploy-user> tee /opt/ping-server-$ENV/.env >/dev/null <<EOF
 DB_CONNECTION_STRING=postgres://user:pass@your-db-host:5432/ping
-JWT_SECRET_KEY=<strong random secret>
-DEV_IP=
+# Comma-separated browser origins allowed for CORS + the WebSocket handshake.
+ALLOWED_ORIGINS=https://dpkchat.vercel.app
 # Regex for extra CORS + /ws origins that can't be enumerated (Vercel branch
 # previews get randomized subdomains). Anchor it on the project prefix AND the
 # team-slug suffix — the suffix is the security boundary; a bare .vercel.app
 # pattern would let any Vercel app hit the API with credentials. Leave empty to
 # disable. Example for our team:
 ALLOWED_ORIGIN_REGEX=^https://ping-frontend-[a-z0-9-]+-vargakings-projects\.vercel\.app$
-MEDIA_SERVER_URL=https://media.example.com
-GOOGLE_CLOUD_PROJECT=your-gcp-project
-GOOGLE_STORAGE_BUCKET=your-bucket
-GOOGLE_APPLICATION_CREDENTIALS=/opt/ping-server-$ENV/gcloud-key.json
+# Local-disk media storage (served by the app's StaticFiles mount, or Nginx).
+MEDIA_ROOT=/opt/ping-server-$ENV/uploads
+MEDIA_BASE_URL=/media
 GUNICORN_BIND=127.0.0.1:8000   # 8001 for staging
 DEBUG=false
 EOF
 chmod 600 /opt/ping-server-$ENV/.env
 ```
 
-Copy the GCS key into each env dir (`scp gcloud-key.json <deploy-user>@<server>:/opt/ping-server-$ENV/`).
-
-> **CORS:** `app/settings.py` hardcodes localhost/LAN origins plus `DEV_IP` and
-> `https://dpkchat.vercel.app`. Add stable frontend origin(s) there. For origins
-> you can't enumerate (Vercel branch previews), set `ALLOWED_ORIGIN_REGEX` in
-> `.env` and always anchor it on the team slug (`-vargakings-projects.vercel.app`):
-> a bare `.vercel.app` pattern would let anyone's deployment reach the API with
+> **CORS:** origins come entirely from `ALLOWED_ORIGINS` (comma-separated),
+> read in `app/settings.py` — there are no hardcoded hosts. For origins you
+> can't enumerate (Vercel branch previews), set `ALLOWED_ORIGIN_REGEX` in `.env`
+> and always anchor it on the team slug (`-vargakings-projects.vercel.app`): a
+> bare `.vercel.app` pattern would let anyone's deployment reach the API with
 > credentials. The regex covers both CORS and the `/ws` handshake.
 
 ### 5. systemd (template unit)

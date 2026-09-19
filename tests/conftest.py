@@ -18,6 +18,7 @@ os.environ["DB_GENERATE_SCHEMAS"] = "true"
 os.environ["DEBUG"] = "true"  # non-secure cookies so they work over http://testserver
 os.environ["MEDIA_ROOT"] = os.path.join(_tmp, "media")
 os.environ["LOG_DIR"] = os.path.join(_tmp, "logs")
+os.environ["ALLOWED_ORIGINS"] = "http://localhost:5173"
 # ZET-59: Vercel branch previews are matched by regex, not enumerated. Mirror a
 # realistic prod value so the CORS + /ws origin tests exercise the real pattern.
 os.environ["ALLOWED_ORIGIN_REGEX"] = (
