@@ -1,7 +1,8 @@
 import os
 import uuid
+from datetime import datetime, timedelta, timezone
 
-from fastapi import APIRouter, Depends, HTTPException, Response, status
+from fastapi import APIRouter, Depends, HTTPException, Request, Response, status
 from pydantic import BaseModel
 from typing import Optional
 
@@ -11,6 +12,23 @@ from ..models.User import User
 from .users import UserResponse
 
 router = APIRouter(prefix="/auth", tags=["authentication"])
+
+# Session tokens live for 30 days; both the DB row and the browser cookie use
+# this so they expire together.
+TOKEN_TTL = timedelta(days=30)
+
+
+def _set_session_cookie(response: Response, access_token: str) -> None:
+    is_dev = os.getenv("DEBUG", "").lower() == "true"
+    response.set_cookie(
+        key="access_token",
+        value=access_token,
+        max_age=int(TOKEN_TTL.total_seconds()),
+        httponly=True,
+        secure=not is_dev,
+        samesite="lax" if is_dev else "none",
+        path="/",
+    )
 
 
 class LoginRequest(BaseModel):
@@ -44,17 +62,13 @@ async def register(user_data: RegisterRequest, response: Response):
     user = await User.create_with_password(password=password, **user_dict)
 
     access_token = uuid.uuid4().hex
-    await Token.create(user_id=user.id, token=access_token)
-
-    is_dev = os.getenv("DEBUG", "").lower() == "true"
-    response.set_cookie(
-        key="access_token",
-        value=access_token,
-        httponly=True,
-        secure=not is_dev,
-        samesite="lax" if is_dev else "none",
-        path="/"
+    await Token.create(
+        user_id=user.id,
+        token=access_token,
+        expires_at=datetime.now(timezone.utc) + TOKEN_TTL,
     )
+
+    _set_session_cookie(response, access_token)
 
     return TokenResponse(access_token=access_token)
 
@@ -72,22 +86,29 @@ async def login(login_data: LoginRequest, response: Response):
 
     await Token.create(
         user_id=user.id,
-        token=access_token
+        token=access_token,
+        expires_at=datetime.now(timezone.utc) + TOKEN_TTL,
     )
 
-    is_dev = os.getenv("DEBUG", "").lower() == "true"
-    response.set_cookie(
-        key="access_token",
-        value=access_token,
-        httponly=True,
-        secure=not is_dev,
-        samesite="lax" if is_dev else "none",
-        path="/"
-    )
+    _set_session_cookie(response, access_token)
 
     return TokenResponse(
         access_token=access_token,
     )
+
+
+@router.post("/logout")
+async def logout(request: Request, response: Response):
+    """Invalidate the current session: delete the token row and clear the cookie.
+
+    Intentionally does not require authentication so it stays idempotent — an
+    already-expired or unknown cookie is simply cleared.
+    """
+    token = request.cookies.get("access_token")
+    if token:
+        await Token.filter(token=token).delete()
+    response.delete_cookie("access_token", path="/")
+    return {"detail": "Logged out"}
 
 
 @router.get("/me")

@@ -1,7 +1,10 @@
 import logging
+from datetime import datetime, timezone
 
 from fastapi import FastAPI, HTTPException
 from fastapi.concurrency import asynccontextmanager
+
+from .models.Token import Token
 
 logger = logging.getLogger("app.utils")
 
@@ -9,7 +12,22 @@ logger = logging.getLogger("app.utils")
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Application lifespan. Voice now runs on LiveKit, so there is no media
-    proxy client to manage here anymore."""
+    proxy client to manage here anymore.
+
+    On startup we prune expired session tokens. Tortoise is already initialised
+    at this point (register_tortoise wraps this lifespan), but keep it guarded
+    so a housekeeping hiccup can never block the app from starting.
+    """
+    try:
+        deleted = await Token.filter(
+            expires_at__not_isnull=True,
+            expires_at__lt=datetime.now(timezone.utc),
+        ).delete()
+        if deleted:
+            logger.info("Pruned %s expired session token(s) on startup", deleted)
+    except Exception:
+        logger.warning("Failed to prune expired tokens on startup", exc_info=True)
+
     yield
 
 
