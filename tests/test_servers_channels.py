@@ -54,3 +54,33 @@ def test_unknown_server_is_404(client):
     register(client)
     assert client.get("/channels/9999").status_code == 404
     assert client.put("/servers/9999", json={"name": "x"}).status_code == 404
+
+
+# --- ZET-9: server reads are scoped to membership -------------------------
+
+def test_get_servers_only_lists_own_servers(client, new_client):
+    register(client, "alice")
+    a_server = create_server(client, "Alice's")
+
+    bob = new_client()
+    register(bob, "bob")
+    create_server(bob, "Bob's")
+
+    alice_ids = {s["id"] for s in client.get("/servers/").json()}
+    assert alice_ids == {a_server["id"]}
+
+
+def test_non_member_gets_404_on_get_server(client, new_client):
+    register(client, "alice")
+    server = create_server(client)
+
+    outsider = new_client()
+    register(outsider, "bob")
+    # 404, not 403: don't leak that the server exists.
+    assert outsider.get(f"/servers/{server['id']}").status_code == 404
+
+
+def test_member_gets_200_on_get_server(client):
+    register(client)
+    server = create_server(client)
+    assert client.get(f"/servers/{server['id']}").status_code == 200

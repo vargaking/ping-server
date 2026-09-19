@@ -78,8 +78,11 @@ async def create_server(server: ServerCreate, current_user: User = Depends(get_c
 
 @router.get("/", response_model=List[ServerPublicResponse])
 async def get_servers(current_user: User = Depends(get_current_user)):
-    servers = await Server.all()
-    return [ServerPublicResponse.from_server(server) for server in servers]
+    # Only surface servers the caller actually belongs to — listing every
+    # server on the instance leaks the existence of private servers.
+    relations = await UserToServer.filter(
+        user=current_user).prefetch_related("server")
+    return [ServerPublicResponse.from_server(rel.server) for rel in relations]
 
 
 @router.get("/me", response_model=List[ServerResponse])
@@ -95,6 +98,13 @@ async def get_server(server_id: int, current_user: User = Depends(get_current_us
     server = await Server.get_or_none(id=server_id).prefetch_related('server_users__user')
     if not server:
         raise HTTPException(status_code=404, detail="Server not found")
+
+    # Non-members get a 404, not a 403: a 403 would confirm the server exists.
+    is_member = await UserToServer.filter(
+        user=current_user, server=server).exists()
+    if not is_member:
+        raise HTTPException(status_code=404, detail="Server not found")
+
     return ServerResponse.from_server(server)
 
 
