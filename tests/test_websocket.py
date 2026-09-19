@@ -6,7 +6,7 @@ from datetime import datetime, timezone
 import pytest
 from starlette.websockets import WebSocketDisconnect
 
-from tests.conftest import ORIGIN, create_channel, create_server, register
+from tests.conftest import ORIGIN, PREVIEW_ORIGIN, create_channel, create_server, register
 
 HEADERS = {"origin": ORIGIN}
 DOC = {"type": "doc", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "hi"}]}]}
@@ -65,6 +65,23 @@ def test_foreign_origin_is_rejected_even_with_valid_cookie(client):
     register(client)
     with pytest.raises(WebSocketDisconnect):
         with client.websocket_connect("/ws", headers={"origin": "https://evil.example"}):
+            pass
+
+
+def test_vercel_preview_origin_is_allowed_by_regex(client):
+    # ZET-59: preview subdomains match ALLOWED_ORIGIN_REGEX, so /ws accepts them
+    # just like an explicitly-allowlisted origin would be.
+    register(client)
+    with client.websocket_connect("/ws", headers={"origin": PREVIEW_ORIGIN}) as ws:
+        assert ws.receive_json()["type"] == "presence_init"
+
+
+def test_foreign_vercel_origin_is_rejected(client):
+    # A different team's Vercel app must not slip through the regex.
+    register(client)
+    foreign = "https://ping-frontend-abc123-someone-else-projects.vercel.app"
+    with pytest.raises(WebSocketDisconnect):
+        with client.websocket_connect("/ws", headers={"origin": foreign}):
             pass
 
 

@@ -112,6 +112,12 @@ sudo -u <deploy-user> tee /opt/ping-server-$ENV/.env >/dev/null <<EOF
 DB_CONNECTION_STRING=postgres://user:pass@your-db-host:5432/ping
 JWT_SECRET_KEY=<strong random secret>
 DEV_IP=
+# Regex for extra CORS + /ws origins that can't be enumerated (Vercel branch
+# previews get randomized subdomains). Anchor it on the project prefix AND the
+# team-slug suffix — the suffix is the security boundary; a bare .vercel.app
+# pattern would let any Vercel app hit the API with credentials. Leave empty to
+# disable. Example for our team:
+ALLOWED_ORIGIN_REGEX=^https://ping-frontend-[a-z0-9-]+-vargakings-projects\.vercel\.app$
 MEDIA_SERVER_URL=https://media.example.com
 GOOGLE_CLOUD_PROJECT=your-gcp-project
 GOOGLE_STORAGE_BUCKET=your-bucket
@@ -124,8 +130,12 @@ chmod 600 /opt/ping-server-$ENV/.env
 
 Copy the GCS key into each env dir (`scp gcloud-key.json <deploy-user>@<server>:/opt/ping-server-$ENV/`).
 
-> **CORS:** `app/app.py` hardcodes localhost/LAN origins plus `DEV_IP`. Add your
-> real frontend origin(s) there for production/staging.
+> **CORS:** `app/settings.py` hardcodes localhost/LAN origins plus `DEV_IP` and
+> `https://dpkchat.vercel.app`. Add stable frontend origin(s) there. For origins
+> you can't enumerate (Vercel branch previews), set `ALLOWED_ORIGIN_REGEX` in
+> `.env` and always anchor it on the team slug (`-vargakings-projects.vercel.app`):
+> a bare `.vercel.app` pattern would let anyone's deployment reach the API with
+> credentials. The regex covers both CORS and the `/ws` handshake.
 
 ### 5. systemd (template unit)
 

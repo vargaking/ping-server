@@ -18,6 +18,11 @@ os.environ["DB_GENERATE_SCHEMAS"] = "true"
 os.environ["DEBUG"] = "true"  # non-secure cookies so they work over http://testserver
 os.environ["MEDIA_ROOT"] = os.path.join(_tmp, "media")
 os.environ["LOG_DIR"] = os.path.join(_tmp, "logs")
+# ZET-59: Vercel branch previews are matched by regex, not enumerated. Mirror a
+# realistic prod value so the CORS + /ws origin tests exercise the real pattern.
+os.environ["ALLOWED_ORIGIN_REGEX"] = (
+    r"^https://ping-frontend-[a-z0-9-]+-vargakings-projects\.vercel\.app$"
+)
 
 import pytest  # noqa: E402
 from fastapi.testclient import TestClient  # noqa: E402
@@ -25,6 +30,8 @@ from fastapi.testclient import TestClient  # noqa: E402
 from app.app import app  # noqa: E402
 
 ORIGIN = "http://localhost:5173"
+# A Vercel branch-preview origin that matches ALLOWED_ORIGIN_REGEX above.
+PREVIEW_ORIGIN = "https://ping-frontend-abc123-vargakings-projects.vercel.app"
 PASSWORD = "correct horse battery staple"
 
 _usernames = count(1)

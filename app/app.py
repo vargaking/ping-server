@@ -10,7 +10,7 @@ from tortoise.contrib.fastapi import register_tortoise
 from app.communication import Communication
 from app.db import TORTOISE_CONFIG
 from app.routers import auth, channels, invites, servers, users, voice
-from app.settings import ALLOWED_ORIGINS
+from app.settings import ALLOWED_ORIGINS, ALLOWED_ORIGIN_REGEX, is_origin_allowed
 from app.utils import lifespan
 from .middleware import auth_middleware, resolve_user_from_token
 # Initialize application logging (configures file logging)
@@ -20,10 +20,13 @@ logger = logging.getLogger("app")
 
 app = FastAPI(debug=os.getenv("DEBUG", "").lower() == "true", lifespan=lifespan)
 
-# CORS middleware
+# CORS middleware. allow_origins is the explicit list; allow_origin_regex
+# additionally matches Vercel branch previews, whose subdomains are randomized
+# and so can't be enumerated (ZET-59). The regex comes from env (app/settings.py).
 app.add_middleware(
     CORSMiddleware,
     allow_origins=ALLOWED_ORIGINS,
+    allow_origin_regex=ALLOWED_ORIGIN_REGEX,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -81,7 +84,7 @@ async def websocket_endpoint(websocket: WebSocket):
     # authenticated socket on behalf of a logged-in visitor (CSWSH).
     # Non-browser clients send no Origin header and carry no ambient cookies.
     origin = websocket.headers.get("origin")
-    if origin is not None and origin not in ALLOWED_ORIGINS:
+    if origin is not None and not is_origin_allowed(origin):
         logger.warning("Rejected WebSocket from disallowed origin %s", origin)
         await websocket.close(code=1008)  # before accept() -> HTTP 403
         return
