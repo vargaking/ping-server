@@ -9,6 +9,21 @@ from .models.User import User
 logger = logging.getLogger("app.middleware")
 
 
+async def resolve_user_from_token(token: Optional[str]) -> Optional[User]:
+    """Look up the user that owns the session *token*, or ``None``.
+
+    Single source of truth for cookie -> user resolution, shared by the HTTP
+    middleware and the WebSocket handshake.
+    """
+    if not token:
+        return None
+    token_obj = await Token.get_or_none(token=token).prefetch_related("user")
+    if token_obj is None:
+        logger.warning("Rejected unknown session token")
+        return None
+    return token_obj.user
+
+
 async def auth_middleware(request: Request, call_next):
     """
     HTTP middleware that resolves the current user from the access_token cookie
@@ -22,17 +37,8 @@ async def auth_middleware(request: Request, call_next):
         response = await call_next(request)
         return response
 
-    user = None
-    token = request.cookies.get("access_token")
-
-    if token:
-        try:
-            token_obj = await Token.get(token=token).prefetch_related('user')
-            user = token_obj.user
-        except Exception as e:
-            logger.warning("Invalid token: %s", e)
-
-    request.state.user = user
+    request.state.user = await resolve_user_from_token(
+        request.cookies.get("access_token"))
 
     response = await call_next(request)
     return response
