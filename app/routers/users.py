@@ -6,7 +6,7 @@ from pydantic import BaseModel
 
 from ..middleware import get_current_user
 from ..models.User import User
-from ..services.storage import storage_service
+from ..services.storage import ImageValidationError, storage_service
 
 router = APIRouter(prefix="/users", tags=["users"])
 
@@ -94,11 +94,14 @@ async def upload_user_avatar(user_id: int, request: Request, file: UploadFile = 
         raise HTTPException(status_code=404, detail="User not found")
 
     content = await file.read()
-    url = await storage_service.upload_file(
-        content,
-        file.content_type,
-        f"users/{user_id}/avatar"
-    )
+    try:
+        url = await storage_service.upload_image(
+            content,
+            f"users/{user_id}/avatar",
+            max_size_px=256,
+        )
+    except ImageValidationError as exc:
+        raise HTTPException(status_code=exc.status_code, detail=exc.detail)
 
     if not url:
         raise HTTPException(status_code=500, detail="Failed to upload file")

@@ -8,7 +8,7 @@ from ..middleware import get_current_user
 from ..models.Server import Server
 from ..models.User import User
 from ..models.UserToServer import UserToServer
-from ..services.storage import storage_service
+from ..services.storage import ImageValidationError, storage_service
 from ..utils import require_owner
 from .users import UserResponse
 
@@ -144,11 +144,14 @@ async def upload_server_icon(server_id: int, file: UploadFile = File(...), curre
     require_owner(current_user, server)
 
     content = await file.read()
-    url = await storage_service.upload_file(
-        content,
-        file.content_type,
-        f"servers/{server_id}/icon"
-    )
+    try:
+        url = await storage_service.upload_image(
+            content,
+            f"servers/{server_id}/icon",
+            max_size_px=512,
+        )
+    except ImageValidationError as exc:
+        raise HTTPException(status_code=exc.status_code, detail=exc.detail)
 
     if not url:
         raise HTTPException(status_code=500, detail="Failed to upload file")

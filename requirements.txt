@@ -30,6 +30,7 @@ livekit-api==1.2.0
 markdown-it-py==4.0.0
 MarkupSafe==3.0.3
 mdurl==0.1.2
+Pillow==12.3.0
 pycparser==2.23
 pydantic==2.12.3
 pydantic_core==2.41.4
