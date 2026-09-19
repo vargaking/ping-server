@@ -9,7 +9,7 @@ from ..models.Server import Server
 from ..models.User import User
 from ..models.UserToServer import UserToServer
 from ..services.storage import storage_service
-from ..utils import require_membership
+from ..utils import require_owner
 from .users import UserResponse
 
 router = APIRouter(prefix="/servers", tags=["servers"])
@@ -48,6 +48,7 @@ class ServerResponse(BaseModel):
     created_at: datetime
     server_profile: dict
     server_settings: dict
+    owner_id: Optional[int] = None
     members: List[UserResponse] = []
 
     @classmethod
@@ -63,13 +64,14 @@ class ServerResponse(BaseModel):
             created_at=server.created_at,
             server_profile=server.server_profile,
             server_settings=server.server_settings,
+            owner_id=server.owner_id,
             members=members
         )
 
 
 @router.post("/", response_model=ServerResponse, status_code=status.HTTP_201_CREATED)
 async def create_server(server: ServerCreate, current_user: User = Depends(get_current_user)):
-    server_obj = await Server.create(**server.model_dump())
+    server_obj = await Server.create(**server.model_dump(), owner=current_user)
     # Automatically add the creator as a member
     await UserToServer.create(user=current_user, server=server_obj)
     await server_obj.fetch_related('server_users__user')
@@ -114,7 +116,7 @@ async def update_server(server_id: int, server_update: ServerUpdate, current_use
     if not server:
         raise HTTPException(status_code=404, detail="Server not found")
 
-    await require_membership(current_user, server)
+    require_owner(current_user, server)
 
     update_data = server_update.model_dump(exclude_unset=True)
     await server.update_from_dict(update_data)
@@ -128,7 +130,7 @@ async def delete_server(server_id: int, current_user: User = Depends(get_current
     if not server:
         raise HTTPException(status_code=404, detail="Server not found")
 
-    await require_membership(current_user, server)
+    require_owner(current_user, server)
 
     await server.delete()
 
@@ -139,7 +141,7 @@ async def upload_server_icon(server_id: int, file: UploadFile = File(...), curre
     if not server:
         raise HTTPException(status_code=404, detail="Server not found")
 
-    await require_membership(current_user, server)
+    require_owner(current_user, server)
 
     content = await file.read()
     url = await storage_service.upload_file(

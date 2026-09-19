@@ -1,6 +1,15 @@
 from tests.conftest import create_channel, create_server, register
 
 
+def _join(owner_client, joiner_client, server_id):
+    """Add joiner to server_id through the real invite flow."""
+    invite = owner_client.post("/invites/", json={"server_id": server_id})
+    assert invite.status_code == 201, invite.text
+    res = joiner_client.post(f"/invites/{invite.json()['id']}/use", json={})
+    assert res.status_code == 200, res.text
+    return invite.json()
+
+
 def test_creator_is_member_of_new_server(client):
     me = register(client)
     server = create_server(client, "Gaming")
@@ -84,3 +93,52 @@ def test_member_gets_200_on_get_server(client):
     register(client)
     server = create_server(client)
     assert client.get(f"/servers/{server['id']}").status_code == 200
+
+
+# --- ZET-8: server ownership + owner-only writes --------------------------
+
+def test_create_server_sets_owner_to_creator(client):
+    me = register(client)
+    server = create_server(client)
+    assert server["owner_id"] == me["id"]
+
+
+def test_non_owner_member_cannot_write_server(client, new_client):
+    register(client, "alice")
+    server = create_server(client)
+
+    bob = new_client()
+    register(bob, "bob")
+    _join(client, bob, server["id"])
+
+    # bob is a member but not the owner
+    assert bob.put(f"/servers/{server['id']}", json={"name": "pwned"}).status_code == 403
+    assert bob.delete(f"/servers/{server['id']}").status_code == 403
+
+
+def test_owner_can_write_server(client):
+    register(client, "alice")
+    server = create_server(client)
+    assert client.put(f"/servers/{server['id']}", json={"name": "renamed"}).status_code == 200
+    assert client.delete(f"/servers/{server['id']}").status_code == 204
+
+
+def test_non_owner_member_cannot_modify_invites(client, new_client):
+    register(client, "alice")
+    server = create_server(client)
+
+    bob = new_client()
+    register(bob, "bob")
+    invite = _join(client, bob, server["id"])
+
+    assert bob.put(f"/invites/{invite['id']}", json={"is_active": False}).status_code == 403
+    assert bob.delete(f"/invites/{invite['id']}").status_code == 403
+
+
+def test_owner_can_modify_invites(client):
+    register(client, "alice")
+    server = create_server(client)
+    invite = client.post("/invites/", json={"server_id": server["id"]}).json()
+
+    assert client.put(f"/invites/{invite['id']}", json={"is_active": False}).status_code == 200
+    assert client.delete(f"/invites/{invite['id']}").status_code == 204

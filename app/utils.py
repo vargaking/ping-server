@@ -18,3 +18,13 @@ async def require_membership(user, server):
     membership = await UserToServer.filter(user=user, server=server).first()
     if not membership:
         raise HTTPException(status_code=403, detail="Not a member of this server")
+
+
+def require_owner(user, server):
+    """Enforce that *user* owns *server*; raise 403 otherwise.
+
+    Ownership is stricter than membership: use this to gate destructive or
+    server-wide writes (settings, deletion, invites) that only the owner may do.
+    """
+    if server.owner_id is None or server.owner_id != user.id:
+        raise HTTPException(status_code=403, detail="Only the server owner can do this")

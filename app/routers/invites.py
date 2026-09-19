@@ -10,7 +10,7 @@ from ..models.Invite import Invite
 from ..models.Server import Server
 from ..models.User import User
 from ..models.UserToServer import UserToServer
-from ..utils import require_membership
+from ..utils import require_membership, require_owner
 
 router = APIRouter(prefix="/invites", tags=["invites"])
 
@@ -149,7 +149,7 @@ async def update_invite(
         raise HTTPException(status_code=404, detail="Invite not found")
 
     server = await Server.get_or_none(id=invite.server_id)
-    await require_membership(current_user, server)
+    require_owner(current_user, server)
 
     update_data = body.model_dump(exclude_unset=True)
     await invite.update_from_dict(update_data)
@@ -167,7 +167,7 @@ async def delete_invite(
         raise HTTPException(status_code=404, detail="Invite not found")
 
     server = await Server.get_or_none(id=invite.server_id)
-    await require_membership(current_user, server)
+    require_owner(current_user, server)
 
     await invite.delete()
 
