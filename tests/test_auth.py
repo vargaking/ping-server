@@ -95,3 +95,22 @@ def test_logout_invalidates_session(client):
         return await Token.exists(token=token)
 
     assert client.portal.call(_exists) is False
+
+
+# --- ZET-11: auth rate limiting -------------------------------------------
+
+def test_login_rate_limit_returns_429_with_retry_after(client, new_client, monkeypatch):
+    register(client, "throttled")
+
+    # Lower the limit just for this test; env is read per request and restored
+    # by monkeypatch afterwards. A distinct limit string is its own counter.
+    monkeypatch.setenv("AUTH_RATE_LIMIT", "3/minute")
+
+    other = new_client()
+    creds = {"username": "throttled", "password": PASSWORD}
+    for _ in range(3):
+        assert other.post("/auth/login", json=creds).status_code == 200
+
+    limited = other.post("/auth/login", json=creds)
+    assert limited.status_code == 429
+    assert any(k.lower() == "retry-after" for k in limited.headers)

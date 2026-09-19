@@ -2,7 +2,7 @@ from datetime import datetime, timezone
 from typing import List, Optional
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, Request, Response, status
 from pydantic import BaseModel
 
 from ..middleware import get_current_user
@@ -10,6 +10,8 @@ from ..models.Invite import Invite
 from ..models.Server import Server
 from ..models.User import User
 from ..models.UserToServer import UserToServer
+from ..rate_limit import invite_use_key, limiter
+from ..settings import invite_use_rate_limit
 from ..utils import require_membership, require_owner
 
 router = APIRouter(prefix="/invites", tags=["invites"])
@@ -173,7 +175,10 @@ async def delete_invite(
 
 
 @router.post("/{invite_id}/use", status_code=status.HTTP_200_OK)
+@limiter.limit(invite_use_rate_limit, key_func=invite_use_key)
 async def use_invite(
+    request: Request,
+    response: Response,
     invite_id: UUID,
     body: InviteUseRequest = InviteUseRequest(),
     current_user: User = Depends(get_current_user),

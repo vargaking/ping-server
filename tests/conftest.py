@@ -23,6 +23,10 @@ os.environ["LOG_DIR"] = os.path.join(_tmp, "logs")
 os.environ["ALLOWED_ORIGIN_REGEX"] = (
     r"^https://ping-frontend-[a-z0-9-]+-vargakings-projects\.vercel\.app$"
 )
+# Keep rate limits out of the way for the general suite; the rate-limit test
+# lowers them for itself (see test_auth). Limits are read from env per request.
+os.environ.setdefault("AUTH_RATE_LIMIT", "10000/minute")
+os.environ.setdefault("INVITE_USE_RATE_LIMIT", "10000/minute")
 
 import pytest  # noqa: E402
 from fastapi.testclient import TestClient  # noqa: E402

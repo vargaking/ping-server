@@ -9,6 +9,8 @@ from typing import Optional
 from ..middleware import get_current_user
 from ..models.Token import Token
 from ..models.User import User
+from ..rate_limit import limiter
+from ..settings import auth_rate_limit
 from .users import UserResponse
 
 router = APIRouter(prefix="/auth", tags=["authentication"])
@@ -49,7 +51,8 @@ class TokenResponse(BaseModel):
 
 
 @router.post("/register", response_model=TokenResponse, status_code=status.HTTP_201_CREATED)
-async def register(user_data: RegisterRequest, response: Response):
+@limiter.limit(auth_rate_limit)
+async def register(user_data: RegisterRequest, request: Request, response: Response):
     existing_user = await User.get_or_none(username=user_data.username)
     if existing_user:
         raise HTTPException(
@@ -74,7 +77,8 @@ async def register(user_data: RegisterRequest, response: Response):
 
 
 @router.post("/login", response_model=TokenResponse)
-async def login(login_data: LoginRequest, response: Response):
+@limiter.limit(auth_rate_limit)
+async def login(login_data: LoginRequest, request: Request, response: Response):
     user = await User.get_or_none(username=login_data.username)
     if not user or not user.check_password(login_data.password):
         raise HTTPException(

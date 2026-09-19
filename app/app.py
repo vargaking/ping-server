@@ -5,10 +5,13 @@ import anyio
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
+from slowapi.errors import RateLimitExceeded
+from slowapi import _rate_limit_exceeded_handler
 from tortoise.contrib.fastapi import register_tortoise
 
 from app.communication import Communication
 from app.db import TORTOISE_CONFIG
+from app.rate_limit import limiter
 from app.routers import auth, channels, invites, servers, users, voice
 from app.settings import ALLOWED_ORIGINS, ALLOWED_ORIGIN_REGEX, is_origin_allowed
 from app.utils import lifespan
@@ -19,6 +22,11 @@ from . import logging_config  # noqa: F401
 logger = logging.getLogger("app")
 
 app = FastAPI(debug=os.getenv("DEBUG", "").lower() == "true", lifespan=lifespan)
+
+# Rate limiting: register the shared limiter and its 429 handler
+# (which emits Retry-After). Individual endpoints opt in via @limiter.limit.
+app.state.limiter = limiter
+app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
 
 # CORS middleware. allow_origins is the explicit list; allow_origin_regex
 # additionally matches Vercel branch previews, whose subdomains are randomized

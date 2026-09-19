@@ -40,3 +40,15 @@ def is_origin_allowed(origin: str) -> bool:
     if origin in ALLOWED_ORIGINS:
         return True
     return _origin_regex is not None and _origin_regex.fullmatch(origin) is not None
+
+
+# Rate limits. Read per request so a test can override via env without
+# re-importing the app. Values use slowapi's "<count>/<period>" syntax.
+def auth_rate_limit() -> str:
+    """Per-IP limit for /auth/login and /auth/register."""
+    return os.getenv("AUTH_RATE_LIMIT", "10/minute")
+
+
+def invite_use_rate_limit() -> str:
+    """Per-IP + per-invite limit for POST /invites/{id}/use."""
+    return os.getenv("INVITE_USE_RATE_LIMIT", "20/minute")
