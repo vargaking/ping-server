@@ -10,6 +10,7 @@ class Message(models.Model):
     server = fields.ForeignKeyField("models.Server", related_name="messages")
     channel = fields.ForeignKeyField("models.Channel", related_name="messages")
     timestamp = fields.DatetimeField()
+    edited_at = fields.DatetimeField(null=True)
     metadata = fields.JSONField(default=dict)
 
     def __str__(self):

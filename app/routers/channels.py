@@ -49,6 +49,7 @@ def _serialize(message: dict) -> dict:
         "channel_id": message["channel_id"],
         "server_id": message["server_id"],
         "timestamp": message["timestamp"],
+        "edited_at": message["edited_at"],
     }
 
 
@@ -97,6 +98,7 @@ async def get_messages(
         "channel_id",
         "server_id",
         "timestamp",
+        "edited_at",
     )
 
     return [_serialize(message) for message in messages]
@@ -141,6 +143,7 @@ async def get_channel_messages(
         "server_id",
         "timestamp",
         "created_at",
+        "edited_at",
     )
 
     has_more = len(rows) > limit
