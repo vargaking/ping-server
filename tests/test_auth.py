@@ -18,7 +18,47 @@ def test_me_requires_auth(client):
 def test_duplicate_username_rejected(client, new_client):
     register(client, "alice")
     res = new_client().post("/auth/register", json={"username": "alice", "password": PASSWORD})
-    assert res.status_code == 400
+    assert res.status_code == 409
+
+
+# --- ZET-16: register input validation ------------------------------------
+
+def _register(client, username, password):
+    return client.post("/auth/register", json={"username": username, "password": password})
+
+
+def _error_fields(res) -> set[str]:
+    """The set of body field names a 422 validation response points at."""
+    return {item["loc"][-1] for item in res.json()["detail"]}
+
+
+def test_register_short_password_rejected(client):
+    res = _register(client, "bob", "short")
+    assert res.status_code == 422
+    assert "password" in _error_fields(res)
+
+
+def test_register_short_username_rejected(client):
+    res = _register(client, "ab", PASSWORD)
+    assert res.status_code == 422
+    assert "username" in _error_fields(res)
+
+
+def test_register_long_username_rejected(client):
+    res = _register(client, "x" * 33, PASSWORD)
+    assert res.status_code == 422
+    assert "username" in _error_fields(res)
+
+
+def test_register_invalid_username_charset_rejected(client):
+    res = _register(client, "bad name!", PASSWORD)
+    assert res.status_code == 422
+    assert "username" in _error_fields(res)
+
+
+def test_register_valid_username_charset_accepted(client):
+    res = _register(client, "good.user_name-1", PASSWORD)
+    assert res.status_code == 201
 
 
 def test_login_wrong_password(client, new_client):
