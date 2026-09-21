@@ -5,17 +5,14 @@ import re
 # Browser origins allowed to call the API with credentials. Used by the CORS
 # middleware *and* by the WebSocket handshake: WebSockets are not covered by
 # CORS, so the /ws endpoint has to check the Origin header itself.
+#
+# Configured entirely via the ALLOWED_ORIGINS env var (comma-separated) — no
+# hardcoded hosts, so dev/staging/prod each set their own. Example:
+#   ALLOWED_ORIGINS=http://localhost:5173,https://dpkchat.vercel.app
 ALLOWED_ORIGINS: list[str] = [
-    origin
-    for origin in (
-        "http://localhost:5173",
-        "http://127.0.0.1:5173",
-        "https://192.168.1.249:5173",
-        "https://192.168.1.84:5173",
-        "https://dpkchat.vercel.app",
-        os.getenv("DEV_IP", ""),
-    )
-    if origin
+    origin.strip()
+    for origin in os.getenv("ALLOWED_ORIGINS", "").split(",")
+    if origin.strip()
 ]
 
 # Regex for origins allowed in addition to the explicit list above (ZET-59).
@@ -40,3 +37,15 @@ def is_origin_allowed(origin: str) -> bool:
     if origin in ALLOWED_ORIGINS:
         return True
     return _origin_regex is not None and _origin_regex.fullmatch(origin) is not None
+
+
+# Rate limits. Read per request so a test can override via env without
+# re-importing the app. Values use slowapi's "<count>/<period>" syntax.
+def auth_rate_limit() -> str:
+    """Per-IP limit for /auth/login and /auth/register."""
+    return os.getenv("AUTH_RATE_LIMIT", "10/minute")
+
+
+def invite_use_rate_limit() -> str:
+    """Per-IP + per-invite limit for POST /invites/{id}/use."""
+    return os.getenv("INVITE_USE_RATE_LIMIT", "20/minute")

@@ -191,6 +191,30 @@ def test_channel_must_belong_to_the_server(two_members):
         assert ws.receive_json()["code"] == "forbidden"
 
 
+# --- ZET-10: frame validation ---------------------------------------------
+
+def test_malformed_frame_yields_error_and_keeps_socket_open(client):
+    register(client)
+    with client.websocket_connect("/ws", headers=HEADERS) as ws:
+        assert ws.receive_json()["type"] == "presence_init"
+
+        # unknown frame type
+        ws.send_json({"type": "nonsense"})
+        assert ws.receive_json() == {"type": "error", "code": "invalid_frame", "ref": None}
+
+        # message frame missing required fields (server_id, channel_id, ...)
+        ws.send_json({"type": "message", "id": "abc"})
+        assert ws.receive_json() == {"type": "error", "code": "invalid_frame", "ref": "abc"}
+
+        # a non-object frame
+        ws.send_json([1, 2, 3])
+        assert ws.receive_json() == {"type": "error", "code": "invalid_frame", "ref": None}
+
+        # the socket is still alive and processing frames afterwards
+        ws.send_json({"type": "connection_init"})
+        assert ws.receive_json() == {"type": "presence_init", "user_ids": []}
+
+
 def test_disconnect_clears_connection_state(client):
     from app.app import comms
     me = register(client)

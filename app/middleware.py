@@ -1,4 +1,5 @@
 import logging
+from datetime import datetime, timezone
 from typing import Optional
 
 from fastapi import HTTPException, Request, status
@@ -13,13 +14,18 @@ async def resolve_user_from_token(token: Optional[str]) -> Optional[User]:
     """Look up the user that owns the session *token*, or ``None``.
 
     Single source of truth for cookie -> user resolution, shared by the HTTP
-    middleware and the WebSocket handshake.
+    middleware and the WebSocket handshake. An expired token is treated as
+    unauthenticated and its row is deleted, so this also covers /ws.
     """
     if not token:
         return None
     token_obj = await Token.get_or_none(token=token).prefetch_related("user")
     if token_obj is None:
         logger.warning("Rejected unknown session token")
+        return None
+    if token_obj.expires_at is not None and token_obj.expires_at < datetime.now(timezone.utc):
+        logger.info("Rejected and deleted expired session token")
+        await token_obj.delete()
         return None
     return token_obj.user
 

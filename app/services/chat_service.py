@@ -7,6 +7,7 @@ from app.models.Channel import Channel
 from app.models.Message import Message
 from app.models.UserToServer import UserToServer
 from app.services.connection_manager import ConnectionManager
+from app.ws_schemas import MessageFrame
 
 logger = logging.getLogger("app.services.chat_service")
 
@@ -18,15 +19,16 @@ class ChatService:
         self.connection_manager = connection_manager
 
     async def handle_message(
-        self, sender_id: int, message: dict, sender_ws: WebSocket
+        self, sender_id: int, message: MessageFrame, sender_ws: WebSocket
     ) -> None:
-        """Persist a chat message from *sender_id* and fan it out.
+        """Persist a validated chat message from *sender_id* and fan it out.
 
-        *sender_id* is the authenticated owner of the socket. Whatever
-        ``user_id`` the client put in the frame is discarded.
+        *sender_id* is the authenticated owner of the socket. The frame has
+        already been validated (see ws_schemas); any ``user_id`` the client put
+        in it is discarded.
         """
-        server_id = message.get("server_id")
-        channel_id = message.get("channel_id")
+        server_id = message.server_id
+        channel_id = message.channel_id
 
         # Being logged in is not enough: the sender has to be a member of the
         # server, and the channel has to actually live in that server.
@@ -39,22 +41,22 @@ class ChatService:
                 "User %s tried to post to server %s / channel %s without access",
                 sender_id, server_id, channel_id,
             )
-            await self._send_error(sender_ws, "forbidden", message.get("id"))
+            await self._send_error(sender_ws, "forbidden", message.id)
             return
 
-        content_payload = message.get("content")
+        content_payload = message.content
         if isinstance(content_payload, dict):
             content_payload = json.dumps(content_payload)
 
         # Persist first: never show other people a message that was not stored.
         await Message.create(
-            uuid=message.get("id"),
+            uuid=message.id,
             content=content_payload,
             author_id=sender_id,
             server_id=server_id,
             channel_id=channel_id,
-            timestamp=message.get("timestamp"),
-            metadata=message.get("metadata", {}),
+            timestamp=message.timestamp,
+            metadata=message.metadata,
         )
 
         # Rebuild the frame from known fields instead of relaying the client's
@@ -62,12 +64,12 @@ class ChatService:
         # to other clients.
         outgoing = {
             "type": "message",
-            "id": message.get("id"),
+            "id": message.id,
             "server_id": server_id,
             "channel_id": channel_id,
             "user_id": sender_id,
-            "content": message.get("content"),
-            "timestamp": message.get("timestamp"),
+            "content": message.content,
+            "timestamp": message.timestamp,
         }
 
         member_ids = await UserToServer.filter(
