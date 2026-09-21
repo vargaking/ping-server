@@ -152,6 +152,31 @@ class Communication:
                         exc_info=True,
                     )
 
+    async def broadcast_to_server(
+        self, server_id: int, frame: dict, *, exclude_user_id: int | None = None
+    ) -> None:
+        """Send *frame* to every connected member of *server_id*.
+
+        Used for server-scoped events (new channel, new member). One dead
+        recipient never stops delivery to the rest.
+        """
+        member_ids = await UserToServer.filter(
+            server_id=server_id).values_list("user_id", flat=True)
+
+        for uid in member_ids:
+            if uid == exclude_user_id:
+                continue
+            ws = self.connection_manager.get_websocket(uid)
+            if ws is None:
+                continue
+            try:
+                await ws.send_json(frame)
+            except Exception:
+                logger.warning(
+                    "Failed to broadcast %s to user %s",
+                    frame.get("type"), uid, exc_info=True,
+                )
+
     async def notify_user_invalidate(self, user_id: int):
         """Notify related users that a user's profile has changed.
 

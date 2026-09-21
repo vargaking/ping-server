@@ -13,6 +13,7 @@ from ..models.UserToServer import UserToServer
 from ..rate_limit import invite_use_key, limiter
 from ..settings import invite_use_rate_limit
 from ..utils import require_membership, require_owner
+from .users import UserResponse
 
 router = APIRouter(prefix="/invites", tags=["invites"])
 
@@ -208,5 +209,19 @@ async def use_invite(
     await UserToServer.create(user=current_user, server=server)
     invite.use_count += 1
     await invite.save()
+
+    # Tell existing members so their member list patches in place. The joining
+    # user gets the full roster on load, so skip them.
+    comms = getattr(request.app.state, "comms", None)
+    if comms is not None:
+        await comms.broadcast_to_server(
+            server.id,
+            {
+                "type": "member_joined",
+                "server_id": server.id,
+                "member": UserResponse.from_user(current_user).model_dump(mode="json"),
+            },
+            exclude_user_id=current_user.id,
+        )
 
     return {"detail": "Successfully joined the server", "server_id": server.id}

@@ -2,7 +2,7 @@ import logging
 from datetime import datetime
 from typing import List
 
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, Request, status
 from pydantic import BaseModel
 
 from ..middleware import get_current_user
@@ -88,6 +88,7 @@ async def get_channels(
 @router.post("/{server_id}/create", response_model=ChannelResponse, status_code=status.HTTP_201_CREATED)
 async def create_channel(
     server_id: int,
+    request: Request,
     channel_name: str,
     channel_type: str = "text",
     current_user: User = Depends(get_current_user),
@@ -112,4 +113,20 @@ async def create_channel(
     server.server_settings = server_settings
     await server.save()
 
-    return ChannelResponse.from_channel(channel)
+    channel_response = ChannelResponse.from_channel(channel)
+
+    # Tell everyone else in the server so their channel list patches in place.
+    # The creator already has it from this response, so skip them.
+    comms = getattr(request.app.state, "comms", None)
+    if comms is not None:
+        await comms.broadcast_to_server(
+            server_id,
+            {
+                "type": "channel_created",
+                "server_id": server_id,
+                "channel": channel_response.model_dump(mode="json"),
+            },
+            exclude_user_id=current_user.id,
+        )
+
+    return channel_response
