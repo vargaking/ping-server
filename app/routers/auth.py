@@ -3,7 +3,7 @@ import uuid
 from datetime import datetime, timedelta, timezone
 
 from fastapi import APIRouter, Depends, HTTPException, Request, Response, status
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from typing import Optional
 
 from ..middleware import get_current_user
@@ -18,6 +18,12 @@ router = APIRouter(prefix="/auth", tags=["authentication"])
 # Session tokens live for 30 days; both the DB row and the browser cookie use
 # this so they expire together.
 TOKEN_TTL = timedelta(days=30)
+
+# Usernames are 3–32 chars of letters, digits, and . _ - — narrow enough that
+# the register form can mirror the rule for live validation. Keep this pattern
+# and the frontend's in sync.
+USERNAME_PATTERN = r"^[A-Za-z0-9._-]+$"
+PASSWORD_MIN_LENGTH = 8
 
 
 def _set_session_cookie(response: Response, access_token: str) -> None:
@@ -39,8 +45,8 @@ class LoginRequest(BaseModel):
 
 
 class RegisterRequest(BaseModel):
-    username: str
-    password: str
+    username: str = Field(min_length=3, max_length=32, pattern=USERNAME_PATTERN)
+    password: str = Field(min_length=PASSWORD_MIN_LENGTH)
     public_key: Optional[str] = None
     profile: dict = {}
 
@@ -56,8 +62,8 @@ async def register(user_data: RegisterRequest, request: Request, response: Respo
     existing_user = await User.get_or_none(username=user_data.username)
     if existing_user:
         raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Username already registered"
+            status_code=status.HTTP_409_CONFLICT,
+            detail="Username already taken"
         )
 
     user_dict = user_data.model_dump()
