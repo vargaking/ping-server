@@ -7,6 +7,7 @@ from app.services.connection_manager import ConnectionManager
 from app.services.chat_service import ChatService
 from app.ws_schemas import (
     ConnectionInitFrame,
+    DirectMessageFrame,
     DisconnectFrame,
     MessageFrame,
     ValidationError,
@@ -67,6 +68,8 @@ class Communication:
             await self.remove_connection_by_websocket(websocket)
         elif isinstance(frame, MessageFrame):
             await self.chat_service.handle_message(user_id, frame, websocket)
+        elif isinstance(frame, DirectMessageFrame):
+            await self.chat_service.handle_direct_message(user_id, frame, websocket)
 
     @staticmethod
     async def _send_error(websocket: WebSocket, code: str, ref: str | None) -> None:
