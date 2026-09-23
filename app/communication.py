@@ -165,8 +165,14 @@ class Communication:
         """
         member_ids = await UserToServer.filter(
             server_id=server_id).values_list("user_id", flat=True)
+        await self.send_to_users(member_ids, frame, exclude_user_id=exclude_user_id)
 
-        for uid in member_ids:
+    async def send_to_users(
+        self, user_ids, frame: dict, *, exclude_user_id: int | None = None
+    ) -> None:
+        """Send *frame* to each connected user in *user_ids*, skipping
+        *exclude_user_id*. One dead recipient never stops the rest."""
+        for uid in user_ids:
             if uid == exclude_user_id:
                 continue
             ws = self.connection_manager.get_websocket(uid)
