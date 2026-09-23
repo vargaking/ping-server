@@ -57,14 +57,14 @@ def _recv(ws, wanted_type):
     raise AssertionError(f"no {wanted_type} frame arrived")
 
 
-def _nothing_of_type(ws, unwanted_type, probe_frame, probe_wanted_type):
-    """Assert *unwanted_type* never arrives on *ws* by sending a follow-up
-    probe and checking what shows up first. The TestClient WS is synchronous,
-    so this is the only way to assert "nothing arrives" without blocking
-    forever; mirrors the pattern used elsewhere in this test suite."""
-    ws.send_json(probe_frame)
-    frame = _recv(ws, probe_wanted_type)
-    assert frame["type"] != unwanted_type
+def _frames_until(ws, wanted_type):
+    """Every frame up to and including the first *wanted_type* one."""
+    frames = []
+    for _ in range(10):
+        frames.append(ws.receive_json())
+        if frames[-1]["type"] == wanted_type:
+            return frames
+    raise AssertionError(f"no {wanted_type} frame arrived")
 
 
 @pytest.fixture
@@ -343,11 +343,13 @@ def test_read_update_notifies_only_the_users_other_socket(two_members):
                 "last_read_message_id": msg_id,
             }
 
-            # alice (a different user) must not receive bob's read_state frame.
+            # alice (a different user) must not receive bob's read_state frame:
+            # everything she sees before bob's probe message is checked.
             probe = chat_frame(server["id"], channel["id"])
             bob_ws.send_json(probe)
-            delivered = _recv(alice_ws, "message")
-            assert delivered["id"] == probe["id"]
+            frames = _frames_until(alice_ws, "message")
+            assert frames[-1]["id"] == probe["id"]
+            assert all(f["type"] != "read_state" for f in frames)
 
 
 # --- multi-socket delivery -----------------------------------------------------
