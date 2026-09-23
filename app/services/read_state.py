@@ -1,6 +1,7 @@
 import logging
 
 from tortoise.exceptions import IntegrityError
+from tortoise.functions import Max
 
 from app.models.Message import Message
 from app.models.ReadState import ReadState
@@ -84,54 +85,59 @@ async def last_message_uuid(
     return str(row["uuid"]) if row else None
 
 
+async def _last_messages(thread_field: str, thread_ids: list[int]) -> dict[int, dict]:
+    """{thread_id: {"id", "uuid"}} of the newest message in each thread, via one
+    grouped MAX(id) plus one lookup, instead of scanning every message."""
+    newest = await Message.filter(**{f"{thread_field}__in": thread_ids}).annotate(
+        max_id=Max("id")).group_by(thread_field).values(thread_field, "max_id")
+    rows = await Message.filter(
+        id__in=[n["max_id"] for n in newest]).values(thread_field, "id", "uuid")
+    return {row[thread_field]: row for row in rows}
+
+
+async def _resolve_markers(
+    thread_field: str, thread_ids: list[int], markers: dict, last_by_thread: dict
+) -> dict[int, str | None]:
+    result = {}
+    for tid in thread_ids:
+        marker = markers.get(tid)
+        last_row = last_by_thread.get(tid)
+        if marker is None:
+            result[tid] = None
+        elif last_row is not None and last_row["id"] <= marker:
+            # Fully read, the common case: no extra query.
+            result[tid] = str(last_row["uuid"])
+        else:
+            result[tid] = await resolve_marker_uuid(marker, **{thread_field: tid})
+    return result
+
+
 async def batch_channel_state(user_id: int, channel_ids: list[int]) -> dict:
-    """Read markers + last message per channel, in a handful of queries
-    instead of one pair per channel.
+    """Read marker + last message per channel for a channel list.
 
     Returns {channel_id: {"last_read_message_id": str|None, "last_message_id": str|None}}.
     """
     if not channel_ids:
         return {}
 
-    markers = await ReadState.filter(
+    markers = dict(await ReadState.filter(
         user_id=user_id, channel_id__in=channel_ids
-    ).values("channel_id", "last_read_message_id")
-    marker_by_channel = {m["channel_id"]: m["last_read_message_id"] for m in markers}
+    ).values_list("channel_id", "last_read_message_id"))
+    last_by_channel = await _last_messages("channel_id", channel_ids)
+    last_read = await _resolve_markers("channel_id", channel_ids, markers, last_by_channel)
 
-    # One query for the last message per channel: fetch every message's
-    # (channel_id, id) pair for these channels in id order and keep the last
-    # one seen per channel. channel_ids is small (a server's channel list),
-    # so this stays cheap.
-    last_rows = await Message.filter(channel_id__in=channel_ids).order_by("id").values(
-        "channel_id", "id", "uuid")
-    last_by_channel: dict[int, dict] = {}
-    for row in last_rows:
-        last_by_channel[row["channel_id"]] = row
-
-    # Resolve each marker to the newest surviving message at-or-before it.
-    # This still needs one lookup per channel that has a marker; markers are
-    # rare enough (one per user per channel) that this is fine.
-    result = {}
-    for cid in channel_ids:
-        marker = marker_by_channel.get(cid)
-        last_row = last_by_channel.get(cid)
-        if marker is not None and last_row is not None and last_row["id"] <= marker:
-            # The stored marker is at or past the last message (the common
-            # "fully read" case) — no extra query needed.
-            last_read_uuid = str(last_row["uuid"])
-        elif marker is not None:
-            last_read_uuid = await resolve_marker_uuid(marker, channel_id=cid)
-        else:
-            last_read_uuid = None
-        result[cid] = {
-            "last_read_message_id": last_read_uuid,
-            "last_message_id": str(last_row["uuid"]) if last_row else None,
+    return {
+        cid: {
+            "last_read_message_id": last_read[cid],
+            "last_message_id": (
+                str(last_by_channel[cid]["uuid"]) if cid in last_by_channel else None),
         }
-    return result
+        for cid in channel_ids
+    }
 
 
 async def batch_conversation_state(user_id: int, conversation_ids: list[int]) -> dict:
-    """Read markers + last message + unread count per conversation.
+    """Read marker + last message + unread count per conversation.
 
     Returns {conversation_id: {"last_read_message_id": str|None,
     "last_message_id": str|None, "unread_count": int}}.
@@ -139,35 +145,27 @@ async def batch_conversation_state(user_id: int, conversation_ids: list[int]) ->
     if not conversation_ids:
         return {}
 
-    markers = await ReadState.filter(
+    markers = dict(await ReadState.filter(
         user_id=user_id, conversation_id__in=conversation_ids
-    ).values("conversation_id", "last_read_message_id")
-    marker_by_convo = {m["conversation_id"]: m["last_read_message_id"] for m in markers}
-
-    last_rows = await Message.filter(conversation_id__in=conversation_ids).order_by("id").values(
-        "conversation_id", "id", "uuid")
-    last_by_convo: dict[int, dict] = {}
-    for row in last_rows:
-        last_by_convo[row["conversation_id"]] = row
+    ).values_list("conversation_id", "last_read_message_id"))
+    last_by_convo = await _last_messages("conversation_id", conversation_ids)
+    last_read = await _resolve_markers(
+        "conversation_id", conversation_ids, markers, last_by_convo)
 
     result = {}
     for cid in conversation_ids:
-        marker = marker_by_convo.get(cid)
+        marker = markers.get(cid)
         last_row = last_by_convo.get(cid)
-        if marker is not None and last_row is not None and last_row["id"] <= marker:
-            last_read_uuid = str(last_row["uuid"])
-        elif marker is not None:
-            last_read_uuid = await resolve_marker_uuid(marker, conversation_id=cid)
+        if last_row is None or (marker is not None and last_row["id"] <= marker):
+            unread_count = 0
         else:
-            last_read_uuid = None
-
-        unread_query = Message.filter(conversation_id=cid).exclude(author_id=user_id)
-        if marker is not None:
-            unread_query = unread_query.filter(id__gt=marker)
-        unread_count = await unread_query.count()
+            unread_query = Message.filter(conversation_id=cid).exclude(author_id=user_id)
+            if marker is not None:
+                unread_query = unread_query.filter(id__gt=marker)
+            unread_count = await unread_query.count()
 
         result[cid] = {
-            "last_read_message_id": last_read_uuid,
+            "last_read_message_id": last_read[cid],
             "last_message_id": str(last_row["uuid"]) if last_row else None,
             "unread_count": unread_count,
         }

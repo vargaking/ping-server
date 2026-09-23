@@ -15,7 +15,23 @@ async def upgrade(db: BaseDBAsyncClient) -> str:
     CONSTRAINT "uid_read_states_user_id_f7f441" UNIQUE ("user_id", "channel_id"),
     CONSTRAINT "uid_read_states_user_id_4b6c79" UNIQUE ("user_id", "conversation_id")
 );
-COMMENT ON TABLE "read_states" IS 'How far a user has read into a channel or a DM conversation.';"""
+COMMENT ON TABLE "read_states" IS 'How far a user has read into a channel or a DM conversation.';
+        -- Existing history counts as read, so the deploy doesn't light up every thread.
+        INSERT INTO "read_states" ("user_id", "channel_id", "last_read_message_id")
+        SELECT uts."user_id", m."channel_id", MAX(m."id")
+        FROM "messages" m
+        JOIN "channels" c ON c."id" = m."channel_id"
+        JOIN "user_to_server" uts ON uts."server_id" = c."server_id"
+        GROUP BY uts."user_id", m."channel_id";
+        INSERT INTO "read_states" ("user_id", "conversation_id", "last_read_message_id")
+        SELECT p."user_id", m."conversation_id", MAX(m."id")
+        FROM "messages" m
+        JOIN (
+            SELECT "id", "user_a_id" AS "user_id" FROM "conversations"
+            UNION ALL
+            SELECT "id", "user_b_id" FROM "conversations"
+        ) p ON p."id" = m."conversation_id"
+        GROUP BY p."user_id", m."conversation_id";"""
 
 
 async def downgrade(db: BaseDBAsyncClient) -> str:
