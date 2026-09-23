@@ -63,6 +63,8 @@ class InvitePublicResponse(BaseModel):
     """Limited info returned to non-members checking an invite."""
     id: UUID
     server_id: int
+    server_name: str
+    server_icon: Optional[str] = None
     is_valid: bool
     has_password: bool
 
@@ -129,13 +131,18 @@ async def get_invite(
     invite_id: UUID,
     current_user: User = Depends(get_current_user),
 ):
-    invite = await Invite.get_or_none(id=invite_id)
+    invite = await Invite.get_or_none(id=invite_id).prefetch_related("server")
     if not invite:
         raise HTTPException(status_code=404, detail="Invite not found")
 
+    # Holding the invite is what grants a preview of the server: /servers/{id}
+    # is members-only, so the invite page can't fetch this itself.
+    server = invite.server
     return InvitePublicResponse(
         id=invite.id,
         server_id=invite.server_id,
+        server_name=server.name,
+        server_icon=(server.server_profile or {}).get("icon"),
         is_valid=_is_valid(invite),
         has_password=invite.password_hash is not None,
     )

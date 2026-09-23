@@ -142,3 +142,19 @@ def test_owner_can_modify_invites(client):
 
     assert client.put(f"/invites/{invite['id']}", json={"is_active": False}).status_code == 200
     assert client.delete(f"/invites/{invite['id']}").status_code == 204
+
+
+def test_non_member_can_preview_server_through_invite(client, new_client):
+    register(client, "alice")
+    server = create_server(client, "Gaming")
+    invite = client.post("/invites/", json={"server_id": server["id"]}).json()
+
+    bob = new_client()
+    register(bob, "bob")
+    # The server itself stays hidden from non-members...
+    assert bob.get(f"/servers/{server['id']}").status_code == 404
+    # ...but the invite carries enough to render the join page.
+    preview = bob.get(f"/invites/{invite['id']}")
+    assert preview.status_code == 200, preview.text
+    assert preview.json()["server_name"] == "Gaming"
+    assert preview.json()["is_valid"] is True
