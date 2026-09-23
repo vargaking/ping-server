@@ -8,6 +8,7 @@ from fastapi import APIRouter, Depends, HTTPException, Request, status
 from pydantic import BaseModel
 
 from ..middleware import get_current_user
+from ..models.Conversation import Conversation
 from ..models.Message import Message
 from ..models.Server import Server
 from ..models.User import User
@@ -31,14 +32,50 @@ def _parse_uuid(message_id: str) -> UUID:
         raise HTTPException(status_code=404, detail="Message not found")
 
 
-async def _load_message_and_server(message_id: str) -> tuple[Message, Server]:
+async def _load_message_and_scope(
+    message_id: str, user: User
+) -> tuple[Message, Server | None, Conversation | None]:
+    """Fetch a message the caller can see, plus the server or conversation it
+    lives in (exactly one of the two is set).
+
+    DM messages are only visible to the two participants; anyone else gets a
+    404, matching the conversation endpoints, so ids can't be probed.
+    """
     message = await Message.get_or_none(uuid=_parse_uuid(message_id))
     if not message:
         raise HTTPException(status_code=404, detail="Message not found")
+
+    if message.conversation_id is not None:
+        conversation = await Conversation.get_or_none(id=message.conversation_id)
+        if not conversation or not conversation.has_participant(user.id):
+            raise HTTPException(status_code=404, detail="Message not found")
+        return message, None, conversation
+
     server = await Server.get_or_none(id=message.server_id)
     if not server:
         raise HTTPException(status_code=404, detail="Server not found")
-    return message, server
+    await require_membership(user, server)
+    return message, server, None
+
+
+async def _notify(
+    request: Request,
+    server: Server | None,
+    conversation: Conversation | None,
+    frame: dict,
+    exclude_user_id: int,
+) -> None:
+    """Fan *frame* out to the server's members or the DM's participants."""
+    comms = getattr(request.app.state, "comms", None)
+    if comms is None:
+        return
+    if conversation is not None:
+        await comms.send_to_users(
+            [conversation.user_a_id, conversation.user_b_id],
+            frame, exclude_user_id=exclude_user_id,
+        )
+    else:
+        await comms.broadcast_to_server(server.id, frame, exclude_user_id=exclude_user_id)
 
 
 def _wire_message(message: Message, content: Any) -> dict:
@@ -50,6 +87,7 @@ def _wire_message(message: Message, content: Any) -> dict:
         "id": str(message.uuid),
         "server_id": message.server_id,
         "channel_id": message.channel_id,
+        "conversation_id": message.conversation_id,
         "user_id": message.author_id,
         "content": content,
         "timestamp": timestamp.isoformat() if isinstance(timestamp, datetime) else timestamp,
@@ -65,8 +103,8 @@ async def edit_message(
     current_user: User = Depends(get_current_user),
 ):
     """Edit a message's content. Only the author may edit; sets edited_at."""
-    message, server = await _load_message_and_server(message_id)
-    await require_membership(current_user, server)
+    message, server, conversation = await _load_message_and_scope(
+        message_id, current_user)
 
     if message.author_id != current_user.id:
         raise HTTPException(status_code=403, detail="You can only edit your own messages")
@@ -78,14 +116,10 @@ async def edit_message(
     await message.save()
 
     payload = _wire_message(message, content)
-
-    comms = getattr(request.app.state, "comms", None)
-    if comms is not None:
-        await comms.broadcast_to_server(
-            server.id,
-            {"type": "message_updated", **payload},
-            exclude_user_id=current_user.id,
-        )
+    await _notify(
+        request, server, conversation,
+        {"type": "message_updated", **payload}, current_user.id,
+    )
 
     return payload
 
@@ -96,26 +130,27 @@ async def delete_message(
     request: Request,
     current_user: User = Depends(get_current_user),
 ):
-    """Delete a message. The author may delete their own; the server owner may
-    delete anyone's."""
-    message, server = await _load_message_and_server(message_id)
-    await require_membership(current_user, server)
+    """Delete a message. The author may delete their own; in a server channel
+    the server owner may delete anyone's. DMs have no owner, so author only."""
+    message, server, conversation = await _load_message_and_scope(
+        message_id, current_user)
 
     is_author = message.author_id == current_user.id
-    is_owner = server.owner_id is not None and server.owner_id == current_user.id
+    is_owner = (
+        server is not None
+        and server.owner_id is not None
+        and server.owner_id == current_user.id
+    )
     if not (is_author or is_owner):
         raise HTTPException(status_code=403, detail="Not allowed to delete this message")
 
     frame = {
         "type": "message_deleted",
         "id": str(message.uuid),
-        "server_id": server.id,
+        "server_id": message.server_id,
         "channel_id": message.channel_id,
+        "conversation_id": message.conversation_id,
     }
     await message.delete()
 
-    comms = getattr(request.app.state, "comms", None)
-    if comms is not None:
-        await comms.broadcast_to_server(
-            server.id, frame, exclude_user_id=current_user.id
-        )
+    await _notify(request, server, conversation, frame, current_user.id)

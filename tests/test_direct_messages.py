@@ -232,3 +232,92 @@ def test_non_participant_cannot_read_history(three_users):
 def test_history_unknown_conversation_is_404(three_users):
     (alice_client, _), _, _ = three_users
     assert alice_client.get("/conversations/999999/messages").status_code == 404
+
+
+# --- edit & delete ---------------------------------------------------------
+
+EDITED = {"type": "doc", "content": [{"type": "paragraph",
+                                      "content": [{"type": "text", "text": "edited"}]}]}
+
+
+def _post_dm(alice_ws, bob_ws, conversation_id):
+    """Send a DM from alice and wait until bob has it (so it's persisted)."""
+    frame = dm_frame(conversation_id)
+    alice_ws.send_json(frame)
+    assert _recv(bob_ws, "direct_message")["id"] == frame["id"]
+    return frame["id"]
+
+
+def test_author_edits_dm_and_peer_receives_update(three_users):
+    (alice_client, _), (bob_client, bob), _ = three_users
+    convo = open_conversation(alice_client, bob["id"])
+
+    with alice_client.websocket_connect("/ws", headers=HEADERS) as alice_ws, \
+            bob_client.websocket_connect("/ws", headers=HEADERS) as bob_ws:
+        message_id = _post_dm(alice_ws, bob_ws, convo["id"])
+
+        res = alice_client.patch(f"/messages/{message_id}", json={"content": EDITED})
+        assert res.status_code == 200, res.text
+        body = res.json()
+        assert body["content"] == EDITED
+        assert body["edited_at"] is not None
+        assert body["conversation_id"] == convo["id"]
+        assert body["server_id"] is None
+
+        frame = _recv(bob_ws, "message_updated")
+        assert frame["id"] == message_id
+        assert frame["conversation_id"] == convo["id"]
+        assert frame["content"] == EDITED
+
+    history = alice_client.get(f"/conversations/{convo['id']}/messages").json()["messages"]
+    assert history[0]["edited_at"] is not None
+
+
+def test_peer_cannot_edit_or_delete_your_dm(three_users):
+    (alice_client, _), (bob_client, bob), _ = three_users
+    convo = open_conversation(alice_client, bob["id"])
+
+    with alice_client.websocket_connect("/ws", headers=HEADERS) as alice_ws, \
+            bob_client.websocket_connect("/ws", headers=HEADERS) as bob_ws:
+        message_id = _post_dm(alice_ws, bob_ws, convo["id"])
+
+    assert bob_client.patch(
+        f"/messages/{message_id}", json={"content": EDITED}).status_code == 403
+    # No owner override in a DM: the peer can't delete it either.
+    assert bob_client.delete(f"/messages/{message_id}").status_code == 403
+
+
+def test_non_participant_cannot_edit_or_delete_dm(three_users):
+    (alice_client, _), (bob_client, bob), (carol_client, _) = three_users
+    convo = open_conversation(alice_client, bob["id"])
+
+    with alice_client.websocket_connect("/ws", headers=HEADERS) as alice_ws, \
+            bob_client.websocket_connect("/ws", headers=HEADERS) as bob_ws:
+        message_id = _post_dm(alice_ws, bob_ws, convo["id"])
+
+    # 404, not 403: an outsider can't confirm the message exists.
+    assert carol_client.patch(
+        f"/messages/{message_id}", json={"content": EDITED}).status_code == 404
+    assert carol_client.delete(f"/messages/{message_id}").status_code == 404
+    history = alice_client.get(f"/conversations/{convo['id']}/messages").json()["messages"]
+    assert [m["id"] for m in history] == [message_id]
+    assert history[0]["edited_at"] is None
+
+
+def test_author_deletes_dm_and_peer_receives_delete(three_users):
+    (alice_client, _), (bob_client, bob), _ = three_users
+    convo = open_conversation(alice_client, bob["id"])
+
+    with alice_client.websocket_connect("/ws", headers=HEADERS) as alice_ws, \
+            bob_client.websocket_connect("/ws", headers=HEADERS) as bob_ws:
+        message_id = _post_dm(alice_ws, bob_ws, convo["id"])
+
+        assert alice_client.delete(f"/messages/{message_id}").status_code == 204
+
+        frame = _recv(bob_ws, "message_deleted")
+        assert frame["id"] == message_id
+        assert frame["conversation_id"] == convo["id"]
+        assert frame["server_id"] is None
+
+    assert alice_client.get(
+        f"/conversations/{convo['id']}/messages").json()["messages"] == []
