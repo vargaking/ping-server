@@ -28,17 +28,23 @@ class Communication:
         """Register an *authenticated* socket and announce the user online.
 
         ``user_id`` must come from the session resolved during the handshake,
-        never from anything the client sent.
+        never from anything the client sent. A user may already have other
+        live sockets (another tab); the connecting socket always gets its own
+        presence_init snapshot, but the online presence_update only fires the
+        first time the user goes from 0 to 1 sockets.
         """
+        was_online = self.connection_manager.is_online(user_id)
         self.connection_manager.add_connection(user_id, websocket)
-        await self._notify_presence(user_id, online=True)
+        await self._notify_presence(user_id, online=True, websocket=websocket,
+                                     was_online=was_online)
 
     async def remove_connection_by_websocket(self, websocket: WebSocket):
         user_id = self.connection_manager.remove_connection_by_websocket(
             websocket)
         # Only announce offline if the user has no remaining live socket: a
-        # refresh may have already reconnected them on a new socket, in which
-        # case the old socket's close must not flap their presence.
+        # refresh may have already reconnected them on a new socket, or they
+        # may simply have another tab open, and either case must not flap
+        # their presence.
         if user_id and not self.connection_manager.is_online(user_id):
             await self._notify_presence(user_id, online=False)
 
@@ -117,26 +123,38 @@ class Communication:
             logger.warning(
                 "Failed to send presence_init to user %s", user_id, exc_info=True)
 
-    async def _notify_presence(self, user_id: int, *, online: bool) -> None:
+    async def _notify_presence(
+        self,
+        user_id: int,
+        *,
+        online: bool,
+        websocket: WebSocket | None = None,
+        was_online: bool = False,
+    ) -> None:
         """Handle presence notifications on connect/disconnect.
 
         When *online* is True (user just connected):
-          1. Send the connecting user the list of their related users who are
-             currently online.
-          2. Notify those related online users that this user came online.
+          1. Send the connecting socket its own presence_init snapshot,
+             regardless of how many other sockets this user already has.
+          2. If this is the user's first socket (0 -> 1), notify related
+             online users that this user came online. A second tab connecting
+             must not re-announce someone who is already online.
 
         When *online* is False (user disconnected):
-          Notify related online users that this user went offline.
+          Notify related online users that this user went offline. The caller
+          only calls this once the user has no remaining sockets.
         """
         related_user_ids = await self.get_related_user_ids(user_id)
 
         if online:
-            ws = self.connection_manager.get_websocket(user_id)
-            if ws:
+            if websocket is not None:
                 await self._send_presence_snapshot(
-                    user_id, ws, related_user_ids=related_user_ids)
+                    user_id, websocket, related_user_ids=related_user_ids)
+            if was_online:
+                return
 
-        # Broadcast the status change to related online users
+        # Broadcast the status change to related online users, on every
+        # socket they have open.
         status_message = {
             "type": "presence_update",
             "user_id": user_id,
@@ -144,8 +162,7 @@ class Communication:
         }
 
         for uid in related_user_ids:
-            ws = self.connection_manager.get_websocket(uid)
-            if ws:
+            for ws in self.connection_manager.get_websockets(uid):
                 try:
                     await ws.send_json(status_message)
                 except Exception:
@@ -170,21 +187,25 @@ class Communication:
     async def send_to_users(
         self, user_ids, frame: dict, *, exclude_user_id: int | None = None
     ) -> None:
-        """Send *frame* to each connected user in *user_ids*, skipping
-        *exclude_user_id*. One dead recipient never stops the rest."""
+        """Send *frame* to every socket of each connected user in *user_ids*,
+        skipping *exclude_user_id* entirely. One dead socket never stops
+        delivery to the rest."""
         for uid in user_ids:
             if uid == exclude_user_id:
                 continue
-            ws = self.connection_manager.get_websocket(uid)
-            if ws is None:
-                continue
-            try:
-                await ws.send_json(frame)
-            except Exception:
-                logger.warning(
-                    "Failed to broadcast %s to user %s",
-                    frame.get("type"), uid, exc_info=True,
-                )
+            for ws in self.connection_manager.get_websockets(uid):
+                try:
+                    await ws.send_json(frame)
+                except Exception:
+                    logger.warning(
+                        "Failed to broadcast %s to user %s",
+                        frame.get("type"), uid, exc_info=True,
+                    )
+
+    async def send_to_user(self, user_id: int, frame: dict) -> None:
+        """Send *frame* to every socket of a single user (e.g. a REST-triggered
+        update like read_state, where the caller can't tell which tab acted)."""
+        await self.send_to_users([user_id], frame)
 
     async def notify_user_invalidate(self, user_id: int):
         """Notify related users that a user's profile has changed.
@@ -201,8 +222,7 @@ class Communication:
         }
 
         for uid in related_user_ids:
-            ws = self.connection_manager.get_websocket(uid)
-            if ws:
+            for ws in self.connection_manager.get_websockets(uid):
                 try:
                     await ws.send_json(message)
                 except Exception:

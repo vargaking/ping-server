@@ -8,6 +8,7 @@ from .Conversation import Conversation
 from .Message import Message
 from .Token import Token
 from .Invite import Invite
+from .ReadState import ReadState
 
 __all__ = ["Role", "User", "Server", "RoleToUser", "UserToServer",
-           "Channel", "Conversation", "Message", "Token", "Invite"]
+           "Channel", "Conversation", "Message", "Token", "Invite", "ReadState"]

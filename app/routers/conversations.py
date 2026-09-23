@@ -1,8 +1,9 @@
 import logging
 from datetime import datetime
 from typing import List, Optional
+from uuid import UUID
 
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, Request, status
 from pydantic import BaseModel
 from tortoise.expressions import Q
 
@@ -10,6 +11,7 @@ from ..middleware import get_current_user
 from ..models.Conversation import Conversation
 from ..models.Message import Message
 from ..models.User import User
+from ..services import read_state
 from .channels import (
     HISTORY_PAGE_SIZE,
     MAX_HISTORY_PAGE_SIZE,
@@ -45,6 +47,13 @@ class ConversationResponse(BaseModel):
     # Last activity for client-side sorting: the last message's time, or the
     # conversation's own creation time when it has no messages yet.
     last_activity: datetime
+    last_read_message_id: Optional[str] = None
+    last_message_id: Optional[str] = None
+    unread_count: int = 0
+
+
+class ReadMarkerUpdate(BaseModel):
+    message_id: str
 
 
 async def _load_participant_conversation(
@@ -81,17 +90,33 @@ def _preview(row: Optional[dict]) -> Optional[MessagePreview]:
     )
 
 
-async def _to_response(conversation: Conversation, user: User) -> ConversationResponse:
+async def _to_response(
+    conversation: Conversation, user: User, *, state: Optional[dict] = None
+) -> ConversationResponse:
+    """Build the wire response for one conversation.
+
+    *state* is this conversation's entry from batch_conversation_state, when
+    the caller already fetched it for a whole list; otherwise it is looked up
+    here for the single-conversation case (get-or-create).
+    """
     other = await User.get(id=conversation.other_user_id(user.id))
     last_row = await _last_message(conversation.id)
     preview = _preview(last_row)
     last_activity = last_row["timestamp"] if last_row else conversation.created_at
+
+    if state is None:
+        batch = await read_state.batch_conversation_state(user.id, [conversation.id])
+        state = batch.get(conversation.id, {})
+
     return ConversationResponse(
         id=conversation.id,
         created_at=conversation.created_at,
         other_user=UserResponse.from_user(other),
         last_message=preview,
         last_activity=last_activity,
+        last_read_message_id=state.get("last_read_message_id"),
+        last_message_id=state.get("last_message_id"),
+        unread_count=state.get("unread_count", 0),
     )
 
 
@@ -132,9 +157,63 @@ async def list_conversations(current_user: User = Depends(get_current_user)):
         Q(user_a_id=current_user.id) | Q(user_b_id=current_user.id)
     )
 
-    responses = [await _to_response(c, current_user) for c in conversations]
+    batch = await read_state.batch_conversation_state(
+        current_user.id, [c.id for c in conversations])
+    responses = [
+        await _to_response(c, current_user, state=batch.get(c.id, {}))
+        for c in conversations
+    ]
     responses.sort(key=lambda r: r.last_activity, reverse=True)
     return responses
+
+
+@router.put("/{conversation_id}/read")
+async def mark_conversation_read(
+    conversation_id: int,
+    body: ReadMarkerUpdate,
+    request: Request,
+    current_user: User = Depends(get_current_user),
+):
+    """Advance the caller's read marker for this conversation to *message_id*.
+
+    Same forward-only semantics as the channel read endpoint. Unknown
+    conversation or non-participant both 404, matching the rest of this
+    router (a 403 would leak whether the conversation exists).
+    """
+    conversation = await _load_participant_conversation(conversation_id, current_user)
+
+    try:
+        message_uuid = UUID(body.message_id)
+    except ValueError:
+        raise HTTPException(status_code=404, detail="Message not found")
+
+    message = await Message.get_or_none(
+        uuid=message_uuid, conversation_id=conversation_id)
+    if not message:
+        raise HTTPException(status_code=404, detail="Message not found")
+
+    moved = await read_state.advance(
+        current_user.id, conversation_id=conversation_id, message_pk=message.id)
+
+    marker = await read_state.get_marker(current_user.id, conversation_id=conversation_id)
+    effective_uuid = await read_state.resolve_marker_uuid(
+        marker, conversation_id=conversation_id)
+
+    if moved:
+        comms = getattr(request.app.state, "comms", None)
+        if comms is not None:
+            await comms.send_to_user(current_user.id, {
+                "type": "read_state",
+                "channel_id": None,
+                "server_id": None,
+                "conversation_id": conversation_id,
+                "last_read_message_id": effective_uuid,
+            })
+
+    return {
+        "conversation_id": conversation_id,
+        "last_read_message_id": effective_uuid,
+    }
 
 
 @router.get("/{conversation_id}/messages")
