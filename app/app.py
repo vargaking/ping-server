@@ -12,7 +12,7 @@ from tortoise.contrib.fastapi import register_tortoise
 from app.communication import Communication
 from app.db import TORTOISE_CONFIG
 from app.rate_limit import limiter
-from app.routers import auth, channels, invites, messages, servers, users, voice
+from app.routers import auth, channels, conversations, invites, messages, servers, users, voice
 from app.settings import ALLOWED_ORIGINS, ALLOWED_ORIGIN_REGEX, is_origin_allowed
 from app.utils import lifespan
 from .middleware import auth_middleware, resolve_user_from_token
@@ -48,6 +48,7 @@ app.include_router(auth.router)
 app.include_router(users.router)
 app.include_router(servers.router)
 app.include_router(channels.router)
+app.include_router(conversations.router)
 app.include_router(messages.router)
 app.include_router(invites.router)
 app.include_router(voice.router)

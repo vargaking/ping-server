@@ -4,10 +4,11 @@ import logging
 from fastapi import WebSocket
 
 from app.models.Channel import Channel
+from app.models.Conversation import Conversation
 from app.models.Message import Message
 from app.models.UserToServer import UserToServer
 from app.services.connection_manager import ConnectionManager
-from app.ws_schemas import MessageFrame
+from app.ws_schemas import DirectMessageFrame, MessageFrame
 
 logger = logging.getLogger("app.services.chat_service")
 
@@ -75,8 +76,66 @@ class ChatService:
         member_ids = await UserToServer.filter(
             server_id=server_id).values_list("user_id", flat=True)
 
-        for uid in member_ids:
-            if uid == sender_id:
+        await self._fan_out(outgoing, member_ids, exclude_id=sender_id)
+
+    async def handle_direct_message(
+        self, sender_id: int, message: DirectMessageFrame, sender_ws: WebSocket
+    ) -> None:
+        """Persist a validated DM from *sender_id* and deliver it to the peer.
+
+        Authorization is "sender is a participant of this conversation" — there
+        is no server membership to check. As with channel messages, the frame's
+        identity is the socket's, not anything the client put in the frame.
+        """
+        conversation = await Conversation.get_or_none(id=message.conversation_id)
+        if conversation is None or not conversation.has_participant(sender_id):
+            logger.warning(
+                "User %s tried to post to conversation %s without access",
+                sender_id, message.conversation_id,
+            )
+            await self._send_error(sender_ws, "forbidden", message.id)
+            return
+
+        content_payload = message.content
+        if isinstance(content_payload, dict):
+            content_payload = json.dumps(content_payload)
+
+        # Persist first: never show the peer a message that was not stored.
+        await Message.create(
+            uuid=message.id,
+            content=content_payload,
+            author_id=sender_id,
+            conversation_id=conversation.id,
+            timestamp=message.timestamp,
+            metadata=message.metadata,
+        )
+
+        # Rebuild from known fields so the sender can't smuggle a forged
+        # user_id (or anything else) to the peer.
+        outgoing = {
+            "type": "direct_message",
+            "id": message.id,
+            "conversation_id": conversation.id,
+            "user_id": sender_id,
+            "content": message.content,
+            "timestamp": message.timestamp,
+        }
+
+        # Deliver to the other participant. The sender already has it locally,
+        # matching the channel path's exclude-sender behaviour.
+        peer_id = conversation.other_user_id(sender_id)
+        await self._fan_out(outgoing, [peer_id], exclude_id=sender_id)
+
+    async def _fan_out(
+        self, outgoing: dict, recipient_ids, *, exclude_id: int | None = None
+    ) -> None:
+        """Send *outgoing* to each connected recipient, skipping *exclude_id*.
+
+        One dead recipient must not take down the sender's socket or stop
+        delivery to everyone after them.
+        """
+        for uid in recipient_ids:
+            if uid == exclude_id:
                 continue
             websocket = self.connection_manager.get_websocket(uid)
             if websocket is None:
@@ -84,8 +143,6 @@ class ChatService:
             try:
                 await websocket.send_json(outgoing)
             except Exception:
-                # One dead recipient must not take down the sender's socket or
-                # stop delivery to everyone after them.
                 logger.warning(
                     "Failed to deliver message to user %s", uid, exc_info=True)
 

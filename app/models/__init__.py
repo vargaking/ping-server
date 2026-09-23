@@ -4,9 +4,10 @@ from .Server import Server
 from .RoleToUser import RoleToUser
 from .UserToServer import UserToServer
 from .Channel import Channel
+from .Conversation import Conversation
 from .Message import Message
 from .Token import Token
 from .Invite import Invite
 
 __all__ = ["Role", "User", "Server", "RoleToUser", "UserToServer",
-           "Channel", "Message", "Token", "Invite"]
+           "Channel", "Conversation", "Message", "Token", "Invite"]

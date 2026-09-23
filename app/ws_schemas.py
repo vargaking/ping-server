@@ -14,6 +14,7 @@ __all__ = [
     "ConnectionInitFrame",
     "DisconnectFrame",
     "MessageFrame",
+    "DirectMessageFrame",
     "WSFrame",
     "parse_frame",
     "ValidationError",
@@ -39,8 +40,18 @@ class MessageFrame(BaseModel):
     metadata: dict = Field(default_factory=dict)
 
 
+class DirectMessageFrame(BaseModel):
+    type: Literal["direct_message"]
+    id: str
+    conversation_id: int
+    # A ProseMirror doc (dict) or plain string; validated for presence only.
+    content: Any
+    timestamp: str
+    metadata: dict = Field(default_factory=dict)
+
+
 WSFrame = Annotated[
-    Union[ConnectionInitFrame, DisconnectFrame, MessageFrame],
+    Union[ConnectionInitFrame, DisconnectFrame, MessageFrame, DirectMessageFrame],
     Field(discriminator="type"),
 ]
 
