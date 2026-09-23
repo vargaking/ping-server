@@ -7,6 +7,7 @@ from app.models.Channel import Channel
 from app.models.Conversation import Conversation
 from app.models.Message import Message
 from app.models.UserToServer import UserToServer
+from app.services import read_state
 from app.services.connection_manager import ConnectionManager
 from app.ws_schemas import DirectMessageFrame, MessageFrame
 
@@ -50,7 +51,7 @@ class ChatService:
             content_payload = json.dumps(content_payload)
 
         # Persist first: never show other people a message that was not stored.
-        await Message.create(
+        created = await Message.create(
             uuid=message.id,
             content=content_payload,
             author_id=sender_id,
@@ -59,6 +60,11 @@ class ChatService:
             timestamp=message.timestamp,
             metadata=message.metadata,
         )
+
+        # Your own message can never leave the thread unread for you, even
+        # after a reload on another device.
+        await read_state.advance(
+            sender_id, channel_id=channel_id, message_pk=created.id)
 
         # Rebuild the frame from known fields instead of relaying the client's
         # dict, so the sender can't smuggle a forged user_id (or anything else)
@@ -76,7 +82,7 @@ class ChatService:
         member_ids = await UserToServer.filter(
             server_id=server_id).values_list("user_id", flat=True)
 
-        await self._fan_out(outgoing, member_ids, exclude_id=sender_id)
+        await self._fan_out(outgoing, member_ids, sender_ws=sender_ws)
 
     async def handle_direct_message(
         self, sender_id: int, message: DirectMessageFrame, sender_ws: WebSocket
@@ -101,7 +107,7 @@ class ChatService:
             content_payload = json.dumps(content_payload)
 
         # Persist first: never show the peer a message that was not stored.
-        await Message.create(
+        created = await Message.create(
             uuid=message.id,
             content=content_payload,
             author_id=sender_id,
@@ -109,6 +115,11 @@ class ChatService:
             timestamp=message.timestamp,
             metadata=message.metadata,
         )
+
+        # Your own message can never leave the thread unread for you, even
+        # after a reload on another device.
+        await read_state.advance(
+            sender_id, conversation_id=conversation.id, message_pk=created.id)
 
         # Rebuild from known fields so the sender can't smuggle a forged
         # user_id (or anything else) to the peer.
@@ -121,30 +132,30 @@ class ChatService:
             "timestamp": message.timestamp,
         }
 
-        # Deliver to the other participant. The sender already has it locally,
-        # matching the channel path's exclude-sender behaviour.
+        # Deliver to the peer and back to the sender's other sockets/tabs; only
+        # the socket that sent it is excluded, via sender_ws below.
         peer_id = conversation.other_user_id(sender_id)
-        await self._fan_out(outgoing, [peer_id], exclude_id=sender_id)
+        await self._fan_out(outgoing, [peer_id, sender_id], sender_ws=sender_ws)
 
     async def _fan_out(
-        self, outgoing: dict, recipient_ids, *, exclude_id: int | None = None
+        self, outgoing: dict, recipient_ids, *, sender_ws: WebSocket | None = None
     ) -> None:
-        """Send *outgoing* to each connected recipient, skipping *exclude_id*.
+        """Send *outgoing* to every socket of each recipient, skipping only the
+        sending socket itself (not the whole sender) so the author's other
+        tabs still receive their own message.
 
         One dead recipient must not take down the sender's socket or stop
         delivery to everyone after them.
         """
         for uid in recipient_ids:
-            if uid == exclude_id:
-                continue
-            websocket = self.connection_manager.get_websocket(uid)
-            if websocket is None:
-                continue
-            try:
-                await websocket.send_json(outgoing)
-            except Exception:
-                logger.warning(
-                    "Failed to deliver message to user %s", uid, exc_info=True)
+            for websocket in self.connection_manager.get_websockets(uid):
+                if websocket is sender_ws:
+                    continue
+                try:
+                    await websocket.send_json(outgoing)
+                except Exception:
+                    logger.warning(
+                        "Failed to deliver message to user %s", uid, exc_info=True)
 
     @staticmethod
     async def _send_error(websocket: WebSocket, code: str, ref: str | None) -> None:
