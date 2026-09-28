@@ -52,6 +52,7 @@ The interactive API docs are then at http://localhost:8000/docs.
 | `AUTH_RATE_LIMIT` | no | `10/minute` | Per-IP limit on `/auth/login` and `/auth/register`. |
 | `INVITE_USE_RATE_LIMIT` | no | `20/minute` | Per-IP + per-invite limit on `POST /invites/{id}/use`. |
 | `LIVEKIT_*` | for voice | — | LiveKit API host/key/secret used to mint voice tokens. |
+| `LIVEKIT_API_URL` | no | `LIVEKIT_URL` with `ws`→`http` | Address the server uses to call LiveKit's API for voice presence. |
 
 > Session tokens expire 30 days after login/register; expired tokens are
 > rejected and deleted on next use, and pruned on startup.

@@ -2,12 +2,13 @@ import json
 import os
 from datetime import timedelta
 
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, Request, status
 from livekit import api
 from pydantic import BaseModel
 
 from ..middleware import get_current_user
 from ..models.Channel import Channel
+from ..models.Server import Server
 from ..models.User import User
 from ..utils import require_membership
 
@@ -81,3 +82,47 @@ async def create_voice_token(
     )
 
     return VoiceTokenResponse(token=token, url=LIVEKIT_URL, room=room)
+
+
+class VoicePresenceParticipant(BaseModel):
+    user_id: int
+    muted: bool
+    deafened: bool
+
+
+class VoicePresenceChannel(BaseModel):
+    channel_id: int
+    participants: list[VoicePresenceParticipant]
+
+
+@router.get("/presence/{server_id}", response_model=list[VoicePresenceChannel])
+async def get_voice_presence(
+    server_id: int,
+    request: Request,
+    current_user: User = Depends(get_current_user),
+) -> list[VoicePresenceChannel]:
+    """Who is currently in each voice channel of a server, for members.
+
+    Clients call this when they open a server; voice_state frames keep it
+    current afterwards. Empty when voice presence is not running.
+    """
+    server = await Server.get_or_none(id=server_id)
+    if not server:
+        raise HTTPException(status_code=404, detail="Server not found")
+    await require_membership(current_user, server)
+
+    presence = getattr(request.app.state, "voice_presence", None)
+    if presence is None:
+        return []
+
+    channel_ids = await Channel.filter(server_id=server_id).values_list("id", flat=True)
+    return [
+        VoicePresenceChannel(
+            channel_id=channel_id,
+            participants=[
+                VoicePresenceParticipant(**p.to_json()) for p in participants
+            ],
+        )
+        for channel_id in channel_ids
+        if (participants := presence.channel_participants(channel_id))
+    ]

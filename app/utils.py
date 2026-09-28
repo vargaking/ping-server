@@ -1,10 +1,13 @@
+import asyncio
 import logging
+from contextlib import suppress
 from datetime import datetime, timezone
 
 from fastapi import FastAPI, HTTPException
 from fastapi.concurrency import asynccontextmanager
 
 from .models.Token import Token
+from .services.voice_presence import create_voice_presence
 
 logger = logging.getLogger("app.utils")
 
@@ -17,6 +20,8 @@ async def lifespan(app: FastAPI):
     On startup we prune expired session tokens. Tortoise is already initialised
     at this point (register_tortoise wraps this lifespan), but keep it guarded
     so a housekeeping hiccup can never block the app from starting.
+
+    It also runs the voice presence poller when LiveKit is configured.
     """
     try:
         deleted = await Token.filter(
@@ -28,7 +33,27 @@ async def lifespan(app: FastAPI):
     except Exception:
         logger.warning("Failed to prune expired tokens on startup", exc_info=True)
 
+    presence = None
+    presence_task = None
+    try:
+        presence = create_voice_presence(getattr(app.state, "comms", None))
+        if presence is not None:
+            presence_task = asyncio.create_task(presence.run())
+    except Exception:
+        logger.warning("Failed to start voice presence", exc_info=True)
+    app.state.voice_presence = presence
+
     yield
+
+    if presence_task is not None:
+        presence_task.cancel()
+        with suppress(asyncio.CancelledError):
+            await presence_task
+    if presence is not None:
+        try:
+            await presence.aclose()
+        except Exception:
+            logger.warning("Failed to close voice presence", exc_info=True)
 
 
 async def require_membership(user, server):
