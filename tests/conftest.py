@@ -91,7 +91,7 @@ def create_channel(client: TestClient, server_id: int, name: str = "general",
                    channel_type: str = "text") -> dict:
     res = client.post(
         f"/channels/{server_id}/create",
-        params={"channel_name": name, "channel_type": channel_type},
+        json={"name": name, "type": channel_type},
     )
     assert res.status_code == 201, res.text
     return res.json()

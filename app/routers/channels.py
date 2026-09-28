@@ -1,12 +1,13 @@
 import base64
 import logging
 from datetime import datetime
-from typing import List, Optional
+from typing import List, Literal, Optional
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException, Request, status
-from pydantic import BaseModel
+from pydantic import BaseModel, field_validator
 from tortoise.expressions import Q
+from tortoise.transactions import in_transaction
 
 from ..middleware import get_current_user
 from ..models.Channel import Channel
@@ -15,7 +16,7 @@ from ..models.Server import Server
 from ..models.User import User
 from ..models.UserToServer import UserToServer
 from ..services import read_state
-from ..utils import require_membership
+from ..utils import require_membership, require_owner
 
 logger = logging.getLogger("app.routers.channels")
 
@@ -55,11 +56,59 @@ def _serialize(message: dict) -> dict:
     }
 
 
+CHANNEL_NAME_MAX = 100
+CHANNEL_TOPIC_MAX = 1024
+
+
+def _clean_name(value: str) -> str:
+    value = value.strip()
+    if not value:
+        raise ValueError("Channel name can't be empty")
+    if len(value) > CHANNEL_NAME_MAX:
+        raise ValueError(f"Channel name must be at most {CHANNEL_NAME_MAX} characters")
+    return value
+
+
+def _clean_topic(value: Optional[str]) -> Optional[str]:
+    if value is None:
+        return None
+    value = value.strip()
+    if len(value) > CHANNEL_TOPIC_MAX:
+        raise ValueError(f"Topic must be at most {CHANNEL_TOPIC_MAX} characters")
+    # An empty topic clears it rather than storing "".
+    return value or None
+
+
+class ChannelCreate(BaseModel):
+    name: str
+    type: Literal["text", "voice"] = "text"
+    topic: Optional[str] = None
+
+    _name = field_validator("name")(_clean_name)
+    _topic = field_validator("topic")(_clean_topic)
+
+
+class ChannelUpdate(BaseModel):
+    name: Optional[str] = None
+    topic: Optional[str] = None
+    # Accepted only so a client echoing the channel back gets a clear error
+    # instead of a silent ignore: a channel's type is fixed at creation.
+    type: Optional[str] = None
+
+    @field_validator("name")
+    @classmethod
+    def _name(cls, value: Optional[str]) -> Optional[str]:
+        return None if value is None else _clean_name(value)
+
+    _topic = field_validator("topic")(_clean_topic)
+
+
 class ChannelResponse(BaseModel):
     id: int
     name: str
     channel_settings: dict
     type: str
+    topic: Optional[str] = None
     last_read_message_id: Optional[str] = None
     last_message_id: Optional[str] = None
 
@@ -76,6 +125,7 @@ class ChannelResponse(BaseModel):
             name=channel.name,
             channel_settings=channel.channel_settings,
             type=channel.type,
+            topic=channel.topic,
             last_read_message_id=last_read_message_id,
             last_message_id=last_message_id,
         )
@@ -254,12 +304,27 @@ async def get_channels(
     ]
 
 
+async def _load_channel_and_server(channel_id: int) -> tuple[Channel, Server]:
+    channel = await Channel.get_or_none(id=channel_id)
+    if not channel:
+        raise HTTPException(status_code=404, detail="Channel not found")
+    server = await Server.get_or_none(id=channel.server_id)
+    if not server:
+        raise HTTPException(status_code=404, detail="Server not found")
+    return channel, server
+
+
+async def _broadcast(request: Request, server_id: int, frame: dict, exclude_user_id: int) -> None:
+    comms = getattr(request.app.state, "comms", None)
+    if comms is not None:
+        await comms.broadcast_to_server(server_id, frame, exclude_user_id=exclude_user_id)
+
+
 @router.post("/{server_id}/create", response_model=ChannelResponse, status_code=status.HTTP_201_CREATED)
 async def create_channel(
     server_id: int,
+    body: ChannelCreate,
     request: Request,
-    channel_name: str,
-    channel_type: str = "text",
     current_user: User = Depends(get_current_user),
 ):
     server = await Server.get_or_none(id=server_id)
@@ -268,9 +333,10 @@ async def create_channel(
     await require_membership(current_user, server)
 
     channel = await Channel.create(
-        name=channel_name,
+        name=body.name,
         channel_settings={},
-        type=channel_type,
+        type=body.type,
+        topic=body.topic,
         server=server,
     )
 
@@ -286,16 +352,78 @@ async def create_channel(
 
     # Tell everyone else in the server so their channel list patches in place.
     # The creator already has it from this response, so skip them.
-    comms = getattr(request.app.state, "comms", None)
-    if comms is not None:
-        await comms.broadcast_to_server(
-            server_id,
-            {
-                "type": "channel_created",
-                "server_id": server_id,
-                "channel": channel_response.model_dump(mode="json"),
-            },
-            exclude_user_id=current_user.id,
-        )
+    await _broadcast(request, server_id, {
+        "type": "channel_created",
+        "server_id": server_id,
+        "channel": channel_response.model_dump(mode="json"),
+    }, exclude_user_id=current_user.id)
 
     return channel_response
+
+
+@router.patch("/{channel_id}", response_model=ChannelResponse)
+async def update_channel(
+    channel_id: int,
+    body: ChannelUpdate,
+    request: Request,
+    current_user: User = Depends(get_current_user),
+):
+    """Rename a channel or change its topic. Owner only; the type is fixed."""
+    channel, server = await _load_channel_and_server(channel_id)
+    await require_membership(current_user, server)
+    require_owner(current_user, server)
+
+    changes = body.model_dump(exclude_unset=True)
+    if "type" in changes and changes.pop("type") != channel.type:
+        raise HTTPException(status_code=400, detail="A channel's type can't be changed")
+    if "name" in changes and changes["name"] is None:
+        raise HTTPException(status_code=422, detail="Channel name can't be empty")
+
+    if changes:
+        await channel.update_from_dict(changes)
+        await channel.save(update_fields=list(changes))
+
+    channel_response = ChannelResponse.from_channel(channel)
+    if changes:
+        # Read-state fields are per user, so they are left out of the frame;
+        # clients keep their own values and patch the rest.
+        await _broadcast(request, server.id, {
+            "type": "channel_updated",
+            "server_id": server.id,
+            "channel": channel_response.model_dump(
+                mode="json", exclude={"last_read_message_id", "last_message_id"}),
+        }, exclude_user_id=current_user.id)
+
+    return channel_response
+
+
+@router.delete("/{channel_id}", status_code=status.HTTP_204_NO_CONTENT)
+async def delete_channel(
+    channel_id: int,
+    request: Request,
+    current_user: User = Depends(get_current_user),
+):
+    """Delete a channel and all of its messages. Owner only."""
+    channel, server = await _load_channel_and_server(channel_id)
+    await require_membership(current_user, server)
+    require_owner(current_user, server)
+
+    async with in_transaction():
+        # Messages cascade at the DB level too, but deleting them explicitly
+        # keeps this independent of how the FK was migrated.
+        await Message.filter(channel_id=channel.id).delete()
+        await channel.delete()
+
+        server = await Server.get(id=server.id)
+        server_settings = server.server_settings or {}
+        order = server_settings.get("channel_order")
+        if order and channel_id in order:
+            server_settings["channel_order"] = [cid for cid in order if cid != channel_id]
+            server.server_settings = server_settings
+            await server.save(update_fields=["server_settings"])
+
+    await _broadcast(request, server.id, {
+        "type": "channel_deleted",
+        "server_id": server.id,
+        "channel_id": channel_id,
+    }, exclude_user_id=current_user.id)
