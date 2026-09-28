@@ -132,12 +132,13 @@ class StorageService:
             )
 
         # Sniff the true type by actually parsing the bytes. verify() detects
-        # truncated/corrupt files; .format gives the real container.
+        # truncated/corrupt files; .format gives the real container. Pillow
+        # reports some corruption (e.g. a bad PNG chunk CRC) as SyntaxError.
         try:
             with Image.open(BytesIO(file_content)) as probe:
                 fmt = probe.format
                 probe.verify()
-        except (UnidentifiedImageError, OSError, ValueError):
+        except (UnidentifiedImageError, OSError, ValueError, SyntaxError):
             raise UnsupportedImageTypeError(
                 "Unsupported or corrupt image; allowed types: PNG, JPEG, WEBP, GIF"
             )
@@ -155,7 +156,7 @@ class StorageService:
                 img.thumbnail((max_size_px, max_size_px))
                 buffer = BytesIO()
                 img.save(buffer, format="PNG")
-        except (UnidentifiedImageError, OSError, ValueError):
+        except (UnidentifiedImageError, OSError, ValueError, SyntaxError):
             raise UnsupportedImageTypeError(
                 "Unsupported or corrupt image; allowed types: PNG, JPEG, WEBP, GIF"
             )

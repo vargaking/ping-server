@@ -50,6 +50,18 @@ def test_non_image_avatar_returns_415(client):
     assert res.status_code == 415, res.text
 
 
+def test_corrupt_png_returns_415_not_500(client):
+    me = register(client)
+    # A real PNG with one byte of pixel data flipped: the chunk CRC no longer
+    # matches, which Pillow reports as SyntaxError rather than OSError.
+    data = bytearray(_png_bytes((8, 8)))
+    idat = data.index(b"IDAT")
+    data[idat + 6] ^= 0xFF
+    files = {"file": ("avatar.png", bytes(data), "image/png")}
+    res = client.post(f"/users/{me['id']}/avatar", files=files)
+    assert res.status_code == 415, res.text
+
+
 # --- server icons (512px) -------------------------------------------------
 
 def test_valid_server_icon_is_accepted_and_resized(client):
