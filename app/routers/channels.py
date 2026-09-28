@@ -2,6 +2,7 @@ import base64
 import logging
 from datetime import datetime
 from typing import List, Optional
+from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException, Request, status
 from pydantic import BaseModel
@@ -13,6 +14,7 @@ from ..models.Message import Message
 from ..models.Server import Server
 from ..models.User import User
 from ..models.UserToServer import UserToServer
+from ..services import read_state
 from ..utils import require_membership
 
 logger = logging.getLogger("app.routers.channels")
@@ -58,15 +60,29 @@ class ChannelResponse(BaseModel):
     name: str
     channel_settings: dict
     type: str
+    last_read_message_id: Optional[str] = None
+    last_message_id: Optional[str] = None
 
     @classmethod
-    def from_channel(cls, channel: Channel):
+    def from_channel(
+        cls,
+        channel: Channel,
+        *,
+        last_read_message_id: Optional[str] = None,
+        last_message_id: Optional[str] = None,
+    ):
         return cls(
             id=channel.id,
             name=channel.name,
             channel_settings=channel.channel_settings,
             type=channel.type,
+            last_read_message_id=last_read_message_id,
+            last_message_id=last_message_id,
         )
+
+
+class ReadMarkerUpdate(BaseModel):
+    message_id: str
 
 
 
@@ -161,6 +177,60 @@ async def get_channel_messages(
     }
 
 
+@router.put("/{channel_id}/read")
+async def mark_channel_read(
+    channel_id: int,
+    body: ReadMarkerUpdate,
+    request: Request,
+    current_user: User = Depends(get_current_user),
+):
+    """Advance the caller's read marker for this channel to *message_id*.
+
+    The marker only ever moves forward: an older message_id than what is
+    already stored is a no-op, and the response reflects the (unchanged)
+    newer marker.
+    """
+    channel = await Channel.get_or_none(id=channel_id)
+    if not channel:
+        raise HTTPException(status_code=404, detail="Channel not found")
+    server = await Server.get_or_none(id=channel.server_id)
+    if not server:
+        raise HTTPException(status_code=404, detail="Server not found")
+    await require_membership(current_user, server)
+
+    try:
+        message_uuid = UUID(body.message_id)
+    except ValueError:
+        raise HTTPException(status_code=404, detail="Message not found")
+
+    message = await Message.get_or_none(uuid=message_uuid, channel_id=channel_id)
+    if not message:
+        raise HTTPException(status_code=404, detail="Message not found")
+
+    moved = await read_state.advance(
+        current_user.id, channel_id=channel_id, message_pk=message.id)
+
+    marker = await read_state.get_marker(current_user.id, channel_id=channel_id)
+    effective_uuid = await read_state.resolve_marker_uuid(marker, channel_id=channel_id)
+
+    if moved:
+        comms = getattr(request.app.state, "comms", None)
+        if comms is not None:
+            await comms.send_to_user(current_user.id, {
+                "type": "read_state",
+                "channel_id": channel_id,
+                "server_id": server.id,
+                "conversation_id": None,
+                "last_read_message_id": effective_uuid,
+            })
+
+    return {
+        "channel_id": channel_id,
+        "server_id": server.id,
+        "last_read_message_id": effective_uuid,
+    }
+
+
 @router.get("/{server_id}", response_model=List[ChannelResponse])
 async def get_channels(
     server_id: int,
@@ -172,7 +242,16 @@ async def get_channels(
     await require_membership(current_user, server)
 
     channels = await Channel.filter(server_id=server.id).all()
-    return [ChannelResponse.from_channel(channel) for channel in channels]
+    state = await read_state.batch_channel_state(
+        current_user.id, [c.id for c in channels])
+    return [
+        ChannelResponse.from_channel(
+            channel,
+            last_read_message_id=state.get(channel.id, {}).get("last_read_message_id"),
+            last_message_id=state.get(channel.id, {}).get("last_message_id"),
+        )
+        for channel in channels
+    ]
 
 
 @router.post("/{server_id}/create", response_model=ChannelResponse, status_code=status.HTTP_201_CREATED)
