@@ -57,6 +57,7 @@ def test_channel_created_broadcasts_and_excludes_creator(client, new_client):
                 "name": "random",
                 "channel_settings": {},
                 "type": "text",
+                "topic": None,
                 "last_read_message_id": None,
                 "last_message_id": None,
             },
