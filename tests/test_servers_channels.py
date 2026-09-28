@@ -55,7 +55,7 @@ def test_non_member_cannot_list_or_create_channels(client, new_client):
     outsider = new_client()
     register(outsider)
     assert outsider.get(f"/channels/{server['id']}").status_code == 403
-    res = outsider.post(f"/channels/{server['id']}/create", params={"channel_name": "x"})
+    res = outsider.post(f"/channels/{server['id']}/create", json={"name": "x"})
     assert res.status_code == 403
 
 
