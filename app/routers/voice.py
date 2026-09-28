@@ -65,6 +65,9 @@ async def create_voice_token(
         room=room,
         can_publish=True,
         can_subscribe=True,
+        # Lets the client set participant attributes, which is how it shares
+        # deafen state with the room (mute travels as track mute events).
+        can_update_own_metadata=True,
     )
     token = (
         api.AccessToken(LIVEKIT_API_KEY, LIVEKIT_API_SECRET)
