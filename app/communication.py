@@ -86,10 +86,8 @@ class Communication:
 
     @staticmethod
     async def get_related_user_ids(user_id: int) -> set[int]:
-        """Return the set of user IDs who share at least one server with *user_id*,
-        excluding *user_id* itself.
-
-        Useful for broadcasting invalidation events, online-presence lists, etc.
+        """Return the IDs of users who share a server with *user_id*, excluding
+        *user_id* itself (presence relies on that; add the user back if needed).
         """
         user_server_ids = await UserToServer.filter(
             user_id=user_id
@@ -211,10 +209,11 @@ class Communication:
         """Notify related users that a user's profile has changed.
 
         Sends a lightweight invalidation message (just the user_id) to users
-        who share a server with the updated user. Clients should fetch the
+        who share a server with the updated user, and to the user's own
+        sockets so their other tabs update too. Clients should fetch the
         updated profile via REST if they need the new data.
         """
-        related_user_ids = await self.get_related_user_ids(user_id)
+        related_user_ids = await self.get_related_user_ids(user_id) | {user_id}
 
         message = {
             "type": "user_invalidate",
