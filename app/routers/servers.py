@@ -1,8 +1,8 @@
 from datetime import datetime
 from typing import List, Optional
 
-from fastapi import APIRouter, Depends, HTTPException, UploadFile, File, status
-from pydantic import BaseModel
+from fastapi import APIRouter, Depends, HTTPException, Request, UploadFile, File, status
+from pydantic import BaseModel, field_validator
 
 from ..middleware import get_current_user
 from ..models.Server import Server
@@ -14,17 +14,34 @@ from .users import UserResponse
 
 router = APIRouter(prefix="/servers", tags=["servers"])
 
+SERVER_NAME_MAX = 100
+
+
+def _clean_name(value: Optional[str]) -> Optional[str]:
+    if value is None:
+        return None
+    value = value.strip()
+    if not value:
+        raise ValueError("Server name can't be empty")
+    if len(value) > SERVER_NAME_MAX:
+        raise ValueError(f"Server name must be at most {SERVER_NAME_MAX} characters")
+    return value
+
 
 class ServerCreate(BaseModel):
     name: str
     server_profile: dict = {}
     server_settings: dict = {}
 
+    _name = field_validator("name")(_clean_name)
+
 
 class ServerUpdate(BaseModel):
     name: Optional[str] = None
     server_profile: Optional[dict] = None
     server_settings: Optional[dict] = None
+
+    _name = field_validator("name")(_clean_name)
 
 class ServerPublicResponse(BaseModel):
     id: int
@@ -110,8 +127,24 @@ async def get_server(server_id: int, current_user: User = Depends(get_current_us
     return ServerResponse.from_server(server)
 
 
+async def _broadcast_server_updated(request: Request, server: Server, actor_id: int) -> None:
+    """Let the other members patch the server's name/profile in place."""
+    comms = getattr(request.app.state, "comms", None)
+    if comms is None:
+        return
+    await comms.broadcast_to_server(server.id, {
+        "type": "server_updated",
+        "server": ServerPublicResponse.from_server(server).model_dump(mode="json"),
+    }, exclude_user_id=actor_id)
+
+
 @router.put("/{server_id}", response_model=ServerPublicResponse)
-async def update_server(server_id: int, server_update: ServerUpdate, current_user: User = Depends(get_current_user)):
+async def update_server(
+    server_id: int,
+    server_update: ServerUpdate,
+    request: Request,
+    current_user: User = Depends(get_current_user),
+):
     server = await Server.get_or_none(id=server_id)
     if not server:
         raise HTTPException(status_code=404, detail="Server not found")
@@ -119,24 +152,50 @@ async def update_server(server_id: int, server_update: ServerUpdate, current_use
     require_owner(current_user, server)
 
     update_data = server_update.model_dump(exclude_unset=True)
+    if "name" in update_data and update_data["name"] is None:
+        raise HTTPException(status_code=422, detail="Server name can't be empty")
     await server.update_from_dict(update_data)
     await server.save()
+
+    # Channel reordering also goes through here; only name and profile changes
+    # are visible to other members.
+    if "name" in update_data or "server_profile" in update_data:
+        await _broadcast_server_updated(request, server, current_user.id)
     return ServerPublicResponse.from_server(server)
 
 
 @router.delete("/{server_id}", status_code=status.HTTP_204_NO_CONTENT)
-async def delete_server(server_id: int, current_user: User = Depends(get_current_user)):
+async def delete_server(
+    server_id: int,
+    request: Request,
+    current_user: User = Depends(get_current_user),
+):
     server = await Server.get_or_none(id=server_id)
     if not server:
         raise HTTPException(status_code=404, detail="Server not found")
 
     require_owner(current_user, server)
 
+    # Memberships go with the server, so collect who to tell first.
+    member_ids = await UserToServer.filter(server_id=server.id).values_list("user_id", flat=True)
     await server.delete()
+
+    comms = getattr(request.app.state, "comms", None)
+    if comms is not None:
+        await comms.send_to_users(
+            member_ids,
+            {"type": "server_deleted", "server_id": server_id},
+            exclude_user_id=current_user.id,
+        )
 
 
 @router.post("/{server_id}/icon", response_model=ServerPublicResponse)
-async def upload_server_icon(server_id: int, file: UploadFile = File(...), current_user: User = Depends(get_current_user)):
+async def upload_server_icon(
+    server_id: int,
+    request: Request,
+    file: UploadFile = File(...),
+    current_user: User = Depends(get_current_user),
+):
     server = await Server.get_or_none(id=server_id)
     if not server:
         raise HTTPException(status_code=404, detail="Server not found")
@@ -158,4 +217,5 @@ async def upload_server_icon(server_id: int, file: UploadFile = File(...), curre
 
     server.server_profile['icon'] = url
     await server.save()
+    await _broadcast_server_updated(request, server, current_user.id)
     return ServerPublicResponse.from_server(server)
