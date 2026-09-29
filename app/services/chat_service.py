@@ -112,11 +112,16 @@ class ChatService:
         await self._fan_out(outgoing, member_ids, sender_ws=sender_ws)
 
         if push.enabled:
-            mentioned = mentioned_user_ids(content)
-            if mentioned:
-                push.schedule(self._push_mentions(
-                    sender_id, server_id, channel_id, created.id,
-                    content, attachments, mentioned, member_ids))
+            # Runs in the sender's socket path: a push problem must never
+            # break message delivery.
+            try:
+                mentioned = mentioned_user_ids(content)
+                if mentioned:
+                    push.schedule(self._push_mentions(
+                        sender_id, server_id, channel_id, created.id,
+                        content, attachments, mentioned, member_ids))
+            except Exception:
+                logger.warning("Failed to schedule mention pushes", exc_info=True)
 
     async def handle_direct_message(
         self, sender_id: int, message: DirectMessageFrame, sender_ws: WebSocket

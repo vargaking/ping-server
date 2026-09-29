@@ -923,3 +923,79 @@ def test_deliver_does_not_follow_redirects(client, monkeypatch, vapid_env, push_
         monkeypatch.undo()
         push.configure()
     assert len(handler.seen) == 1
+
+
+# -- hostile content -------------------------------------------------------
+
+def nested_doc(depth, leaf=None):
+    node = leaf or text("deep")
+    for _ in range(depth):
+        node = {"type": "blockquote", "content": [node]}
+    return {"type": "doc", "content": [node]}
+
+
+def test_walkers_are_bounded_on_deep_and_huge_documents():
+    deep = nested_doc(5000, mention(4))
+    assert mentioned_user_ids(deep) == set()
+    assert plain_text(deep) == ""
+
+    wide = {"type": "doc", "content": [text("x")] * 50_000 + [mention(4)]}
+    assert mentioned_user_ids(wide) == set()
+    assert plain_text(wide).startswith("xxxx")
+
+    assert mentioned_user_ids(doc(mention(1), mention(2))) == {1, 2}
+
+
+@pytest.mark.parametrize("raw", ["(" * 100_000, "[" * 100_000, "{" * 5_000 + "}" * 5_000, "1" * 100_000])
+def test_hostile_strings_fall_back_to_plain_text(raw):
+    assert mentioned_user_ids(raw) == set()
+    assert plain_text(raw).startswith(raw[:100])
+
+
+def hostile_message_is_delivered_without_push(team, push_on, send_raw):
+    with team.alice_client.websocket_connect("/ws", headers=HEADERS) as alice_ws, \
+            team.bob.client.websocket_connect("/ws", headers=HEADERS) as bob_ws:
+        ws_ready(alice_ws)
+        ws_ready(bob_ws)
+        send_raw(alice_ws)
+        frame = bob_ws.receive_json()
+        while frame["type"] != "message":
+            frame = bob_ws.receive_json()
+        sync(alice_ws)
+    drain(team.alice_client)
+    assert push_on.calls == []
+    return frame
+
+
+def test_a_100k_paren_string_message_is_delivered_and_sends_no_push(channel_team, push_on):
+    team = channel_team
+    content = "(" * 100_000
+    frame = hostile_message_is_delivered_without_push(
+        team, push_on,
+        lambda ws: ws.send_json(channel_frame(team.server["id"], team.channel["id"], content)))
+    assert frame["content"] == content
+
+
+def test_a_deeply_nested_document_is_delivered_and_sends_no_push(channel_team, push_on):
+    team = channel_team
+    body = json.dumps(channel_frame(team.server["id"], team.channel["id"], None))
+    # Deeper than the walkers' cap, but within what json can parse and echo.
+    depth = 300
+    nested = '{"type":"blockquote","content":[' * depth + '{"type":"text","text":"deep"}' + "]}" * depth
+    raw = body.replace("null", nested)
+    frame = hostile_message_is_delivered_without_push(
+        team, push_on, lambda ws: ws.send_text(raw))
+    assert frame["channel_id"] == team.channel["id"]
+
+
+def test_a_failing_mention_scan_does_not_break_delivery(channel_team, push_on, monkeypatch):
+    team = channel_team
+
+    def boom(content):
+        raise RuntimeError("scan failed")
+
+    monkeypatch.setattr("app.services.chat_service.mentioned_user_ids", boom)
+    frame = hostile_message_is_delivered_without_push(
+        team, push_on,
+        lambda ws: ws.send_json(channel_frame(team.server["id"], team.channel["id"], doc(text("hi")))))
+    assert frame["channel_id"] == team.channel["id"]
