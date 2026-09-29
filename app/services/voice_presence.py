@@ -92,6 +92,10 @@ class LiveKitRoomSource:
             key=lambda p: p.user_id,
         ))
 
+    async def remove_participant(self, channel_id: int, user_id: int) -> None:
+        await self._api().room.remove_participant(api.RoomParticipantIdentity(
+            room=f"{ROOM_PREFIX}{channel_id}", identity=str(user_id)))
+
     async def aclose(self) -> None:
         if self._client is not None:
             await self._client.aclose()
@@ -199,6 +203,18 @@ class VoicePresence:
         finally:
             self._refreshing.pop(channel_id, None)
 
+    async def remove_participant(self, channel_id: int, user_id: int) -> None:
+        """Disconnect a user from one voice channel. Missing rooms or
+        participants are fine: most channels won't have them."""
+        try:
+            await self._source.remove_participant(channel_id, user_id)
+        except Exception:
+            logger.debug(
+                "No voice participant %s to remove from channel %s",
+                user_id, channel_id, exc_info=True)
+            return
+        self.refresh(channel_id)
+
     async def run(self) -> None:
         failures = 0
         while True:
@@ -224,6 +240,14 @@ class VoicePresence:
             task.cancel()
         await asyncio.gather(*tasks, return_exceptions=True)
         await self._source.aclose()
+
+
+async def remove_from_voice(presence: VoicePresence | None, channel_ids, user_id: int) -> None:
+    """Pull a user out of these voice channels, e.g. after they leave the server."""
+    if presence is None:
+        return
+    for channel_id in channel_ids:
+        await presence.remove_participant(channel_id, user_id)
 
 
 def livekit_api_url() -> str | None:
