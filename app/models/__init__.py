@@ -10,7 +10,8 @@ from .Attachment import Attachment
 from .Token import Token
 from .Invite import Invite
 from .ReadState import ReadState
+from .PushSubscription import PushSubscription
 
 __all__ = ["Role", "User", "Server", "RoleToUser", "UserToServer",
            "Channel", "Conversation", "Message", "Token", "Invite", "ReadState",
-           "Attachment"]
+           "Attachment", "PushSubscription"]
