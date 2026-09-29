@@ -16,6 +16,7 @@ from ..models.Server import Server
 from ..models.User import User
 from ..models.UserToServer import UserToServer
 from ..services import read_state
+from ..services.attachments import attachments_by_message
 from ..utils import require_membership, require_owner
 
 logger = logging.getLogger("app.routers.channels")
@@ -44,7 +45,7 @@ def _decode_cursor(cursor: str) -> tuple[datetime, int]:
         raise HTTPException(status_code=400, detail="Invalid cursor")
 
 
-def _serialize(message: dict) -> dict:
+def _serialize(message: dict, attachments: list[dict]) -> dict:
     return {
         "id": message["uuid"],
         "content": message["content"],
@@ -53,7 +54,13 @@ def _serialize(message: dict) -> dict:
         "server_id": message["server_id"],
         "timestamp": message["timestamp"],
         "edited_at": message["edited_at"],
+        "attachments": attachments,
     }
+
+
+async def _serialize_all(rows: list[dict]) -> list[dict]:
+    by_message = await attachments_by_message([row["id"] for row in rows])
+    return [_serialize(row, by_message.get(row["id"], [])) for row in rows]
 
 
 CHANNEL_NAME_MAX = 100
@@ -158,6 +165,7 @@ async def get_messages(
         server_id__in=user_servers,
         created_at__gt=last_updated,
     ).order_by("created_at").limit(limit).values(
+        "id",
         "uuid",
         "content",
         "author_id",
@@ -167,7 +175,7 @@ async def get_messages(
         "edited_at",
     )
 
-    return [_serialize(message) for message in messages]
+    return await _serialize_all(messages)
 
 
 @router.get("/{channel_id}/messages")
@@ -221,7 +229,7 @@ async def get_channel_messages(
         next_cursor = _encode_cursor(last["created_at"], last["id"])
 
     return {
-        "messages": [_serialize(row) for row in rows],
+        "messages": await _serialize_all(rows),
         "next_cursor": next_cursor,
         "has_more": has_more,
     }

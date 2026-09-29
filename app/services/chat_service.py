@@ -1,8 +1,11 @@
 import json
 import logging
+from uuid import UUID
 
 from fastapi import WebSocket
+from tortoise.transactions import in_transaction
 
+from app.models.Attachment import Attachment
 from app.models.Channel import Channel
 from app.models.Conversation import Conversation
 from app.models.Message import Message
@@ -12,6 +15,11 @@ from app.services.connection_manager import ConnectionManager
 from app.ws_schemas import DirectMessageFrame, MessageFrame
 
 logger = logging.getLogger("app.services.chat_service")
+
+
+class _AttachmentsUnavailable(Exception):
+    """An attachment was linked to another message between the check and the
+    write; the message must not be stored."""
 
 
 class ChatService:
@@ -46,12 +54,22 @@ class ChatService:
             await self._send_error(sender_ws, "forbidden", message.id)
             return
 
-        content_payload = message.content
+        attachments = await self._load_attachments(
+            sender_id, message.attachment_ids, channel_id=channel_id)
+        if attachments is None:
+            await self._send_error(sender_ws, "invalid_attachments", message.id)
+            return
+
+        content = message.content
+        if attachments and content is None:
+            content = ""
+        content_payload = content
         if isinstance(content_payload, dict):
             content_payload = json.dumps(content_payload)
 
         # Persist first: never show other people a message that was not stored.
-        created = await Message.create(
+        created = await self._create_message(
+            attachments,
             uuid=message.id,
             content=content_payload,
             author_id=sender_id,
@@ -60,6 +78,9 @@ class ChatService:
             timestamp=message.timestamp,
             metadata=message.metadata,
         )
+        if created is None:
+            await self._send_error(sender_ws, "invalid_attachments", message.id)
+            return
 
         # Your own message can never leave the thread unread for you, even
         # after a reload on another device.
@@ -75,8 +96,9 @@ class ChatService:
             "server_id": server_id,
             "channel_id": channel_id,
             "user_id": sender_id,
-            "content": message.content,
+            "content": content,
             "timestamp": message.timestamp,
+            "attachments": [a.to_json() for a in attachments],
         }
 
         member_ids = await UserToServer.filter(
@@ -102,12 +124,22 @@ class ChatService:
             await self._send_error(sender_ws, "forbidden", message.id)
             return
 
-        content_payload = message.content
+        attachments = await self._load_attachments(
+            sender_id, message.attachment_ids, conversation_id=conversation.id)
+        if attachments is None:
+            await self._send_error(sender_ws, "invalid_attachments", message.id)
+            return
+
+        content = message.content
+        if attachments and content is None:
+            content = ""
+        content_payload = content
         if isinstance(content_payload, dict):
             content_payload = json.dumps(content_payload)
 
         # Persist first: never show the peer a message that was not stored.
-        created = await Message.create(
+        created = await self._create_message(
+            attachments,
             uuid=message.id,
             content=content_payload,
             author_id=sender_id,
@@ -115,6 +147,9 @@ class ChatService:
             timestamp=message.timestamp,
             metadata=message.metadata,
         )
+        if created is None:
+            await self._send_error(sender_ws, "invalid_attachments", message.id)
+            return
 
         # Your own message can never leave the thread unread for you, even
         # after a reload on another device.
@@ -128,14 +163,67 @@ class ChatService:
             "id": message.id,
             "conversation_id": conversation.id,
             "user_id": sender_id,
-            "content": message.content,
+            "content": content,
             "timestamp": message.timestamp,
+            "attachments": [a.to_json() for a in attachments],
         }
 
         # Deliver to the peer and back to the sender's other sockets/tabs; only
         # the socket that sent it is excluded, via sender_ws below.
         peer_id = conversation.other_user_id(sender_id)
         await self._fan_out(outgoing, [peer_id, sender_id], sender_ws=sender_ws)
+
+    @staticmethod
+    async def _load_attachments(
+        sender_id: int,
+        attachment_ids: list[str],
+        *,
+        channel_id: int | None = None,
+        conversation_id: int | None = None,
+    ) -> list[Attachment] | None:
+        """Resolve the frame's attachment ids, in order, or None if any of them
+        is unknown, someone else's, already sent, or uploaded for another
+        channel or conversation."""
+        if not attachment_ids:
+            return []
+        try:
+            ids = [UUID(raw) for raw in attachment_ids]
+        except ValueError:
+            return None
+        if len(set(ids)) != len(ids):
+            return None
+
+        found = {a.id: a for a in await Attachment.filter(id__in=ids)}
+        attachments = []
+        for attachment_id in ids:
+            attachment = found.get(attachment_id)
+            if (
+                attachment is None
+                or attachment.uploader_id != sender_id
+                or attachment.message_id is not None
+                or attachment.channel_id != channel_id
+                or attachment.conversation_id != conversation_id
+            ):
+                return None
+            attachments.append(attachment)
+        return attachments
+
+    @staticmethod
+    async def _create_message(attachments: list[Attachment], **fields) -> Message | None:
+        """Store the message and link its attachments in one transaction.
+        Returns None, storing nothing, if an attachment got taken meanwhile."""
+        try:
+            async with in_transaction():
+                created = await Message.create(**fields)
+                if attachments:
+                    linked = await Attachment.filter(
+                        id__in=[a.id for a in attachments], message_id__isnull=True,
+                    ).update(message_id=created.id)
+                    if linked != len(attachments):
+                        raise _AttachmentsUnavailable
+        except _AttachmentsUnavailable:
+            return None
+        return created
 
     async def _fan_out(
         self, outgoing: dict, recipient_ids, *, sender_ws: WebSocket | None = None

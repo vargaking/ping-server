@@ -17,9 +17,10 @@ async def lifespan(app: FastAPI):
     """Application lifespan. Voice now runs on LiveKit, so there is no media
     proxy client to manage here anymore.
 
-    On startup we prune expired session tokens. Tortoise is already initialised
-    at this point (register_tortoise wraps this lifespan), but keep it guarded
-    so a housekeeping hiccup can never block the app from starting.
+    On startup we prune expired session tokens and stale attachments. Tortoise
+    is already initialised at this point (register_tortoise wraps this
+    lifespan), but keep it guarded so a housekeeping hiccup can never block the
+    app from starting.
 
     It also runs the voice presence poller when LiveKit is configured.
     """
@@ -35,6 +36,17 @@ async def lifespan(app: FastAPI):
 
     presence = None
     presence_task = None
+    try:
+        # Imported here because the attachments service imports this module.
+        from .services.attachments import prune_attachments
+        pruned = await prune_attachments()
+        if pruned["expired"] or pruned["orphaned"]:
+            logger.info(
+                "Pruned %s unsent and %s orphaned attachment(s) on startup",
+                pruned["expired"], pruned["orphaned"])
+    except Exception:
+        logger.warning("Failed to prune attachments on startup", exc_info=True)
+
     try:
         presence = create_voice_presence(getattr(app.state, "comms", None))
         if presence is not None:
