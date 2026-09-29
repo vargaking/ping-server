@@ -2,7 +2,7 @@ import json
 import os
 from datetime import timedelta
 
-from fastapi import APIRouter, Depends, HTTPException, Request, status
+from fastapi import APIRouter, Depends, HTTPException, Request, Response, status
 from livekit import api
 from pydantic import BaseModel
 
@@ -126,3 +126,26 @@ async def get_voice_presence(
         for channel_id in channel_ids
         if (participants := presence.channel_participants(channel_id))
     ]
+
+
+@router.post("/presence/channels/{channel_id}/refresh", status_code=204)
+async def refresh_voice_presence(
+    channel_id: int,
+    request: Request,
+    current_user: User = Depends(get_current_user),
+) -> Response:
+    """Re-read a voice channel's occupancy from LiveKit now.
+
+    Clients call this right after they join, leave, mute or deafen, so other
+    members see it without waiting for the next poll. What gets broadcast
+    always comes from LiveKit, never from the caller.
+    """
+    channel = await Channel.get_or_none(id=channel_id).prefetch_related("server")
+    if not channel or channel.type != "voice":
+        raise HTTPException(status_code=404, detail="Voice channel not found")
+    await require_membership(current_user, channel.server)
+
+    presence = getattr(request.app.state, "voice_presence", None)
+    if presence is not None:
+        presence.refresh(channel_id)
+    return Response(status_code=204)

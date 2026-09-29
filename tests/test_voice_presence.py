@@ -35,12 +35,23 @@ def _info(identity="7", tracks=(), attributes=None, state=models.ParticipantInfo
 
 
 class FakeSource:
-    def __init__(self, *results):
+    def __init__(self, *results, channels=None):
         self._results = list(results)
+        self._channels = channels or {}
+        self.channel_reads = []
         self.closed = False
 
     async def fetch(self):
         result = self._results.pop(0)
+        if isinstance(result, Exception):
+            raise result
+        return result
+
+    async def fetch_channel(self, channel_id):
+        self.channel_reads.append(channel_id)
+        result = self._channels.get(channel_id, ())
+        if callable(result):
+            result = await result()
         if isinstance(result, Exception):
             raise result
         return result
@@ -143,6 +154,21 @@ def test_source_maps_channel_rooms_to_sorted_participants():
     assert snapshot == {5: (VoiceParticipant(3, True, False), VoiceParticipant(9, False, False))}
 
 
+def test_source_lists_rooms_whose_participant_count_lags():
+    async def list_rooms(_request):
+        return SimpleNamespace(rooms=[models.Room(name="channel_5", num_participants=0)])
+
+    async def list_participants(request):
+        assert request.room == "channel_5"
+        return SimpleNamespace(participants=[_info("3", [_mic(False)])])
+
+    source = LiveKitRoomSource("http://livekit.test", "key", "secret")
+    source._client = SimpleNamespace(
+        room=SimpleNamespace(list_rooms=list_rooms, list_participants=list_participants))
+
+    assert asyncio.run(source.fetch()) == {5: (VoiceParticipant(3, False, False),)}
+
+
 # VoicePresence diffing
 
 def test_first_snapshot_notifies_each_channel():
@@ -204,6 +230,151 @@ def test_notify_failure_does_not_stop_other_channels(presence_logs):
 
     assert recorder.calls == [(2, (bob(),))]
     assert any(r.levelno == logging.WARNING and r.exc_info for r in presence_logs)
+
+
+# VoicePresence.refresh
+
+async def _settle(presence):
+    while presence._refreshing:
+        await asyncio.gather(*presence._refreshing.values())
+
+
+def test_refresh_reads_one_channel_and_notifies():
+    recorder = Recorder()
+    source = FakeSource(channels={1: (alice(),)})
+    presence = VoicePresence(source, recorder)
+
+    async def scenario():
+        presence.refresh(1)
+        await _settle(presence)
+
+    asyncio.run(scenario())
+    assert source.channel_reads == [1]
+    assert recorder.calls == [(1, (alice(),))]
+    assert presence.channel_participants(1) == (alice(),)
+
+
+def test_refresh_emptying_a_channel_notifies_empty():
+    recorder = Recorder()
+    presence = VoicePresence(FakeSource(channels={1: ()}), recorder)
+
+    async def scenario():
+        await presence.apply_snapshot({1: (alice(),)})
+        recorder.calls.clear()
+        presence.refresh(1)
+        await _settle(presence)
+
+    asyncio.run(scenario())
+    assert recorder.calls == [(1, ())]
+    assert presence.channel_participants(1) == ()
+
+
+def test_refreshes_during_a_read_fold_into_one_more_read():
+    release = asyncio.Event()
+    reads = 0
+
+    async def read():
+        nonlocal reads
+        reads += 1
+        if reads == 1:
+            await release.wait()
+            return (alice(),)
+        return (alice(muted=True),)
+
+    recorder = Recorder()
+    source = FakeSource(channels={1: read})
+    presence = VoicePresence(source, recorder)
+
+    async def scenario():
+        presence.refresh(1)
+        await asyncio.sleep(0)
+        for _ in range(5):
+            presence.refresh(1)
+        release.set()
+        await _settle(presence)
+
+    asyncio.run(scenario())
+    assert reads == 2
+    assert recorder.calls[-1] == (1, (alice(muted=True),))
+    assert presence.channel_participants(1) == (alice(muted=True),)
+
+
+def test_slow_poll_does_not_overwrite_a_newer_refresh():
+    """A poll that started before someone joined must not remove them again
+    after a refresh has already shown them."""
+    poll_started = asyncio.Event()
+    finish_poll = asyncio.Event()
+
+    class SlowPollSource(FakeSource):
+        async def fetch(self):
+            poll_started.set()
+            await finish_poll.wait()
+            return {}
+
+    recorder = Recorder()
+    presence = VoicePresence(SlowPollSource(channels={1: (alice(),)}), recorder)
+
+    async def scenario():
+        poll = asyncio.create_task(presence.poll_once())
+        await poll_started.wait()
+        presence.refresh(1)
+        await _settle(presence)
+        finish_poll.set()
+        await poll
+
+    asyncio.run(scenario())
+    assert recorder.calls == [(1, (alice(),))]
+    assert presence.channel_participants(1) == (alice(),)
+
+
+def test_later_poll_still_applies_after_a_refresh():
+    recorder = Recorder()
+    presence = VoicePresence(FakeSource({}, channels={1: (alice(),)}), recorder)
+
+    async def scenario():
+        presence.refresh(1)
+        await _settle(presence)
+        await presence.poll_once()
+
+    asyncio.run(scenario())
+    assert recorder.calls == [(1, (alice(),)), (1, ())]
+
+
+def test_failed_refresh_keeps_state_and_allows_the_next(presence_logs):
+    recorder = Recorder()
+    source = FakeSource(channels={1: RuntimeError("livekit down")})
+    presence = VoicePresence(source, recorder)
+
+    async def scenario():
+        await presence.apply_snapshot({1: (alice(),)})
+        presence.refresh(1)
+        await _settle(presence)
+        presence.refresh(1)
+        await _settle(presence)
+
+    asyncio.run(scenario())
+    assert source.channel_reads == [1, 1]
+    assert presence.channel_participants(1) == (alice(),)
+    assert not any(r.levelno >= logging.WARNING for r in presence_logs)
+
+
+def test_aclose_cancels_pending_refreshes():
+    never = asyncio.Event()
+
+    async def hang():
+        await never.wait()
+
+    source = FakeSource(channels={1: hang})
+    presence = VoicePresence(source, Recorder())
+
+    async def scenario():
+        presence.refresh(1)
+        await asyncio.sleep(0)
+        await presence.aclose()
+
+    asyncio.run(scenario())
+    assert presence._refreshing == {}
+    assert source.closed
 
 
 # VoicePresence.run backoff
@@ -348,3 +519,39 @@ def test_presence_endpoint_lists_occupied_channels_for_members(client, new_clien
 
     assert carol_client.get(f"/api/voice/presence/{server['id']}").status_code == 403
     assert bob_client.get("/api/voice/presence/999999").status_code == 404
+
+
+def test_refresh_endpoint_rereads_the_channel_for_members(client, new_client, monkeypatch):
+    alice_user = register(client, "alice-rf")
+    server = create_server(client)
+    voice = create_channel(client, server["id"], "Hangout", "voice")
+    text = create_channel(client, server["id"], "chat")
+    carol_client = new_client()
+    register(carol_client, "carol-rf")
+
+    participant = VoiceParticipant(alice_user["id"], muted=False, deafened=False)
+    source = FakeSource(channels={voice["id"]: (participant,)})
+    presence = VoicePresence(source, make_broadcast_notify(client.app.state.comms))
+    monkeypatch.setattr(client.app.state, "voice_presence", presence)
+
+    res = client.post(f"/api/voice/presence/channels/{voice['id']}/refresh", headers=HEADERS)
+    assert res.status_code == 204, res.text
+    client.portal.call(_settle, presence)
+    assert source.channel_reads == [voice["id"]]
+    assert presence.channel_participants(voice["id"]) == (participant,)
+
+    url = "/api/voice/presence/channels/{}/refresh"
+    assert carol_client.post(url.format(voice["id"]), headers=HEADERS).status_code == 403
+    assert client.post(url.format(text["id"]), headers=HEADERS).status_code == 404
+    assert client.post(url.format(999999), headers=HEADERS).status_code == 404
+    assert source.channel_reads == [voice["id"]]
+
+
+def test_refresh_endpoint_is_a_noop_without_livekit(client):
+    register(client)
+    server = create_server(client)
+    voice = create_channel(client, server["id"], "Hangout", "voice")
+
+    assert client.app.state.voice_presence is None
+    res = client.post(f"/api/voice/presence/channels/{voice['id']}/refresh", headers=HEADERS)
+    assert res.status_code == 204, res.text
