@@ -5,10 +5,14 @@ from fastapi import APIRouter, Depends, HTTPException, Request, UploadFile, File
 from pydantic import BaseModel, field_validator
 
 from ..middleware import get_current_user
+from ..models.Channel import Channel
+from ..models.Role import Role
+from ..models.RoleToUser import RoleToUser
 from ..models.Server import Server
 from ..models.User import User
 from ..models.UserToServer import UserToServer
 from ..services.storage import ImageValidationError, storage_service
+from ..services.voice_presence import remove_from_voice
 from ..utils import require_owner
 from .users import UserResponse
 
@@ -84,6 +88,12 @@ class ServerResponse(BaseModel):
             owner_id=server.owner_id,
             members=members
         )
+
+
+class MemberResponse(BaseModel):
+    user: UserResponse
+    joined_at: datetime
+    is_owner: bool
 
 
 @router.post("/", response_model=ServerResponse, status_code=status.HTTP_201_CREATED)
@@ -219,3 +229,71 @@ async def upload_server_icon(
     await server.save()
     await _broadcast_server_updated(request, server, current_user.id)
     return ServerPublicResponse.from_server(server)
+
+
+async def _get_member_server(server_id: int, user: User) -> Server:
+    server = await Server.get_or_none(id=server_id)
+    # Non-members get a 404, not a 403: a 403 would confirm the server exists.
+    if not server or not await UserToServer.filter(user=user, server=server).exists():
+        raise HTTPException(status_code=404, detail="Server not found")
+    return server
+
+
+@router.get("/{server_id}/members", response_model=List[MemberResponse])
+async def list_members(server_id: int, current_user: User = Depends(get_current_user)):
+    server = await _get_member_server(server_id, current_user)
+    relations = await UserToServer.filter(server=server).order_by("created_at", "id").prefetch_related("user")
+    members = [
+        MemberResponse(
+            user=UserResponse.from_user(rel.user),
+            joined_at=rel.created_at,
+            is_owner=rel.user_id == server.owner_id,
+        )
+        for rel in relations
+    ]
+    members.sort(key=lambda m: not m.is_owner)
+    return members
+
+
+@router.delete("/{server_id}/members/{user_id}", status_code=status.HTTP_204_NO_CONTENT)
+async def remove_member(
+    server_id: int,
+    user_id: int,
+    request: Request,
+    current_user: User = Depends(get_current_user),
+):
+    """Kick a member (owner only) or leave the server (user_id is yourself)."""
+    server = await _get_member_server(server_id, current_user)
+    leaving = user_id == current_user.id
+
+    if leaving:
+        if server.owner_id == current_user.id:
+            raise HTTPException(
+                status_code=409,
+                detail="The owner can't leave. Transfer ownership or delete the server.")
+    else:
+        require_owner(current_user, server)
+
+    membership = await UserToServer.get_or_none(user_id=user_id, server=server)
+    if not membership:
+        raise HTTPException(status_code=404, detail="Member not found")
+
+    # Collect everyone to tell before the membership row goes away, so the
+    # removed user's own sockets hear about it too.
+    member_ids = await UserToServer.filter(server=server).values_list("user_id", flat=True)
+    await membership.delete()
+    role_ids = await Role.filter(server=server).values_list("id", flat=True)
+    await RoleToUser.filter(user_id=user_id, role_id__in=role_ids).delete()
+
+    comms = getattr(request.app.state, "comms", None)
+    if comms is not None:
+        await comms.send_to_users(member_ids, {
+            "type": "member_left",
+            "server_id": server.id,
+            "user_id": user_id,
+            "reason": "left" if leaving else "kicked",
+        })
+
+    voice_channel_ids = await Channel.filter(server=server, type="voice").values_list("id", flat=True)
+    await remove_from_voice(
+        getattr(request.app.state, "voice_presence", None), voice_channel_ids, user_id)
