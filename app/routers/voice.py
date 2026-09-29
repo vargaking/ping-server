@@ -57,15 +57,25 @@ async def create_voice_token(
         raise HTTPException(status_code=400, detail="Channel is not a voice channel")
 
     # 403 if the user isn't a member of the server this channel belongs to, or
-    # can't connect. SPEAK and STREAM aren't enforced in the token yet.
-    await require_permission(current_user, channel.server, Permission.CONNECT)
+    # can't connect. SPEAK and STREAM are enforced here, at join time, by
+    # limiting which sources the token may publish.
+    effective = await require_permission(current_user, channel.server, Permission.CONNECT)
+
+    sources = []
+    if effective & Permission.SPEAK:
+        sources.append("microphone")
+    if effective & Permission.STREAM:
+        sources += ["screen_share", "screen_share_audio"]
 
     room = f"channel_{channel.id}"
 
     grant = api.VideoGrants(
         room_join=True,
         room=room,
-        can_publish=True,
+        # An empty source list means "any source" to LiveKit, so no sources
+        # has to be can_publish=False.
+        can_publish=bool(sources),
+        can_publish_sources=sources,
         can_subscribe=True,
         # Lets the client set participant attributes, which is how it shares
         # deafen state with the room (mute travels as track mute events).

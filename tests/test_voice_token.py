@@ -4,8 +4,12 @@ import json
 
 import pytest
 
+from app.models.Role import Role
+from app.permissions import MEMBER_PERMISSIONS, Permission
 from app.routers import voice
+from app.services.permissions import permissions
 from tests.conftest import create_channel, create_server, register
+from tests.test_realtime_events import invite_and_join
 
 
 @pytest.fixture
@@ -61,3 +65,41 @@ def test_token_503_when_livekit_unconfigured(client, monkeypatch):
     server = create_server(client)
     channel = create_channel(client, server["id"], "Hangout", "voice")
     assert client.post("/api/voice/token", json={"channel_id": channel["id"]}).status_code == 503
+
+
+def _member_grant(client, new_client, everyone_mask: Permission):
+    """Token grant for a plain member after @everyone is set to *everyone_mask*."""
+    register(client)
+    server = create_server(client)
+    channel = create_channel(client, server["id"], "Hangout", "voice")
+    member = new_client()
+    register(member)
+    invite_and_join(client, member, server["id"])
+
+    async def restrict():
+        await Role.filter(server_id=server["id"], is_default=True).update(allow=int(everyone_mask))
+        permissions.invalidate(server["id"])
+
+    client.portal.call(restrict)
+    res = member.post("/api/voice/token", json={"channel_id": channel["id"]})
+    assert res.status_code == 200, res.text
+    return _claims(res.json()["token"])["video"]
+
+
+def test_default_member_may_publish_mic_and_screen(client, new_client, livekit_env):
+    grant = _member_grant(client, new_client, MEMBER_PERMISSIONS)
+    assert grant["canPublish"] is True
+    assert grant["canPublishSources"] == ["microphone", "screen_share", "screen_share_audio"]
+
+
+def test_member_without_stream_cannot_publish_screen(client, new_client, livekit_env):
+    grant = _member_grant(client, new_client, MEMBER_PERMISSIONS & ~Permission.STREAM)
+    assert grant["canPublish"] is True
+    assert grant["canPublishSources"] == ["microphone"]
+
+
+def test_member_without_speak_and_stream_cannot_publish(client, new_client, livekit_env):
+    grant = _member_grant(
+        client, new_client, MEMBER_PERMISSIONS & ~Permission.SPEAK & ~Permission.STREAM)
+    assert grant["canPublish"] is False
+    assert not grant.get("canPublishSources")
