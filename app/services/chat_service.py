@@ -1,5 +1,6 @@
 import json
 import logging
+from datetime import datetime, timezone
 from uuid import UUID
 
 from fastapi import WebSocket
@@ -9,11 +10,13 @@ from app.models.Attachment import Attachment
 from app.models.Channel import Channel
 from app.models.Conversation import Conversation
 from app.models.Message import Message
+from app.models.User import User
 from app.models.UserToServer import UserToServer
 from app.permissions import Permission
 from app.services import read_state
 from app.services.connection_manager import ConnectionManager
 from app.services.permissions import permissions
+from app.services.push import mentioned_user_ids, plain_text, push
 from app.ws_schemas import DirectMessageFrame, MessageFrame
 
 logger = logging.getLogger("app.services.chat_service")
@@ -108,6 +111,13 @@ class ChatService:
 
         await self._fan_out(outgoing, member_ids, sender_ws=sender_ws)
 
+        if push.enabled:
+            mentioned = mentioned_user_ids(content)
+            if mentioned:
+                push.schedule(self._push_mentions(
+                    sender_id, server_id, channel_id, created.id,
+                    content, attachments, mentioned, member_ids))
+
     async def handle_direct_message(
         self, sender_id: int, message: DirectMessageFrame, sender_ws: WebSocket
     ) -> None:
@@ -174,6 +184,75 @@ class ChatService:
         # the socket that sent it is excluded, via sender_ws below.
         peer_id = conversation.other_user_id(sender_id)
         await self._fan_out(outgoing, [peer_id, sender_id], sender_ws=sender_ws)
+
+        if push.enabled and peer_id != sender_id \
+                and not self.connection_manager.is_online(peer_id):
+            push.schedule(self._push_direct_message(
+                sender_id, peer_id, conversation.id, created.id, content, attachments))
+
+    async def _push_direct_message(
+        self, sender_id: int, peer_id: int, conversation_id: int,
+        message_pk: int, content, attachments: list[Attachment],
+    ) -> None:
+        """Web Push for a DM to a peer with no live socket."""
+        marker = await read_state.get_marker(peer_id, conversation_id=conversation_id)
+        unread = await Message.filter(
+            conversation_id=conversation_id, author_id=sender_id,
+            id__gt=marker or 0).count()
+        if unread == 0:
+            return
+        sender = await User.get_or_none(id=sender_id)
+        if sender is None:
+            return
+        tag = f"dm-{conversation_id}"
+        push.track(peer_id, tag, message_pk)
+        await push.send_to_user(peer_id, {
+            "v": 1,
+            "kind": "dm",
+            "tag": tag,
+            "title": sender.username,
+            "body": plain_text(content, attachments),
+            "url": f"/app/direct/{conversation_id}/",
+            "count": unread,
+            "message_id": message_pk,
+            "sent_at": datetime.now(timezone.utc).isoformat(),
+        }, topic=tag, urgency="high")
+
+    async def _push_mentions(
+        self, sender_id: int, server_id: int, channel_id: int, message_pk: int,
+        content, attachments: list[Attachment], mentioned: set[int], member_ids,
+    ) -> None:
+        """Web Push to offline server members who can see the channel and were
+        @mentioned."""
+        members = set(member_ids)
+        recipients = [
+            uid for uid in mentioned
+            if uid != sender_id and uid in members
+            and not self.connection_manager.is_online(uid)
+        ]
+        if not recipients:
+            return
+        channel = await Channel.get_or_none(id=channel_id)
+        sender = await User.get_or_none(id=sender_id)
+        if channel is None or sender is None:
+            return
+        tag = f"ch-{channel_id}"
+        payload = {
+            "v": 1,
+            "kind": "mention",
+            "tag": tag,
+            "title": f"{sender.username} in #{channel.name}",
+            "body": plain_text(content, attachments),
+            "url": f"/app/server/{server_id}/channel/{channel_id}/",
+            "count": 1,
+            "message_id": message_pk,
+            "sent_at": datetime.now(timezone.utc).isoformat(),
+        }
+        for uid in recipients:
+            if not await permissions.has(uid, server_id, Permission.VIEW_CHANNEL):
+                continue
+            push.track(uid, tag, message_pk)
+            await push.send_to_user(uid, payload, topic=tag, urgency="high")
 
     @staticmethod
     async def _load_attachments(

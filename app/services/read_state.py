@@ -5,6 +5,7 @@ from tortoise.functions import Max
 
 from app.models.Message import Message
 from app.models.ReadState import ReadState
+from app.services.push import push
 
 logger = logging.getLogger("app.services.read_state")
 
@@ -20,8 +21,25 @@ async def advance(
     *message_pk* (an internal Message.id, not a uuid).
 
     Never moves it backward: if the stored marker is already >= message_pk,
-    this is a no-op. Returns whether the marker actually moved.
+    this is a no-op. Returns whether the marker actually moved. A move that
+    covers a message we sent a push for also retracts that push.
     """
+    moved = await _advance(
+        user_id, channel_id=channel_id, conversation_id=conversation_id,
+        message_pk=message_pk)
+    if moved:
+        tag = f"ch-{channel_id}" if channel_id is not None else f"dm-{conversation_id}"
+        push.notify_read(user_id, tag, message_pk)
+    return moved
+
+
+async def _advance(
+    user_id: int,
+    *,
+    channel_id: int | None = None,
+    conversation_id: int | None = None,
+    message_pk: int,
+) -> bool:
     assert (channel_id is None) != (conversation_id is None), \
         "exactly one of channel_id/conversation_id must be set"
 
