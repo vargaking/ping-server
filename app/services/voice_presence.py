@@ -76,17 +76,21 @@ class LiveKitRoomSource:
         snapshot: Snapshot = {}
         for room in rooms.rooms:
             channel_id = _channel_id_from_room(room.name)
-            if channel_id is None or room.num_participants <= 0:
+            # num_participants lags behind joins by several seconds, so every
+            # channel room is listed rather than trusting it.
+            if channel_id is None:
                 continue
-            listed = await self._api().room.list_participants(
-                api.ListParticipantsRequest(room=room.name))
-            participants = sorted(
-                filter(None, map(participant_from_info, listed.participants)),
-                key=lambda p: p.user_id,
-            )
-            if participants:
-                snapshot[channel_id] = tuple(participants)
+            if participants := await self.fetch_channel(channel_id):
+                snapshot[channel_id] = participants
         return snapshot
+
+    async def fetch_channel(self, channel_id: int) -> tuple[VoiceParticipant, ...]:
+        listed = await self._api().room.list_participants(
+            api.ListParticipantsRequest(room=f"{ROOM_PREFIX}{channel_id}"))
+        return tuple(sorted(
+            filter(None, map(participant_from_info, listed.participants)),
+            key=lambda p: p.user_id,
+        ))
 
     async def aclose(self) -> None:
         if self._client is not None:
@@ -104,7 +108,11 @@ def _channel_id_from_room(name: str) -> int | None:
 
 
 class VoicePresence:
-    """Keeps who is in each voice channel in memory and reports changes."""
+    """Keeps who is in each voice channel in memory and reports changes.
+
+    A background poll catches everything eventually; refresh() re-reads one
+    channel right away when a client reports a change there.
+    """
 
     def __init__(
         self,
@@ -121,25 +129,75 @@ class VoicePresence:
         self._max_backoff = max_backoff
         self._sleep = sleep
         self._snapshot: Snapshot = {}
+        # Every read of LiveKit takes a number when it starts. A channel only
+        # accepts reads that started after the one it last applied, so a slow
+        # full poll can't overwrite a newer single-channel refresh.
+        self._read_seq = 0
+        self._applied_seq: dict[int, int] = {}
+        self._channel_locks: dict[int, asyncio.Lock] = {}
+        self._refreshing: dict[int, asyncio.Task] = {}
+        self._refresh_again: set[int] = set()
 
     def channel_participants(self, channel_id: int) -> tuple[VoiceParticipant, ...]:
         return self._snapshot.get(channel_id, ())
 
-    async def apply_snapshot(self, snapshot: Snapshot) -> None:
+    def _next_read(self) -> int:
+        self._read_seq += 1
+        return self._read_seq
+
+    async def apply_snapshot(self, snapshot: Snapshot, read: int | None = None) -> None:
+        read = self._next_read() if read is None else read
         for channel_id in self._snapshot.keys() | snapshot.keys():
-            participants = snapshot.get(channel_id, ())
+            await self._apply_channel(channel_id, snapshot.get(channel_id, ()), read)
+
+    async def _apply_channel(
+        self, channel_id: int, participants: tuple[VoiceParticipant, ...], read: int
+    ) -> None:
+        # Held across notify so frames for one channel go out in read order.
+        async with self._channel_locks.setdefault(channel_id, asyncio.Lock()):
+            if read <= self._applied_seq.get(channel_id, 0):
+                return
+            self._applied_seq[channel_id] = read
             if participants == self._snapshot.get(channel_id, ()):
-                continue
+                return
+            if participants:
+                self._snapshot[channel_id] = participants
+            else:
+                self._snapshot.pop(channel_id, None)
             try:
                 await self._notify(channel_id, participants)
             except Exception:
                 logger.warning(
                     "Failed to notify voice state for channel %s",
                     channel_id, exc_info=True)
-        self._snapshot = snapshot
 
     async def poll_once(self) -> None:
-        await self.apply_snapshot(await self._source.fetch())
+        read = self._next_read()
+        await self.apply_snapshot(await self._source.fetch(), read)
+
+    def refresh(self, channel_id: int) -> None:
+        """Re-read one channel soon. Calls while a read of that channel is in
+        flight fold into a single follow-up read."""
+        if channel_id in self._refreshing:
+            self._refresh_again.add(channel_id)
+            return
+        self._refreshing[channel_id] = asyncio.create_task(self._refresh_loop(channel_id))
+
+    async def _refresh_loop(self, channel_id: int) -> None:
+        try:
+            while True:
+                self._refresh_again.discard(channel_id)
+                read = self._next_read()
+                try:
+                    participants = await self._source.fetch_channel(channel_id)
+                except Exception:
+                    logger.debug("Voice channel %s refresh failed", channel_id, exc_info=True)
+                    return
+                await self._apply_channel(channel_id, participants, read)
+                if channel_id not in self._refresh_again:
+                    return
+        finally:
+            self._refreshing.pop(channel_id, None)
 
     async def run(self) -> None:
         failures = 0
@@ -161,6 +219,10 @@ class VoicePresence:
             await self._sleep(delay)
 
     async def aclose(self) -> None:
+        tasks = list(self._refreshing.values())
+        for task in tasks:
+            task.cancel()
+        await asyncio.gather(*tasks, return_exceptions=True)
         await self._source.aclose()
 
 
