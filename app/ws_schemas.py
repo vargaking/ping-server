@@ -10,6 +10,8 @@ from typing import Annotated, Any, Literal, Union
 
 from pydantic import BaseModel, Field, TypeAdapter, ValidationError
 
+from app.services.attachments import MAX_ATTACHMENTS_PER_MESSAGE
+
 __all__ = [
     "ConnectionInitFrame",
     "DisconnectFrame",
@@ -38,6 +40,7 @@ class MessageFrame(BaseModel):
     content: Any
     timestamp: str
     metadata: dict = Field(default_factory=dict)
+    attachment_ids: list[str] = Field(default_factory=list, max_length=MAX_ATTACHMENTS_PER_MESSAGE)
 
 
 class DirectMessageFrame(BaseModel):
@@ -48,6 +51,7 @@ class DirectMessageFrame(BaseModel):
     content: Any
     timestamp: str
     metadata: dict = Field(default_factory=dict)
+    attachment_ids: list[str] = Field(default_factory=list, max_length=MAX_ATTACHMENTS_PER_MESSAGE)
 
 
 WSFrame = Annotated[

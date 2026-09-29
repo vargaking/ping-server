@@ -8,10 +8,12 @@ from fastapi import APIRouter, Depends, HTTPException, Request, status
 from pydantic import BaseModel
 
 from ..middleware import get_current_user
+from ..models.Attachment import Attachment
 from ..models.Conversation import Conversation
 from ..models.Message import Message
 from ..models.Server import Server
 from ..models.User import User
+from ..services.attachments import attachments_by_message, delete_file
 from ..utils import require_membership
 
 logger = logging.getLogger("app.routers.messages")
@@ -78,7 +80,7 @@ async def _notify(
         await comms.broadcast_to_server(server.id, frame, exclude_user_id=exclude_user_id)
 
 
-def _wire_message(message: Message, content: Any) -> dict:
+def _wire_message(message: Message, content: Any, attachments: list[dict]) -> dict:
     """Build a JSON-serialisable message payload for the REST reply and the WS
     frame. content is the raw (un-stringified) form the client sees."""
     edited_at = message.edited_at
@@ -92,6 +94,7 @@ def _wire_message(message: Message, content: Any) -> dict:
         "content": content,
         "timestamp": timestamp.isoformat() if isinstance(timestamp, datetime) else timestamp,
         "edited_at": edited_at.isoformat() if isinstance(edited_at, datetime) else edited_at,
+        "attachments": attachments,
     }
 
 
@@ -115,7 +118,8 @@ async def edit_message(
     message.edited_at = datetime.now(timezone.utc)
     await message.save()
 
-    payload = _wire_message(message, content)
+    attachments = (await attachments_by_message([message.id])).get(message.id, [])
+    payload = _wire_message(message, content, attachments)
     await _notify(
         request, server, conversation,
         {"type": "message_updated", **payload}, current_user.id,
@@ -151,6 +155,10 @@ async def delete_message(
         "channel_id": message.channel_id,
         "conversation_id": message.conversation_id,
     }
+    storage_paths = await Attachment.filter(
+        message_id=message.id).values_list("storage_path", flat=True)
     await message.delete()
+    for storage_path in storage_paths:
+        delete_file(storage_path)
 
     await _notify(request, server, conversation, frame, current_user.id)

@@ -49,6 +49,8 @@ The interactive API docs are then at http://localhost:8000/docs.
 | `MEDIA_BASE_URL` | no | `/media` | Public URL prefix mapping to `MEDIA_ROOT`. |
 | `MEDIA_MOUNT_PATH` | no | `/media` | Path the app serves `MEDIA_ROOT` at via StaticFiles. |
 | `MAX_UPLOAD_BYTES` | no | `5242880` | Max accepted image upload size (5 MB). |
+| `ATTACHMENTS_ROOT` | no | `attachments` | Directory message attachments are written to. Must be writable and must NOT be served by nginx or the `/media` mount; files are only served through `GET /attachments/{id}`. |
+| `MAX_ATTACHMENT_BYTES` | no | `10485760` | Max accepted attachment size (10 MB). |
 | `AUTH_RATE_LIMIT` | no | `10/minute` | Per-IP limit on `/auth/login` and `/auth/register`. |
 | `INVITE_USE_RATE_LIMIT` | no | `20/minute` | Per-IP + per-invite limit on `POST /invites/{id}/use`. |
 | `LIVEKIT_*` | for voice | — | LiveKit API host/key/secret used to mint voice tokens. |

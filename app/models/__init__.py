@@ -6,9 +6,11 @@ from .UserToServer import UserToServer
 from .Channel import Channel
 from .Conversation import Conversation
 from .Message import Message
+from .Attachment import Attachment
 from .Token import Token
 from .Invite import Invite
 from .ReadState import ReadState
 
 __all__ = ["Role", "User", "Server", "RoleToUser", "UserToServer",
-           "Channel", "Conversation", "Message", "Token", "Invite", "ReadState"]
+           "Channel", "Conversation", "Message", "Token", "Invite", "ReadState",
+           "Attachment"]
