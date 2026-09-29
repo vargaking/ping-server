@@ -37,6 +37,7 @@ class MessagePreview(BaseModel):
     user_id: int
     timestamp: datetime
     edited_at: Optional[datetime] = None
+    attachments: list[dict] = []
 
 
 class ConversationResponse(BaseModel):
@@ -75,19 +76,22 @@ async def _last_message(conversation_id: int) -> Optional[dict]:
     return await Message.filter(
         conversation_id=conversation_id
     ).order_by("-created_at", "-id").first().values(
-        "uuid", "content", "author_id", "timestamp", "edited_at",
+        "id", "uuid", "content", "author_id", "timestamp", "edited_at",
     )
 
 
-def _preview(row: Optional[dict]) -> Optional[MessagePreview]:
+async def _preview(row: Optional[dict]) -> Optional[MessagePreview]:
     if not row:
         return None
+    # An attachment-only message has empty text, so clients describe it from these.
+    attachments = (await attachments_by_message([row["id"]])).get(row["id"], [])
     return MessagePreview(
         id=str(row["uuid"]),
         content=row["content"],
         user_id=row["author_id"],
         timestamp=row["timestamp"],
         edited_at=row["edited_at"],
+        attachments=attachments,
     )
 
 
@@ -102,7 +106,7 @@ async def _to_response(
     """
     other = await User.get(id=conversation.other_user_id(user.id))
     last_row = await _last_message(conversation.id)
-    preview = _preview(last_row)
+    preview = await _preview(last_row)
     last_activity = last_row["timestamp"] if last_row else conversation.created_at
 
     if state is None:
