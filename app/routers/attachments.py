@@ -10,8 +10,9 @@ from ..middleware import get_current_user
 from ..models.Attachment import Attachment
 from ..models.Conversation import Conversation
 from ..models.User import User
-from ..models.UserToServer import UserToServer
+from ..permissions import Permission
 from ..services import attachments as attachment_service
+from ..services.permissions import permissions
 
 logger = logging.getLogger("app.routers.attachments")
 
@@ -93,8 +94,8 @@ async def upload_attachment(
 
 async def _can_access(user: User, attachment: Attachment) -> bool:
     if attachment.channel_id is not None:
-        return await UserToServer.filter(
-            user_id=user.id, server_id=attachment.server_id).exists()
+        return await permissions.has(
+            user.id, attachment.server_id, Permission.VIEW_CHANNEL)
     if attachment.conversation_id is not None:
         conversation = await Conversation.get_or_none(id=attachment.conversation_id)
         return conversation is not None and conversation.has_participant(user.id)

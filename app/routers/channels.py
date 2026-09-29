@@ -15,9 +15,14 @@ from ..models.Message import Message
 from ..models.Server import Server
 from ..models.User import User
 from ..models.UserToServer import UserToServer
+from ..permissions import (
+    Permission,
+    channel_from_path,
+    check_permission,
+    server_of_channel,
+)
 from ..services import read_state
 from ..services.attachments import attachments_by_message
-from ..utils import require_membership, require_owner
 
 logger = logging.getLogger("app.routers.channels")
 
@@ -183,21 +188,13 @@ async def get_channel_messages(
     channel_id: int,
     before: Optional[str] = None,
     limit: int = HISTORY_PAGE_SIZE,
-    current_user: User = Depends(get_current_user),
+    server: Server = Depends(check_permission(Permission.VIEW_CHANNEL, server_of_channel)),
 ):
     """Newest-first page of a channel's history.
 
     Pass the previous page's next_cursor as before to walk further back.
     """
     limit = max(1, min(limit, MAX_HISTORY_PAGE_SIZE))
-
-    channel = await Channel.get_or_none(id=channel_id)
-    if not channel:
-        raise HTTPException(status_code=404, detail="Channel not found")
-    server = await Server.get_or_none(id=channel.server_id)
-    if not server:
-        raise HTTPException(status_code=404, detail="Server not found")
-    await require_membership(current_user, server)
 
     query = Message.filter(channel_id=channel_id)
     if before:
@@ -241,6 +238,7 @@ async def mark_channel_read(
     body: ReadMarkerUpdate,
     request: Request,
     current_user: User = Depends(get_current_user),
+    server: Server = Depends(check_permission(Permission.VIEW_CHANNEL, server_of_channel)),
 ):
     """Advance the caller's read marker for this channel to *message_id*.
 
@@ -248,14 +246,6 @@ async def mark_channel_read(
     already stored is a no-op, and the response reflects the (unchanged)
     newer marker.
     """
-    channel = await Channel.get_or_none(id=channel_id)
-    if not channel:
-        raise HTTPException(status_code=404, detail="Channel not found")
-    server = await Server.get_or_none(id=channel.server_id)
-    if not server:
-        raise HTTPException(status_code=404, detail="Server not found")
-    await require_membership(current_user, server)
-
     try:
         message_uuid = UUID(body.message_id)
     except ValueError:
@@ -291,14 +281,9 @@ async def mark_channel_read(
 
 @router.get("/{server_id}", response_model=List[ChannelResponse])
 async def get_channels(
-    server_id: int,
     current_user: User = Depends(get_current_user),
+    server: Server = Depends(check_permission(Permission.VIEW_CHANNEL)),
 ):
-    server = await Server.get_or_none(id=server_id)
-    if not server:
-        raise HTTPException(status_code=404, detail="Server not found")
-    await require_membership(current_user, server)
-
     channels = await Channel.filter(server_id=server.id).all()
     state = await read_state.batch_channel_state(
         current_user.id, [c.id for c in channels])
@@ -310,16 +295,6 @@ async def get_channels(
         )
         for channel in channels
     ]
-
-
-async def _load_channel_and_server(channel_id: int) -> tuple[Channel, Server]:
-    channel = await Channel.get_or_none(id=channel_id)
-    if not channel:
-        raise HTTPException(status_code=404, detail="Channel not found")
-    server = await Server.get_or_none(id=channel.server_id)
-    if not server:
-        raise HTTPException(status_code=404, detail="Server not found")
-    return channel, server
 
 
 async def _broadcast(request: Request, server_id: int, frame: dict, exclude_user_id: int) -> None:
@@ -334,12 +309,8 @@ async def create_channel(
     body: ChannelCreate,
     request: Request,
     current_user: User = Depends(get_current_user),
+    server: Server = Depends(check_permission(Permission.MANAGE_CHANNELS)),
 ):
-    server = await Server.get_or_none(id=server_id)
-    if not server:
-        raise HTTPException(status_code=404, detail="Server not found")
-    await require_membership(current_user, server)
-
     channel = await Channel.create(
         name=body.name,
         channel_settings={},
@@ -371,15 +342,13 @@ async def create_channel(
 
 @router.patch("/{channel_id}", response_model=ChannelResponse)
 async def update_channel(
-    channel_id: int,
     body: ChannelUpdate,
     request: Request,
     current_user: User = Depends(get_current_user),
+    channel: Channel = Depends(channel_from_path),
+    server: Server = Depends(check_permission(Permission.MANAGE_CHANNELS, server_of_channel)),
 ):
-    """Rename a channel or change its topic. Owner only; the type is fixed."""
-    channel, server = await _load_channel_and_server(channel_id)
-    await require_membership(current_user, server)
-    require_owner(current_user, server)
+    """Rename a channel or change its topic. The type is fixed."""
 
     changes = body.model_dump(exclude_unset=True)
     if "type" in changes and changes.pop("type") != channel.type:
@@ -410,11 +379,10 @@ async def delete_channel(
     channel_id: int,
     request: Request,
     current_user: User = Depends(get_current_user),
+    channel: Channel = Depends(channel_from_path),
+    server: Server = Depends(check_permission(Permission.MANAGE_CHANNELS, server_of_channel)),
 ):
-    """Delete a channel and all of its messages. Owner only."""
-    channel, server = await _load_channel_and_server(channel_id)
-    await require_membership(current_user, server)
-    require_owner(current_user, server)
+    """Delete a channel and all of its messages."""
 
     async with in_transaction():
         # Messages cascade at the DB level too, but deleting them explicitly

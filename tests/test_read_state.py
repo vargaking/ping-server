@@ -6,7 +6,7 @@ from datetime import datetime, timezone
 
 import pytest
 
-from tests.conftest import ORIGIN, create_channel, create_server, register
+from tests.conftest import ORIGIN, create_channel, create_server, register, ws_ready
 
 HEADERS = {"origin": ORIGIN}
 DOC = {"type": "doc", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "hi"}]}]}
@@ -244,7 +244,7 @@ def test_conversation_list_unread_count_only_counts_other_person(client, new_cli
     # stop counting as unread — his own message never leaves a thread unread.
     with client.websocket_connect("/ws", headers=HEADERS) as alice_ws, \
             bob_client.websocket_connect("/ws", headers=HEADERS) as bob_ws:
-        _recv(alice_ws, "presence_init")
+        ws_ready(alice_ws)
         frame = dm_frame(convo["id"])
         bob_ws.send_json(frame)
         assert _recv(alice_ws, "direct_message")["id"] == frame["id"]
@@ -329,7 +329,7 @@ def test_read_update_notifies_only_the_users_other_socket(two_members):
 
         # bob opens a second tab.
         with bob_client.websocket_connect("/ws", headers=HEADERS) as bob_ws2:
-            _recv(bob_ws2, "presence_init")
+            ws_ready(bob_ws2)
 
             res = bob_client.put(f"/channels/{channel['id']}/read", json={"message_id": msg_id})
             assert res.status_code == 200
@@ -359,7 +359,7 @@ def test_two_sockets_for_one_user_both_receive_a_message_from_someone_else(two_m
     with alice_client.websocket_connect("/ws", headers=HEADERS) as alice_ws, \
             bob_client.websocket_connect("/ws", headers=HEADERS) as bob_ws1, \
             bob_client.websocket_connect("/ws", headers=HEADERS) as bob_ws2:
-        _recv(bob_ws2, "presence_init")
+        ws_ready(bob_ws2)
 
         frame = chat_frame(server["id"], channel["id"])
         alice_ws.send_json(frame)
@@ -373,7 +373,7 @@ def test_senders_other_socket_gets_own_message_but_not_the_sending_socket(two_me
     with alice_client.websocket_connect("/ws", headers=HEADERS) as alice_ws1, \
             alice_client.websocket_connect("/ws", headers=HEADERS) as alice_ws2, \
             bob_client.websocket_connect("/ws", headers=HEADERS) as bob_ws:
-        _recv(alice_ws2, "presence_init")
+        ws_ready(alice_ws2)
 
         frame = chat_frame(server["id"], channel["id"])
         alice_ws1.send_json(frame)
@@ -395,17 +395,17 @@ def test_senders_other_socket_gets_own_message_but_not_the_sending_socket(two_me
 def test_closing_one_of_two_sockets_does_not_send_offline(two_members):
     alice_client, alice, bob_client, bob, server, channel = two_members
     with alice_client.websocket_connect("/ws", headers=HEADERS) as alice_ws:
-        assert alice_ws.receive_json() == {"type": "presence_init", "user_ids": []}
+        assert ws_ready(alice_ws) == {"type": "presence_init", "user_ids": []}
 
         bob_ws1 = bob_client.websocket_connect("/ws", headers=HEADERS)
         ws1 = bob_ws1.__enter__()
-        _recv(ws1, "presence_init")
+        ws_ready(ws1)
         assert alice_ws.receive_json() == {
             "type": "presence_update", "user_id": bob["id"], "online": True}
 
         bob_ws2 = bob_client.websocket_connect("/ws", headers=HEADERS)
         ws2 = bob_ws2.__enter__()
-        _recv(ws2, "presence_init")
+        ws_ready(ws2)
 
         # Closing the first of bob's two sockets must not flap presence: he
         # is still online on the second. Probe with a chat frame on ws2 and
@@ -426,10 +426,9 @@ def test_closing_one_of_two_sockets_does_not_send_offline(two_members):
 def test_closing_the_last_socket_sends_offline(two_members):
     alice_client, alice, bob_client, bob, server, channel = two_members
     with alice_client.websocket_connect("/ws", headers=HEADERS) as alice_ws:
-        alice_ws.receive_json()  # presence_init
-
+        ws_ready(alice_ws)
         with bob_client.websocket_connect("/ws", headers=HEADERS) as bob_ws:
-            bob_ws.receive_json()  # presence_init
+            ws_ready(bob_ws)
             assert alice_ws.receive_json() == {
                 "type": "presence_update", "user_id": bob["id"], "online": True}
 

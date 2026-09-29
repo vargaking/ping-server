@@ -2,7 +2,7 @@
 import uuid
 from datetime import datetime, timezone
 
-from tests.conftest import ORIGIN, create_channel, create_server, register
+from tests.conftest import ORIGIN, create_channel, create_server, register, ws_ready
 
 HEADERS = {"origin": ORIGIN}
 DOC = {"type": "doc", "content": [{"type": "paragraph",
@@ -150,8 +150,8 @@ def test_delete_removes_channel_messages_and_order(client):
     # which is what makes the follow-up reads deterministic.
     with client.websocket_connect("/ws", headers=HEADERS) as ws, \
             client.websocket_connect("/ws", headers=HEADERS) as echo:
-        ws.receive_json()    # presence_init
-        echo.receive_json()  # presence_init
+        ws_ready(ws)
+        ws_ready(echo)
         for channel in (doomed, keep):
             mid = _post_message(ws, server["id"], channel["id"])
             assert echo.receive_json()["id"] == mid
@@ -181,8 +181,8 @@ def test_update_and_delete_broadcast_to_other_members(client, new_client):
 
     with client.websocket_connect("/ws", headers=HEADERS) as alice_ws, \
             bob.websocket_connect("/ws", headers=HEADERS) as bob_ws:
-        alice_ws.receive_json()  # presence_init
-        bob_ws.receive_json()    # presence_init
+        ws_ready(alice_ws)
+        ws_ready(bob_ws)
         alice_ws.receive_json()  # bob online
 
         client.patch(f"/channels/{channel['id']}", json={"name": "lobby", "topic": "hey"})

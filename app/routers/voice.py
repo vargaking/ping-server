@@ -10,7 +10,7 @@ from ..middleware import get_current_user
 from ..models.Channel import Channel
 from ..models.Server import Server
 from ..models.User import User
-from ..utils import require_membership
+from ..permissions import Permission, require_permission
 
 router = APIRouter(prefix="/api/voice", tags=["voice"])
 
@@ -40,8 +40,8 @@ async def create_voice_token(
 ) -> VoiceTokenResponse:
     """Mint a LiveKit access token for a voice channel.
 
-    Verifies the user is a member of the channel's server before issuing a
-    token scoped to that one room. LiveKit itself never touches our DB.
+    Verifies the user may connect to voice in the channel's server before
+    issuing a token scoped to that one room. LiveKit itself never touches our DB.
     """
     if not (LIVEKIT_API_KEY and LIVEKIT_API_SECRET and LIVEKIT_URL):
         raise HTTPException(
@@ -56,8 +56,9 @@ async def create_voice_token(
     if channel.type != "voice":
         raise HTTPException(status_code=400, detail="Channel is not a voice channel")
 
-    # 403 if the user isn't a member of the server this channel belongs to.
-    await require_membership(current_user, channel.server)
+    # 403 if the user isn't a member of the server this channel belongs to, or
+    # can't connect. SPEAK and STREAM aren't enforced in the token yet.
+    await require_permission(current_user, channel.server, Permission.CONNECT)
 
     room = f"channel_{channel.id}"
 
@@ -109,7 +110,7 @@ async def get_voice_presence(
     server = await Server.get_or_none(id=server_id)
     if not server:
         raise HTTPException(status_code=404, detail="Server not found")
-    await require_membership(current_user, server)
+    await require_permission(current_user, server, Permission(0))
 
     presence = getattr(request.app.state, "voice_presence", None)
     if presence is None:
@@ -143,7 +144,7 @@ async def refresh_voice_presence(
     channel = await Channel.get_or_none(id=channel_id).prefetch_related("server")
     if not channel or channel.type != "voice":
         raise HTTPException(status_code=404, detail="Voice channel not found")
-    await require_membership(current_user, channel.server)
+    await require_permission(current_user, channel.server, Permission(0))
 
     presence = getattr(request.app.state, "voice_presence", None)
     if presence is not None:

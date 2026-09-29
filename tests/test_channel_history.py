@@ -4,7 +4,7 @@ from datetime import datetime, timezone
 
 import pytest
 
-from tests.conftest import create_channel, create_server, register
+from tests.conftest import create_channel, create_server, register, ws_ready
 
 HEADERS = {"origin": "http://localhost:5173"}
 DOC = {"type": "doc", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "hi"}]}]}
@@ -51,7 +51,9 @@ def test_history_returns_newest_page_and_paginates_backwards(two_members):
     alice_client, bob_client, server, channel = two_members
     with alice_client.websocket_connect("/ws", headers=HEADERS) as alice_ws, \
             bob_client.websocket_connect("/ws", headers=HEADERS) as bob_ws:
-        alice_ws.receive_json(); bob_ws.receive_json(); alice_ws.receive_json()
+        ws_ready(alice_ws)
+        ws_ready(bob_ws)
+        alice_ws.receive_json()  # bob online
         ids = _post_messages(alice_ws, bob_ws, server["id"], channel["id"], 55)
 
     # Newest page: last 50 sent, newest first, more history behind it.
@@ -104,7 +106,9 @@ def test_delta_sync_respects_limit(two_members):
     alice_client, bob_client, server, channel = two_members
     with alice_client.websocket_connect("/ws", headers=HEADERS) as alice_ws, \
             bob_client.websocket_connect("/ws", headers=HEADERS) as bob_ws:
-        alice_ws.receive_json(); bob_ws.receive_json(); alice_ws.receive_json()
+        ws_ready(alice_ws)
+        ws_ready(bob_ws)
+        alice_ws.receive_json()  # bob online
         _post_messages(alice_ws, bob_ws, server["id"], channel["id"], 5)
 
     stored = alice_client.get(

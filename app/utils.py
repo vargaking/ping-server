@@ -68,13 +68,6 @@ async def lifespan(app: FastAPI):
             logger.warning("Failed to close voice presence", exc_info=True)
 
 
-async def require_membership(user, server):
-    from .models.UserToServer import UserToServer
-    membership = await UserToServer.filter(user=user, server=server).first()
-    if not membership:
-        raise HTTPException(status_code=403, detail="Not a member of this server")
-
-
 def require_owner(user, server):
     """Enforce that *user* owns *server*; raise 403 otherwise.
 

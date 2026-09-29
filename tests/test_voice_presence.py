@@ -15,7 +15,7 @@ from app.services.voice_presence import (
     make_broadcast_notify,
     participant_from_info,
 )
-from tests.conftest import ORIGIN, create_channel, create_server, register
+from tests.conftest import ORIGIN, create_channel, create_server, register, ws_ready
 from tests.test_realtime_events import invite_and_join
 
 HEADERS = {"origin": ORIGIN}
@@ -468,8 +468,8 @@ def test_voice_state_reaches_only_server_members(client, new_client, monkeypatch
 
     with bob_client.websocket_connect("/ws", headers=HEADERS) as bob_ws, \
             carol_client.websocket_connect("/ws", headers=HEADERS) as carol_ws:
-        assert bob_ws.receive_json()["type"] == "presence_init"
-        assert carol_ws.receive_json()["type"] == "presence_init"
+        ws_ready(bob_ws)
+        ws_ready(carol_ws)
 
         client.portal.call(presence.apply_snapshot, snapshot)
 

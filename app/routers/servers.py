@@ -3,14 +3,18 @@ from typing import List, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Request, UploadFile, File, status
 from pydantic import BaseModel, field_validator
+from tortoise.transactions import in_transaction
 
 from ..middleware import get_current_user
+from ..permissions import Permission, check_permission, require_permission, server_from_path
 from ..models.Channel import Channel
 from ..models.Role import Role
 from ..models.RoleToUser import RoleToUser
 from ..models.Server import Server
 from ..models.User import User
 from ..models.UserToServer import UserToServer
+from ..services.permissions import permissions
+from ..services.roles import seed_server_roles
 from ..services.storage import ImageValidationError, storage_service
 from ..services.voice_presence import remove_from_voice
 from ..utils import require_owner
@@ -71,6 +75,9 @@ class ServerResponse(BaseModel):
     server_settings: dict
     owner_id: Optional[int] = None
     members: List[UserResponse] = []
+    # The caller's effective permission mask as a decimal string (JS numbers
+    # lose precision past 2^53); filled in by the handlers.
+    permissions: str = "0"
 
     @classmethod
     def from_server(cls, server: Server):
@@ -94,15 +101,49 @@ class MemberResponse(BaseModel):
     user: UserResponse
     joined_at: datetime
     is_owner: bool
+    role_ids: List[int] = []
+
+
+class RoleResponse(BaseModel):
+    id: int
+    name: str
+    allow: str
+    deny: str
+    parent_id: Optional[int] = None
+    is_default: bool
+
+    @classmethod
+    def from_role(cls, role: Role):
+        return cls(
+            id=role.id,
+            name=role.name,
+            allow=str(role.allow),
+            deny=str(role.deny),
+            parent_id=role.parent_id,
+            is_default=role.is_default,
+        )
+
+
+class MemberRolesUpdate(BaseModel):
+    role_ids: List[int]
+
+
+async def _server_response(server: Server, user: User) -> ServerResponse:
+    response = ServerResponse.from_server(server)
+    mask = await permissions.effective(user.id, server)
+    response.permissions = str(int(mask or 0))
+    return response
 
 
 @router.post("/", response_model=ServerResponse, status_code=status.HTTP_201_CREATED)
 async def create_server(server: ServerCreate, current_user: User = Depends(get_current_user)):
-    server_obj = await Server.create(**server.model_dump(), owner=current_user)
-    # Automatically add the creator as a member
-    await UserToServer.create(user=current_user, server=server_obj)
+    async with in_transaction():
+        server_obj = await Server.create(**server.model_dump(), owner=current_user)
+        # Automatically add the creator as a member
+        await UserToServer.create(user=current_user, server=server_obj)
+        await seed_server_roles(server_obj)
     await server_obj.fetch_related('server_users__user')
-    return ServerResponse.from_server(server_obj)
+    return await _server_response(server_obj, current_user)
 
 
 @router.get("/", response_model=List[ServerPublicResponse])
@@ -119,22 +160,16 @@ async def get_my_servers(current_user: User = Depends(get_current_user)):
     # Return servers the current user belongs to
     user_server_relations = await UserToServer.filter(user=current_user).prefetch_related("server__server_users__user")
     servers = [relation.server for relation in user_server_relations]
-    return [ServerResponse.from_server(server) for server in servers]
+    return [await _server_response(server, current_user) for server in servers]
 
 
 @router.get("/{server_id}", response_model=ServerResponse)
-async def get_server(server_id: int, current_user: User = Depends(get_current_user)):
-    server = await Server.get_or_none(id=server_id).prefetch_related('server_users__user')
-    if not server:
-        raise HTTPException(status_code=404, detail="Server not found")
-
-    # Non-members get a 404, not a 403: a 403 would confirm the server exists.
-    is_member = await UserToServer.filter(
-        user=current_user, server=server).exists()
-    if not is_member:
-        raise HTTPException(status_code=404, detail="Server not found")
-
-    return ServerResponse.from_server(server)
+async def get_server(
+    server: Server = Depends(check_permission(Permission(0), hide=True)),
+    current_user: User = Depends(get_current_user),
+):
+    await server.fetch_related('server_users__user')
+    return await _server_response(server, current_user)
 
 
 async def _broadcast_server_updated(request: Request, server: Server, actor_id: int) -> None:
@@ -148,20 +183,30 @@ async def _broadcast_server_updated(request: Request, server: Server, actor_id: 
     }, exclude_user_id=actor_id)
 
 
+def _is_channel_reorder(update_data: dict) -> bool:
+    settings = update_data.get("server_settings")
+    return (
+        set(update_data) == {"server_settings"}
+        and isinstance(settings, dict)
+        and set(settings) == {"channel_order"}
+    )
+
+
 @router.put("/{server_id}", response_model=ServerPublicResponse)
 async def update_server(
-    server_id: int,
     server_update: ServerUpdate,
     request: Request,
     current_user: User = Depends(get_current_user),
+    server: Server = Depends(server_from_path),
 ):
-    server = await Server.get_or_none(id=server_id)
-    if not server:
-        raise HTTPException(status_code=404, detail="Server not found")
-
-    require_owner(current_user, server)
-
     update_data = server_update.model_dump(exclude_unset=True)
+    # Dragging channels into a new order is a channel edit, not a server edit.
+    needed = (
+        Permission.MANAGE_CHANNELS if _is_channel_reorder(update_data)
+        else Permission.MANAGE_SERVER
+    )
+    await require_permission(current_user, server, needed)
+
     if "name" in update_data and update_data["name"] is None:
         raise HTTPException(status_code=422, detail="Server name can't be empty")
     await server.update_from_dict(update_data)
@@ -189,6 +234,7 @@ async def delete_server(
     # Memberships go with the server, so collect who to tell first.
     member_ids = await UserToServer.filter(server_id=server.id).values_list("user_id", flat=True)
     await server.delete()
+    permissions.invalidate(server_id)
 
     comms = getattr(request.app.state, "comms", None)
     if comms is not None:
@@ -201,22 +247,16 @@ async def delete_server(
 
 @router.post("/{server_id}/icon", response_model=ServerPublicResponse)
 async def upload_server_icon(
-    server_id: int,
     request: Request,
     file: UploadFile = File(...),
+    server: Server = Depends(check_permission(Permission.MANAGE_SERVER)),
     current_user: User = Depends(get_current_user),
 ):
-    server = await Server.get_or_none(id=server_id)
-    if not server:
-        raise HTTPException(status_code=404, detail="Server not found")
-
-    require_owner(current_user, server)
-
     content = await file.read()
     try:
         url = await storage_service.upload_image(
             content,
-            f"servers/{server_id}/icon",
+            f"servers/{server.id}/icon",
             max_size_px=512,
         )
     except ImageValidationError as exc:
@@ -231,39 +271,116 @@ async def upload_server_icon(
     return ServerPublicResponse.from_server(server)
 
 
-async def _get_member_server(server_id: int, user: User) -> Server:
-    server = await Server.get_or_none(id=server_id)
-    # Non-members get a 404, not a 403: a 403 would confirm the server exists.
-    if not server or not await UserToServer.filter(user=user, server=server).exists():
-        raise HTTPException(status_code=404, detail="Server not found")
-    return server
+async def _assigned_role_ids(server_id: int) -> dict[int, list[int]]:
+    """Assigned role ids per user. The default role is implicit and never listed."""
+    role_ids = await Role.filter(server_id=server_id, is_default=False).values_list("id", flat=True)
+    rows = await RoleToUser.filter(role_id__in=role_ids).order_by("role_id").values_list(
+        "user_id", "role_id")
+    assigned: dict[int, list[int]] = {}
+    for user_id, role_id in rows:
+        assigned.setdefault(user_id, []).append(role_id)
+    return assigned
+
+
+async def _member_response(server: Server, relation: UserToServer, role_ids: list[int]) -> MemberResponse:
+    return MemberResponse(
+        user=UserResponse.from_user(relation.user),
+        joined_at=relation.created_at,
+        is_owner=relation.user_id == server.owner_id,
+        role_ids=role_ids,
+    )
 
 
 @router.get("/{server_id}/members", response_model=List[MemberResponse])
-async def list_members(server_id: int, current_user: User = Depends(get_current_user)):
-    server = await _get_member_server(server_id, current_user)
+async def list_members(
+    server: Server = Depends(check_permission(Permission(0), hide=True)),
+):
     relations = await UserToServer.filter(server=server).order_by("created_at", "id").prefetch_related("user")
+    assigned = await _assigned_role_ids(server.id)
     members = [
-        MemberResponse(
-            user=UserResponse.from_user(rel.user),
-            joined_at=rel.created_at,
-            is_owner=rel.user_id == server.owner_id,
-        )
+        await _member_response(server, rel, assigned.get(rel.user_id, []))
         for rel in relations
     ]
     members.sort(key=lambda m: not m.is_owner)
     return members
 
 
+@router.get("/{server_id}/roles", response_model=List[RoleResponse])
+async def list_roles(
+    server: Server = Depends(check_permission(Permission(0), hide=True)),
+):
+    roles = await Role.filter(server=server).order_by("-is_default", "id")
+    return [RoleResponse.from_role(role) for role in roles]
+
+
+@router.put("/{server_id}/members/{user_id}/roles", response_model=MemberResponse)
+async def set_member_roles(
+    user_id: int,
+    body: MemberRolesUpdate,
+    request: Request,
+    current_user: User = Depends(get_current_user),
+    server: Server = Depends(server_from_path),
+):
+    """Replace the roles assigned to a member (the default role is implicit)."""
+    actor_mask = await require_permission(current_user, server, Permission.MANAGE_ROLES)
+
+    membership = await UserToServer.get_or_none(
+        user_id=user_id, server=server).prefetch_related("user")
+    if not membership:
+        raise HTTPException(status_code=404, detail="Member not found")
+    if user_id == server.owner_id:
+        raise HTTPException(status_code=403, detail="The owner's permissions can't be changed")
+
+    wanted = set(body.role_ids)
+    roles = {role.id: role for role in await Role.filter(server=server)}
+    if any(role_id not in roles or roles[role_id].is_default for role_id in wanted):
+        raise HTTPException(
+            status_code=422, detail="Roles must be existing, non-default roles of this server")
+
+    current = set(await RoleToUser.filter(
+        user_id=user_id, role_id__in=list(roles)).values_list("role_id", flat=True))
+    if current_user.id != server.owner_id:
+        # Handing out a role is handing out its bits, so it can't exceed your own.
+        for role_id in wanted ^ current:
+            if roles[role_id].allow & ~int(actor_mask):
+                raise HTTPException(
+                    status_code=403, detail="You can't grant or remove a role above your own permissions")
+
+    before = await permissions.effective(user_id, server)
+    async with in_transaction():
+        await RoleToUser.filter(user_id=user_id, role_id__in=list(roles)).delete()
+        await RoleToUser.bulk_create(
+            [RoleToUser(user_id=user_id, role_id=role_id) for role_id in sorted(wanted)])
+    permissions.invalidate(server.id, user_id)
+    after = await permissions.effective(user_id, server)
+
+    role_ids = sorted(wanted)
+    comms = getattr(request.app.state, "comms", None)
+    if comms is not None:
+        await comms.broadcast_to_server(server.id, {
+            "type": "member_roles_updated",
+            "server_id": server.id,
+            "user_id": user_id,
+            "role_ids": role_ids,
+        })
+        if after != before:
+            await comms.send_to_user(user_id, {
+                "type": "permissions_updated",
+                "server_id": server.id,
+                "permissions": str(int(after)),
+            })
+
+    return await _member_response(server, membership, role_ids)
+
+
 @router.delete("/{server_id}/members/{user_id}", status_code=status.HTTP_204_NO_CONTENT)
 async def remove_member(
-    server_id: int,
     user_id: int,
     request: Request,
     current_user: User = Depends(get_current_user),
+    server: Server = Depends(check_permission(Permission(0), hide=True)),
 ):
-    """Kick a member (owner only) or leave the server (user_id is yourself)."""
-    server = await _get_member_server(server_id, current_user)
+    """Kick a member (needs KICK_MEMBERS) or leave the server (user_id is yourself)."""
     leaving = user_id == current_user.id
 
     if leaving:
@@ -272,7 +389,15 @@ async def remove_member(
                 status_code=409,
                 detail="The owner can't leave. Transfer ownership or delete the server.")
     else:
-        require_owner(current_user, server)
+        await require_permission(current_user, server, Permission.KICK_MEMBERS)
+        if user_id == server.owner_id:
+            raise HTTPException(status_code=403, detail="The owner can't be removed")
+        if current_user.id != server.owner_id:
+            target_mask = await permissions.effective(user_id, server)
+            if target_mask is not None and Permission.KICK_MEMBERS in target_mask:
+                raise HTTPException(
+                    status_code=403,
+                    detail="Only the owner can remove members who can kick")
 
     membership = await UserToServer.get_or_none(user_id=user_id, server=server)
     if not membership:
@@ -284,6 +409,7 @@ async def remove_member(
     await membership.delete()
     role_ids = await Role.filter(server=server).values_list("id", flat=True)
     await RoleToUser.filter(user_id=user_id, role_id__in=role_ids).delete()
+    permissions.invalidate(server.id, user_id)
 
     comms = getattr(request.app.state, "comms", None)
     if comms is not None:

@@ -109,16 +109,17 @@ async def websocket_endpoint(websocket: WebSocket):
         await websocket.close(code=WS_CLOSE_UNAUTHENTICATED)
         return
 
-    await comms.connect(user.id, websocket)
     try:
+        await comms.connect(user.id, websocket)
         while True:
             data = await websocket.receive_json()
             await comms.message_switch(data, websocket)
     except WebSocketDisconnect:
         logger.info("WebSocket disconnected (user %s)", user.id)
     finally:
-        # Also runs when a handler raises, so a crashed connection can't leave
-        # a stale "online" entry behind. Shielded so that cancellation of this
+        # Also runs when a handler raises or the socket goes away while
+        # connect() is still running, so a crashed connection can't leave a
+        # stale "online" entry behind. Shielded so that cancellation of this
         # task (server shutdown, the test client) can't interrupt the cleanup
         # halfway and skip the "went offline" broadcast.
         with anyio.CancelScope(shield=True):
