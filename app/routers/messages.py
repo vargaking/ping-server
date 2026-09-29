@@ -13,8 +13,9 @@ from ..models.Conversation import Conversation
 from ..models.Message import Message
 from ..models.Server import Server
 from ..models.User import User
+from ..permissions import Permission, require_permission
 from ..services.attachments import attachments_by_message, delete_file
-from ..utils import require_membership
+from ..services.permissions import permissions
 
 logger = logging.getLogger("app.routers.messages")
 
@@ -56,7 +57,7 @@ async def _load_message_and_scope(
     server = await Server.get_or_none(id=message.server_id)
     if not server:
         raise HTTPException(status_code=404, detail="Server not found")
-    await require_membership(user, server)
+    await require_permission(user, server, Permission(0))
     return message, server, None
 
 
@@ -135,17 +136,15 @@ async def delete_message(
     current_user: User = Depends(get_current_user),
 ):
     """Delete a message. The author may delete their own; in a server channel
-    the server owner may delete anyone's. DMs have no owner, so author only."""
+    anyone with MANAGE_MESSAGES may delete anyone's. DMs have no moderators,
+    so author only."""
     message, server, conversation = await _load_message_and_scope(
         message_id, current_user)
 
     is_author = message.author_id == current_user.id
-    is_owner = (
-        server is not None
-        and server.owner_id is not None
-        and server.owner_id == current_user.id
-    )
-    if not (is_author or is_owner):
+    is_moderator = server is not None and await permissions.has(
+        current_user.id, server, Permission.MANAGE_MESSAGES)
+    if not (is_author or is_moderator):
         raise HTTPException(status_code=403, detail="Not allowed to delete this message")
 
     frame = {

@@ -8,7 +8,7 @@ from io import BytesIO
 
 from PIL import Image
 
-from tests.conftest import ORIGIN, create_server, register
+from tests.conftest import ORIGIN, create_server, register, ws_ready
 from tests.test_realtime_events import invite_and_join
 
 HEADERS = {"origin": ORIGIN}
@@ -24,15 +24,15 @@ def _open_sockets(stack, alice_client, bob_client):
     """Connect Bob and two Alice sockets (two tabs) and drain the connect-time
     frames, so the next frame on each socket is whatever the test triggers."""
     bob_ws = stack.enter_context(bob_client.websocket_connect("/ws", headers=HEADERS))
-    assert bob_ws.receive_json()["type"] == "presence_init"
+    ws_ready(bob_ws)
 
     alice_ws1 = stack.enter_context(alice_client.websocket_connect("/ws", headers=HEADERS))
-    assert alice_ws1.receive_json()["type"] == "presence_init"
+    ws_ready(alice_ws1)
     assert bob_ws.receive_json()["type"] == "presence_update"  # alice came online
 
     # A second tab only gets its own snapshot; alice was already online.
     alice_ws2 = stack.enter_context(alice_client.websocket_connect("/ws", headers=HEADERS))
-    assert alice_ws2.receive_json()["type"] == "presence_init"
+    ws_ready(alice_ws2)
     return bob_ws, alice_ws1, alice_ws2
 
 
@@ -83,7 +83,7 @@ def test_user_without_shared_server_is_not_notified(client, new_client):
     register(carol_client, "carol-ns")
 
     with carol_client.websocket_connect("/ws", headers=HEADERS) as carol_ws:
-        assert carol_ws.receive_json()["type"] == "presence_init"
+        ws_ready(carol_ws)
 
         res = client.put(f"/users/{alice['id']}", json={"username": "alice-ns-2"})
         assert res.status_code == 200, res.text

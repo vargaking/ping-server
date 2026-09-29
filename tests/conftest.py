@@ -32,8 +32,10 @@ os.environ.setdefault("INVITE_USE_RATE_LIMIT", "10000/minute")
 
 import pytest  # noqa: E402
 from fastapi.testclient import TestClient  # noqa: E402
+from starlette.testclient import WebSocketTestSession  # noqa: E402
 
 from app.app import app  # noqa: E402
+from app.services.permissions import permissions  # noqa: E402
 
 ORIGIN = "http://localhost:5173"
 # A Vercel branch-preview origin that matches ALLOWED_ORIGIN_REGEX above.
@@ -47,6 +49,9 @@ _usernames = count(1)
 def app_lifespan():
     """Start the app once for the test; yields a factory for independent clients
     (each client has its own cookie jar, i.e. is its own browser)."""
+    # Ids restart with every fresh database, so masks cached by a previous
+    # test would be attributed to unrelated users and servers.
+    permissions.clear()
     with TestClient(app) as primary:
         clients = [primary]
 
@@ -96,3 +101,39 @@ def create_channel(client: TestClient, server_id: int, name: str = "general",
     )
     assert res.status_code == 201, res.text
     return res.json()
+
+
+_receive_json = WebSocketTestSession.receive_json
+
+
+def _receive_held_first(self, mode: str = "text"):
+    held = getattr(self, "held_frames", None)
+    if held:
+        return held.pop(0)
+    return _receive_json(self, mode)
+
+
+WebSocketTestSession.receive_json = _receive_held_first
+
+
+def ws_ready(ws) -> dict:
+    """Read the presence_init and permissions_init a fresh socket gets on
+    connect and return the presence_init frame.
+
+    A presence_update from another socket connecting at the same time can land
+    between the two. Such frames are held and handed out, in order, by the
+    next receive_json calls.
+    """
+    presence = None
+    ready = set()
+    held = []
+    while len(ready) < 2:
+        frame = _receive_json(ws)
+        if frame["type"] in ("presence_init", "permissions_init") and frame["type"] not in ready:
+            ready.add(frame["type"])
+            if frame["type"] == "presence_init":
+                presence = frame
+        else:
+            held.append(frame)
+    ws.held_frames = held + getattr(ws, "held_frames", [])
+    return presence

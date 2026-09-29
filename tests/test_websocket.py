@@ -6,7 +6,7 @@ from datetime import datetime, timezone
 import pytest
 from starlette.websockets import WebSocketDisconnect
 
-from tests.conftest import ORIGIN, PREVIEW_ORIGIN, create_channel, create_server, register
+from tests.conftest import ORIGIN, PREVIEW_ORIGIN, create_channel, create_server, register, ws_ready
 
 HEADERS = {"origin": ORIGIN}
 DOC = {"type": "doc", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "hi"}]}]}
@@ -73,7 +73,7 @@ def test_vercel_preview_origin_is_allowed_by_regex(client):
     # just like an explicitly-allowlisted origin would be.
     register(client)
     with client.websocket_connect("/ws", headers={"origin": PREVIEW_ORIGIN}) as ws:
-        assert ws.receive_json()["type"] == "presence_init"
+        ws_ready(ws)
 
 
 def test_foreign_vercel_origin_is_rejected(client):
@@ -88,13 +88,13 @@ def test_foreign_vercel_origin_is_rejected(client):
 def test_no_origin_header_is_allowed_for_non_browser_clients(client):
     register(client)
     with client.websocket_connect("/ws") as ws:
-        assert ws.receive_json()["type"] == "presence_init"
+        ws_ready(ws)
 
 
 def test_authenticated_connect_gets_presence_without_connection_init(client):
     register(client)
     with client.websocket_connect("/ws", headers=HEADERS) as ws:
-        assert ws.receive_json() == {"type": "presence_init", "user_ids": []}
+        assert ws_ready(ws) == {"type": "presence_init", "user_ids": []}
 
 
 # --- presence --------------------------------------------------------------
@@ -102,10 +102,10 @@ def test_authenticated_connect_gets_presence_without_connection_init(client):
 def test_presence_flows_between_members(two_members):
     alice_client, alice, bob_client, bob, *_ = two_members
     with alice_client.websocket_connect("/ws", headers=HEADERS) as alice_ws:
-        assert alice_ws.receive_json() == {"type": "presence_init", "user_ids": []}
+        assert ws_ready(alice_ws) == {"type": "presence_init", "user_ids": []}
 
         with bob_client.websocket_connect("/ws", headers=HEADERS) as bob_ws:
-            assert bob_ws.receive_json() == {"type": "presence_init", "user_ids": [alice["id"]]}
+            assert ws_ready(bob_ws) == {"type": "presence_init", "user_ids": [alice["id"]]}
             assert alice_ws.receive_json() == {
                 "type": "presence_update", "user_id": bob["id"], "online": True}
 
@@ -116,9 +116,9 @@ def test_presence_flows_between_members(two_members):
 def test_legacy_connection_init_cannot_claim_another_identity(two_members):
     alice_client, alice, bob_client, bob, *_ = two_members
     with alice_client.websocket_connect("/ws", headers=HEADERS) as alice_ws:
-        alice_ws.receive_json()
+        ws_ready(alice_ws)
         with bob_client.websocket_connect("/ws", headers=HEADERS) as bob_ws:
-            bob_ws.receive_json()
+            ws_ready(bob_ws)
             alice_ws.receive_json()  # bob online
 
             # bob's (old or malicious) client claims to be alice
@@ -138,7 +138,9 @@ def test_forged_user_id_is_attributed_to_real_sender(two_members):
     alice_client, alice, bob_client, bob, server, channel = two_members
     with alice_client.websocket_connect("/ws", headers=HEADERS) as alice_ws, \
             bob_client.websocket_connect("/ws", headers=HEADERS) as bob_ws:
-        alice_ws.receive_json(); bob_ws.receive_json(); alice_ws.receive_json()
+        ws_ready(alice_ws)
+        ws_ready(bob_ws)
+        alice_ws.receive_json()  # bob online
 
         frame = chat_frame(server["id"], channel["id"], user_id=alice["id"], is_admin=True)
         bob_ws.send_json(frame)
@@ -159,7 +161,9 @@ def test_frame_without_user_id_works(two_members):
     alice_client, alice, bob_client, bob, server, channel = two_members
     with alice_client.websocket_connect("/ws", headers=HEADERS) as alice_ws, \
             bob_client.websocket_connect("/ws", headers=HEADERS) as bob_ws:
-        alice_ws.receive_json(); bob_ws.receive_json(); alice_ws.receive_json()
+        ws_ready(alice_ws)
+        ws_ready(bob_ws)
+        alice_ws.receive_json()  # bob online
         alice_ws.send_json(chat_frame(server["id"], channel["id"]))
         assert bob_ws.receive_json()["user_id"] == alice["id"]
 
@@ -171,7 +175,8 @@ def test_non_member_cannot_post_into_a_server(two_members, new_client):
 
     with alice_client.websocket_connect("/ws", headers=HEADERS) as alice_ws, \
             mallory_client.websocket_connect("/ws", headers=HEADERS) as mallory_ws:
-        alice_ws.receive_json(); mallory_ws.receive_json()
+        ws_ready(alice_ws)
+        ws_ready(mallory_ws)
 
         frame = chat_frame(server["id"], channel["id"], user_id=alice["id"])
         mallory_ws.send_json(frame)
@@ -185,7 +190,7 @@ def test_channel_must_belong_to_the_server(two_members):
     alice_client, *_ , server, channel = two_members
     other_server = create_server(alice_client, "Other")
     with alice_client.websocket_connect("/ws", headers=HEADERS) as ws:
-        ws.receive_json()
+        ws_ready(ws)
         frame = chat_frame(other_server["id"], channel["id"])
         ws.send_json(frame)
         assert ws.receive_json()["code"] == "forbidden"
@@ -196,7 +201,7 @@ def test_channel_must_belong_to_the_server(two_members):
 def test_malformed_frame_yields_error_and_keeps_socket_open(client):
     register(client)
     with client.websocket_connect("/ws", headers=HEADERS) as ws:
-        assert ws.receive_json()["type"] == "presence_init"
+        ws_ready(ws)
 
         # unknown frame type
         ws.send_json({"type": "nonsense"})
@@ -219,6 +224,6 @@ def test_disconnect_clears_connection_state(client):
     from app.app import comms
     me = register(client)
     with client.websocket_connect("/ws", headers=HEADERS) as ws:
-        ws.receive_json()
+        ws_ready(ws)
         assert comms.connection_manager.is_online(me["id"])
     assert not comms.connection_manager.is_online(me["id"])

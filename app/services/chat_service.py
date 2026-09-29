@@ -10,8 +10,10 @@ from app.models.Channel import Channel
 from app.models.Conversation import Conversation
 from app.models.Message import Message
 from app.models.UserToServer import UserToServer
+from app.permissions import Permission
 from app.services import read_state
 from app.services.connection_manager import ConnectionManager
+from app.services.permissions import permissions
 from app.ws_schemas import DirectMessageFrame, MessageFrame
 
 logger = logging.getLogger("app.services.chat_service")
@@ -40,11 +42,11 @@ class ChatService:
         server_id = message.server_id
         channel_id = message.channel_id
 
-        # Being logged in is not enough: the sender has to be a member of the
-        # server, and the channel has to actually live in that server.
-        is_member = await UserToServer.filter(
-            user_id=sender_id, server_id=server_id).exists()
-        channel_ok = is_member and await Channel.filter(
+        # Being logged in is not enough: the sender has to be allowed to post
+        # in the server, and the channel has to actually live in that server.
+        can_send = await permissions.has(
+            sender_id, server_id, Permission.VIEW_CHANNEL | Permission.SEND_MESSAGES)
+        channel_ok = can_send and await Channel.filter(
             id=channel_id, server_id=server_id).exists()
         if not channel_ok:
             logger.warning(

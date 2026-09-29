@@ -3,6 +3,7 @@ import logging
 from fastapi import WebSocket
 
 from app.models.UserToServer import UserToServer
+from app.services.permissions import permissions
 from app.services.connection_manager import ConnectionManager
 from app.services.chat_service import ChatService
 from app.ws_schemas import (
@@ -37,6 +38,7 @@ class Communication:
         self.connection_manager.add_connection(user_id, websocket)
         await self._notify_presence(user_id, online=True, websocket=websocket,
                                      was_online=was_online)
+        await self._send_permissions_snapshot(user_id, websocket)
 
     async def remove_connection_by_websocket(self, websocket: WebSocket):
         user_id = self.connection_manager.remove_connection_by_websocket(
@@ -120,6 +122,21 @@ class Communication:
         except Exception:
             logger.warning(
                 "Failed to send presence_init to user %s", user_id, exc_info=True)
+
+    async def _send_permissions_snapshot(self, user_id: int, websocket: WebSocket) -> None:
+        """Send *websocket* the user's permission mask for every server they are in."""
+        server_ids = await UserToServer.filter(
+            user_id=user_id).values_list("server_id", flat=True)
+        masks = {}
+        for server_id in server_ids:
+            mask = await permissions.effective(user_id, server_id)
+            if mask is not None:
+                masks[str(server_id)] = str(int(mask))
+        try:
+            await websocket.send_json({"type": "permissions_init", "servers": masks})
+        except Exception:
+            logger.warning(
+                "Failed to send permissions_init to user %s", user_id, exc_info=True)
 
     async def _notify_presence(
         self,

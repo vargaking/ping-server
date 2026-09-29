@@ -1,5 +1,5 @@
 """Server name validation and the server_updated / server_deleted frames."""
-from tests.conftest import ORIGIN, create_server, register
+from tests.conftest import ORIGIN, create_server, register, ws_ready
 
 HEADERS = {"origin": ORIGIN}
 PNG_1PX = bytes.fromhex(
@@ -42,8 +42,8 @@ def test_rename_and_icon_broadcast_to_other_members(client, new_client):
 
     with client.websocket_connect("/ws", headers=HEADERS) as alice_ws, \
             bob.websocket_connect("/ws", headers=HEADERS) as bob_ws:
-        alice_ws.receive_json()  # presence_init
-        bob_ws.receive_json()    # presence_init
+        ws_ready(alice_ws)
+        ws_ready(bob_ws)
         alice_ws.receive_json()  # bob online
 
         client.put(f"/servers/{server['id']}", json={"name": "New"})

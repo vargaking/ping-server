@@ -1,6 +1,6 @@
 """Server members: listing, kicking and leaving."""
 from app.services.voice_presence import VoicePresence
-from tests.conftest import ORIGIN, create_channel, create_server, register
+from tests.conftest import ORIGIN, create_channel, create_server, register, ws_ready
 from tests.test_realtime_events import chat_frame, invite_and_join
 
 HEADERS = {"origin": ORIGIN}
@@ -45,8 +45,8 @@ def test_owner_kicks_member_and_everyone_is_told(client, new_client):
 
     with bob_client.websocket_connect("/ws", headers=HEADERS) as bob_ws, \
             carol_client.websocket_connect("/ws", headers=HEADERS) as carol_ws:
-        bob_ws.receive_json()    # presence_init
-        carol_ws.receive_json()  # presence_init
+        ws_ready(bob_ws)
+        ws_ready(carol_ws)
         bob_ws.receive_json()    # carol online
 
         res = client.delete(f"/servers/{server['id']}/members/{bob['id']}")
@@ -98,8 +98,8 @@ def test_member_leaves_and_their_other_tabs_hear_it(client, new_client):
 
     with bob_client.websocket_connect("/ws", headers=HEADERS) as bob_ws, \
             client.websocket_connect("/ws", headers=HEADERS) as owner_ws:
-        bob_ws.receive_json()    # presence_init
-        owner_ws.receive_json()  # presence_init
+        ws_ready(bob_ws)
+        ws_ready(owner_ws)
         bob_ws.receive_json()    # owner online
 
         res = bob_client.delete(f"/servers/{server['id']}/members/{bob['id']}")
@@ -125,11 +125,10 @@ def test_removed_member_stops_receiving_server_messages(client, new_client):
 
     with bob_client.websocket_connect("/ws", headers=HEADERS) as bob_ws, \
             carol_client.websocket_connect("/ws", headers=HEADERS) as carol_ws:
-        bob_ws.receive_json()    # presence_init
-        carol_ws.receive_json()  # presence_init
-
+        ws_ready(bob_ws)
+        ws_ready(carol_ws)
         with client.websocket_connect("/ws", headers=HEADERS) as owner_ws:
-            owner_ws.receive_json()  # presence_init
+            ws_ready(owner_ws)
             assert carol_ws.receive_json()["type"] == "presence_update"
             owner_ws.send_json(chat_frame(server["id"], channel["id"]))
             assert carol_ws.receive_json()["type"] == "message"

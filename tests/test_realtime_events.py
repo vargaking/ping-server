@@ -7,7 +7,7 @@ request / initial load).
 import uuid
 from datetime import datetime, timezone
 
-from tests.conftest import ORIGIN, create_channel, create_server, register
+from tests.conftest import ORIGIN, create_channel, create_server, register, ws_ready
 
 HEADERS = {"origin": ORIGIN}
 DOC = {"type": "doc", "content": [{"type": "paragraph",
@@ -42,8 +42,8 @@ def test_channel_created_broadcasts_and_excludes_creator(client, new_client):
 
     with client.websocket_connect("/ws", headers=HEADERS) as alice_ws, \
             bob_client.websocket_connect("/ws", headers=HEADERS) as bob_ws:
-        alice_ws.receive_json()  # presence_init
-        bob_ws.receive_json()    # presence_init
+        ws_ready(alice_ws)
+        ws_ready(bob_ws)
         alice_ws.receive_json()  # bob online
 
         new_ch = create_channel(client, server["id"], name="random")
@@ -74,8 +74,7 @@ def test_member_joined_broadcasts_to_existing_members(client, new_client):
     server = create_server(client)
 
     with client.websocket_connect("/ws", headers=HEADERS) as alice_ws:
-        alice_ws.receive_json()  # presence_init
-
+        ws_ready(alice_ws)
         carol_client = new_client()
         carol = register(carol_client, "carol-mj")
         invite_and_join(client, carol_client, server["id"])

@@ -7,7 +7,7 @@ message_deleted frame, while the actor is excluded (they have the REST reply).
 import uuid
 from datetime import datetime, timezone
 
-from tests.conftest import ORIGIN, create_channel, create_server, register
+from tests.conftest import ORIGIN, create_channel, create_server, register, ws_ready
 
 HEADERS = {"origin": ORIGIN}
 DOC = {"type": "doc", "content": [{"type": "paragraph",
@@ -60,8 +60,8 @@ def test_author_edits_and_members_receive_update(client, new_client):
 
     with client.websocket_connect("/ws", headers=HEADERS) as alice_ws, \
             bob_client.websocket_connect("/ws", headers=HEADERS) as bob_ws:
-        alice_ws.receive_json()  # presence_init
-        bob_ws.receive_json()    # presence_init
+        ws_ready(alice_ws)
+        ws_ready(bob_ws)
         alice_ws.receive_json()  # bob online
 
         message_id = post_message(alice_ws, bob_ws, server["id"], channel["id"])
@@ -90,9 +90,9 @@ def test_only_author_can_edit(client, new_client):
 
     with client.websocket_connect("/ws", headers=HEADERS) as alice_ws, \
             bob_client.websocket_connect("/ws", headers=HEADERS) as bob_ws:
-        alice_ws.receive_json()
-        bob_ws.receive_json()
-        alice_ws.receive_json()
+        ws_ready(alice_ws)
+        ws_ready(bob_ws)
+        alice_ws.receive_json()  # bob online
 
         message_id = post_message(alice_ws, bob_ws, server["id"], channel["id"])
 
@@ -105,9 +105,9 @@ def test_author_deletes_and_members_receive_delete(client, new_client):
 
     with client.websocket_connect("/ws", headers=HEADERS) as alice_ws, \
             bob_client.websocket_connect("/ws", headers=HEADERS) as bob_ws:
-        alice_ws.receive_json()
-        bob_ws.receive_json()
-        alice_ws.receive_json()
+        ws_ready(alice_ws)
+        ws_ready(bob_ws)
+        alice_ws.receive_json()  # bob online
 
         message_id = post_message(alice_ws, bob_ws, server["id"], channel["id"])
 
@@ -125,9 +125,9 @@ def test_owner_can_delete_others_message(client, new_client):
 
     with client.websocket_connect("/ws", headers=HEADERS) as alice_ws, \
             bob_client.websocket_connect("/ws", headers=HEADERS) as bob_ws:
-        alice_ws.receive_json()
-        bob_ws.receive_json()
-        alice_ws.receive_json()
+        ws_ready(alice_ws)
+        ws_ready(bob_ws)
+        alice_ws.receive_json()  # bob online
 
         # bob posts, alice (the owner) deletes it.
         message_id = post_message(bob_ws, alice_ws, server["id"], channel["id"])
@@ -145,9 +145,9 @@ def test_non_owner_cannot_delete_others_message(client, new_client):
 
     with client.websocket_connect("/ws", headers=HEADERS) as alice_ws, \
             bob_client.websocket_connect("/ws", headers=HEADERS) as bob_ws:
-        alice_ws.receive_json()
-        bob_ws.receive_json()
-        alice_ws.receive_json()
+        ws_ready(alice_ws)
+        ws_ready(bob_ws)
+        alice_ws.receive_json()  # bob online
 
         message_id = post_message(alice_ws, bob_ws, server["id"], channel["id"])
 
@@ -162,9 +162,9 @@ def test_non_member_cannot_edit_or_delete(client, new_client):
 
     with client.websocket_connect("/ws", headers=HEADERS) as alice_ws, \
             bob_client.websocket_connect("/ws", headers=HEADERS) as bob_ws:
-        alice_ws.receive_json()
-        bob_ws.receive_json()
-        alice_ws.receive_json()
+        ws_ready(alice_ws)
+        ws_ready(bob_ws)
+        alice_ws.receive_json()  # bob online
 
         message_id = post_message(alice_ws, bob_ws, server["id"], channel["id"])
 

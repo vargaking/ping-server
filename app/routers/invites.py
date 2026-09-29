@@ -10,9 +10,16 @@ from ..models.Invite import Invite
 from ..models.Server import Server
 from ..models.User import User
 from ..models.UserToServer import UserToServer
+from ..permissions import (
+    Permission,
+    check_permission,
+    invite_from_path,
+    require_permission,
+    server_from_path,
+    server_of_invite,
+)
 from ..rate_limit import invite_use_key, limiter
 from ..settings import invite_use_rate_limit
-from ..utils import require_membership, require_owner
 from .users import UserResponse
 
 router = APIRouter(prefix="/invites", tags=["invites"])
@@ -92,11 +99,8 @@ async def create_invite(
     body: InviteCreate,
     current_user: User = Depends(get_current_user),
 ):
-    server = await Server.get_or_none(id=body.server_id)
-    if not server:
-        raise HTTPException(status_code=404, detail="Server not found")
-
-    await require_membership(current_user, server)
+    server = await server_from_path(body.server_id)
+    await require_permission(current_user, server, Permission.CREATE_INVITE)
 
     invite = Invite(
         server=server,
@@ -113,16 +117,17 @@ async def create_invite(
 
 @router.get("/server/{server_id}", response_model=List[InviteResponse])
 async def list_server_invites(
-    server_id: int,
     current_user: User = Depends(get_current_user),
+    server: Server = Depends(server_from_path),
 ):
-    server = await Server.get_or_none(id=server_id)
-    if not server:
-        raise HTTPException(status_code=404, detail="Server not found")
-
-    await require_membership(current_user, server)
-
-    invites = await Invite.filter(server=server)
+    """Every invite for holders of MANAGE_INVITES, otherwise only the caller's own."""
+    mask = await require_permission(current_user, server, Permission(0))
+    invites = Invite.filter(server=server)
+    if Permission.MANAGE_INVITES not in mask:
+        if Permission.CREATE_INVITE not in mask:
+            raise HTTPException(status_code=403, detail="Missing permission")
+        invites = invites.filter(created_by=current_user)
+    invites = await invites
     return [InviteResponse.from_invite(inv) for inv in invites]
 
 
@@ -150,17 +155,10 @@ async def get_invite(
 
 @router.put("/{invite_id}", response_model=InviteResponse)
 async def update_invite(
-    invite_id: UUID,
     body: InviteUpdate,
-    current_user: User = Depends(get_current_user),
+    invite: Invite = Depends(invite_from_path),
+    _server: Server = Depends(check_permission(Permission.MANAGE_INVITES, server_of_invite)),
 ):
-    invite = await Invite.get_or_none(id=invite_id)
-    if not invite:
-        raise HTTPException(status_code=404, detail="Invite not found")
-
-    server = await Server.get_or_none(id=invite.server_id)
-    require_owner(current_user, server)
-
     update_data = body.model_dump(exclude_unset=True)
     await invite.update_from_dict(update_data)
     await invite.save()
@@ -169,16 +167,9 @@ async def update_invite(
 
 @router.delete("/{invite_id}", status_code=status.HTTP_204_NO_CONTENT)
 async def delete_invite(
-    invite_id: UUID,
-    current_user: User = Depends(get_current_user),
+    invite: Invite = Depends(invite_from_path),
+    _server: Server = Depends(check_permission(Permission.MANAGE_INVITES, server_of_invite)),
 ):
-    invite = await Invite.get_or_none(id=invite_id)
-    if not invite:
-        raise HTTPException(status_code=404, detail="Invite not found")
-
-    server = await Server.get_or_none(id=invite.server_id)
-    require_owner(current_user, server)
-
     await invite.delete()
 
 
