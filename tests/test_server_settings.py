@@ -59,8 +59,11 @@ def test_rename_and_icon_broadcast_to_other_members(client, new_client):
         assert frame["type"] == "server_updated"
         assert frame["server"]["server_profile"]["icon"] == res.json()["server_profile"]["icon"]
 
-        # Reordering channels is not news for other members.
-        client.put(f"/servers/{server['id']}", json={"server_settings": {"channel_order": []}})
+        client.put(f"/servers/{server['id']}",
+                   json={"server_settings": {"channel_order": [3, 1, 2]}})
+        frame = bob_ws.receive_json()
+        assert frame["type"] == "server_updated"
+        assert frame["server"]["server_settings"]["channel_order"] == [3, 1, 2]
 
         client.delete(f"/servers/{server['id']}")
         assert bob_ws.receive_json() == {"type": "server_deleted", "server_id": server["id"]}

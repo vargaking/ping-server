@@ -173,13 +173,15 @@ async def get_server(
 
 
 async def _broadcast_server_updated(request: Request, server: Server, actor_id: int) -> None:
-    """Let the other members patch the server's name/profile in place."""
+    """Let the other members patch the server in place."""
     comms = getattr(request.app.state, "comms", None)
     if comms is None:
         return
+    payload = ServerPublicResponse.from_server(server).model_dump(mode="json")
+    payload["server_settings"] = server.server_settings
     await comms.broadcast_to_server(server.id, {
         "type": "server_updated",
-        "server": ServerPublicResponse.from_server(server).model_dump(mode="json"),
+        "server": payload,
     }, exclude_user_id=actor_id)
 
 
@@ -212,10 +214,7 @@ async def update_server(
     await server.update_from_dict(update_data)
     await server.save()
 
-    # Channel reordering also goes through here; only name and profile changes
-    # are visible to other members.
-    if "name" in update_data or "server_profile" in update_data:
-        await _broadcast_server_updated(request, server, current_user.id)
+    await _broadcast_server_updated(request, server, current_user.id)
     return ServerPublicResponse.from_server(server)
 
 
