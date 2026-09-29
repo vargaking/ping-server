@@ -627,3 +627,19 @@ def test_prune_removes_stale_unsent_uploads_and_orphans(team, sockets, attachmen
     assert not orphan.exists()
     assert recent_orphan.exists()
     assert len(files_on_disk(attachments_dir)) == 3
+
+
+def test_conversation_preview_lists_attachments(team):
+    alice, bob = team["alice"], team["bob"]
+    convo = open_conversation(alice, team["bob_user"]["id"])
+    att = upload(alice, conversation_id=convo["id"]).json()
+
+    with alice.websocket_connect("/ws", headers=HEADERS) as alice_ws, \
+            bob.websocket_connect("/ws", headers=HEADERS) as bob_ws:
+        alice_ws.send_json(dm_frame(convo["id"], [att["id"]], content=""))
+        recv(bob_ws, "direct_message")
+
+    listing = bob.get("/conversations/").json()
+    preview = next(c for c in listing if c["id"] == convo["id"])["last_message"]
+    assert preview["attachments"] == [att]
+    assert open_conversation(alice, team["bob_user"]["id"])["last_message"]["attachments"] == [att]
