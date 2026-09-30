@@ -56,9 +56,29 @@ The interactive API docs are then at http://localhost:8000/docs.
 | `INVITE_USE_RATE_LIMIT` | no | `20/minute` | Per-IP + per-invite limit on `POST /invites/{id}/use`. |
 | `LIVEKIT_*` | for voice | — | LiveKit API host/key/secret used to mint voice tokens. |
 | `LIVEKIT_API_URL` | no | `LIVEKIT_URL` with `ws`→`http` | Address the server uses to call LiveKit's API for voice presence. |
+| `VAPID_PUBLIC_KEY`, `VAPID_PRIVATE_KEY`, `VAPID_SUBJECT` | for push | — | Web Push signing keys and contact. Push is off unless all three are set. See "Web Push". |
+| `PUSH_EXTRA_HOSTS` | no | *(empty)* | Comma-separated extra push-service hosts (suffix match), for tests or self-hosted push. |
 
 > Session tokens expire 30 days after login/register; expired tokens are
 > rejected and deleted on next use, and pruned on startup.
+
+## Web Push
+
+DMs and @mentions can reach users whose tabs are closed. Generate a key pair
+once per environment and put the three lines in `.env`:
+
+```bash
+python -m app.scripts.gen_vapid
+```
+
+`VAPID_PUBLIC_KEY` is the base64url uncompressed P-256 point the browser
+subscribes with. `VAPID_PRIVATE_KEY` is the base64url raw 32-byte key (a PEM is
+also accepted). `VAPID_SUBJECT` is a `mailto:` or `https://` contact; edit the
+generated placeholder. Keep the keys stable: changing them invalidates every
+existing subscription.
+
+Subscription endpoints are only accepted from known push services (Google,
+Mozilla, Windows, Apple). `PUSH_EXTRA_HOSTS` adds more.
 
 ## Database migrations
 
