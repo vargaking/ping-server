@@ -39,6 +39,8 @@ class FakeSource:
         self._results = list(results)
         self._channels = channels or {}
         self.channel_reads = []
+        self.deleted_rooms = []
+        self.delete_error = None
         self.closed = False
 
     async def fetch(self):
@@ -55,6 +57,11 @@ class FakeSource:
         if isinstance(result, Exception):
             raise result
         return result
+
+    async def delete_room(self, channel_id):
+        self.deleted_rooms.append(channel_id)
+        if self.delete_error:
+            raise self.delete_error
 
     async def aclose(self):
         self.closed = True
@@ -325,6 +332,60 @@ def test_slow_poll_does_not_overwrite_a_newer_refresh():
     asyncio.run(scenario())
     assert recorder.calls == [(1, (alice(),))]
     assert presence.channel_participants(1) == (alice(),)
+
+
+def test_close_channel_deletes_the_room_and_forgets_participants():
+    recorder = Recorder()
+    source = FakeSource({1: (alice(),), 2: (bob(),)})
+    presence = VoicePresence(source, recorder)
+
+    async def scenario():
+        await presence.poll_once()
+        recorder.calls.clear()
+        await presence.close_channel(1)
+
+    asyncio.run(scenario())
+    assert source.deleted_rooms == [1]
+    assert presence.channel_participants(1) == ()
+    assert presence.channel_participants(2) == (bob(),)
+    assert recorder.calls == []
+
+
+def test_close_channel_clears_state_even_if_the_room_is_missing(presence_logs):
+    source = FakeSource({1: (alice(),)})
+    source.delete_error = RuntimeError("room not found")
+    presence = VoicePresence(source, Recorder())
+
+    async def scenario():
+        await presence.poll_once()
+        await presence.close_channel(1)
+
+    asyncio.run(scenario())
+    assert presence.channel_participants(1) == ()
+
+
+def test_reads_started_before_close_do_not_bring_participants_back():
+    refresh_started = asyncio.Event()
+    finish_refresh = asyncio.Event()
+
+    async def slow_read():
+        refresh_started.set()
+        await finish_refresh.wait()
+        return (alice(),)
+
+    recorder = Recorder()
+    presence = VoicePresence(FakeSource(channels={1: slow_read}), recorder)
+
+    async def scenario():
+        presence.refresh(1)
+        await refresh_started.wait()
+        await presence.close_channel(1)
+        finish_refresh.set()
+        await _settle(presence)
+
+    asyncio.run(scenario())
+    assert recorder.calls == []
+    assert presence.channel_participants(1) == ()
 
 
 def test_later_poll_still_applies_after_a_refresh():

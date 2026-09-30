@@ -96,6 +96,10 @@ class LiveKitRoomSource:
         await self._api().room.remove_participant(api.RoomParticipantIdentity(
             room=f"{ROOM_PREFIX}{channel_id}", identity=str(user_id)))
 
+    async def delete_room(self, channel_id: int) -> None:
+        await self._api().room.delete_room(
+            api.DeleteRoomRequest(room=f"{ROOM_PREFIX}{channel_id}"))
+
     async def aclose(self) -> None:
         if self._client is not None:
             await self._client.aclose()
@@ -215,6 +219,18 @@ class VoicePresence:
             return
         self.refresh(channel_id)
 
+    async def close_channel(self, channel_id: int) -> None:
+        """Disconnect everyone in a voice channel that is being deleted and
+        forget its participants. A missing room is fine: most channels are empty."""
+        try:
+            await self._source.delete_room(channel_id)
+        except Exception:
+            logger.debug("No voice room to delete for channel %s", channel_id, exc_info=True)
+        async with self._channel_locks.setdefault(channel_id, asyncio.Lock()):
+            # Reads that started before now must not bring the participants back.
+            self._applied_seq[channel_id] = self._next_read()
+            self._snapshot.pop(channel_id, None)
+
     async def run(self) -> None:
         failures = 0
         while True:
@@ -248,6 +264,14 @@ async def remove_from_voice(presence: VoicePresence | None, channel_ids, user_id
         return
     for channel_id in channel_ids:
         await presence.remove_participant(channel_id, user_id)
+
+
+async def close_voice_channels(presence: VoicePresence | None, channel_ids) -> None:
+    """Shut down the rooms of voice channels that were deleted."""
+    if presence is None:
+        return
+    for channel_id in channel_ids:
+        await presence.close_channel(channel_id)
 
 
 def livekit_api_url() -> str | None:
