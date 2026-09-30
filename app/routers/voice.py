@@ -11,6 +11,7 @@ from ..models.Channel import Channel
 from ..models.Server import Server
 from ..models.User import User
 from ..permissions import Permission, require_permission
+from ..services.voice_presence import remove_from_voice
 
 router = APIRouter(prefix="/api/voice", tags=["voice"])
 
@@ -36,6 +37,7 @@ class VoiceTokenResponse(BaseModel):
 @router.post("/token", response_model=VoiceTokenResponse)
 async def create_voice_token(
     body: VoiceTokenRequest,
+    request: Request,
     current_user: User = Depends(get_current_user),
 ) -> VoiceTokenResponse:
     """Mint a LiveKit access token for a voice channel.
@@ -60,6 +62,13 @@ async def create_voice_token(
     # can't connect. SPEAK and STREAM are enforced here, at join time, by
     # limiting which sources the token may publish.
     effective = await require_permission(current_user, channel.server, Permission.CONNECT)
+
+    # One voice session per user: LiveKit only replaces a duplicate identity
+    # within a room, so leave any other channel here.
+    presence = getattr(request.app.state, "voice_presence", None)
+    if presence is not None:
+        other_channels = [c for c in presence.channels_of(current_user.id) if c != channel.id]
+        await remove_from_voice(presence, other_channels, current_user.id)
 
     sources = []
     if effective & Permission.SPEAK:
