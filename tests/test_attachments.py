@@ -6,12 +6,16 @@ import uuid
 from datetime import datetime, timedelta, timezone
 from io import BytesIO
 from pathlib import Path
+from urllib.parse import parse_qs, urlparse
 
 import pytest
 from PIL import Image
 
 from app.models.Attachment import Attachment
-from app.services.attachments import prune_attachments, sanitize_filename, sniff_image
+from app.services.attachments import (
+    SIGNED_URL_TTL, prune_attachments, sanitize_filename, sign_download, sniff_image,
+    verify_download,
+)
 from app.services.chat_service import ChatService
 from tests.conftest import ORIGIN, create_channel, create_server, register
 
@@ -323,6 +327,186 @@ def test_attachments_are_not_served_from_media(team, attachments_dir):
     (stored,) = files_on_disk(attachments_dir)
     rel = stored.relative_to(attachments_dir).as_posix()
     assert team["alice"].get(f"/media/{rel}").status_code == 404
+
+
+# --- signed links -------------------------------------------------------
+
+def mint(client, attachment):
+    res = client.post(f"/attachments/{attachment['id']}/link")
+    assert res.status_code == 200, res.text
+    return res.json()
+
+
+def signed_parts(url):
+    query = parse_qs(urlparse(url).query)
+    return int(query["exp"][0]), query["sig"][0]
+
+
+def test_signed_link_serves_the_file_without_a_session(team, new_client):
+    data = png_bytes(4, 4)
+    att = upload(team["alice"], data, channel_id=team["channel"]["id"]).json()
+    link = mint(team["bob"], att)
+    assert link["url"].startswith(f"/attachments/{att['id']}/signed?exp=")
+    expires_at = datetime.fromisoformat(link["expires_at"])
+    assert timedelta(minutes=4) < expires_at - datetime.now(timezone.utc) <= timedelta(minutes=5)
+
+    stranger = new_client()
+    assert not stranger.cookies
+    signed = stranger.get(link["url"])
+    assert signed.status_code == 200
+    assert signed.content == data
+    cookie_route = team["bob"].get(att["url"])
+    for name in ("content-type", "content-disposition", "x-content-type-options",
+                 "content-security-policy"):
+        assert signed.headers[name] == cookie_route.headers[name]
+    assert signed.headers["referrer-policy"] == "no-referrer"
+    assert 0 < int(signed.headers["cache-control"].removeprefix("private, max-age=")) <= 300
+
+    assert stranger.get(att["url"]).status_code == 401
+
+
+def test_signed_link_is_inline_for_images_and_attachment_for_files(team, new_client):
+    channel_id = team["channel"]["id"]
+    image = upload(team["alice"], channel_id=channel_id).json()
+    pdf = upload(team["alice"], PDF, name="my report é.pdf", content_type="application/pdf",
+                 channel_id=channel_id).json()
+    html = upload(team["alice"], HTML, name="page.html", content_type="text/html",
+                  channel_id=channel_id).json()
+    stranger = new_client()
+
+    res = stranger.get(mint(team["bob"], image)["url"])
+    assert res.headers["content-disposition"] == "inline"
+    res = stranger.get(mint(team["bob"], pdf)["url"])
+    assert res.content == PDF
+    assert res.headers["content-disposition"] == (
+        "attachment; filename*=UTF-8''my%20report%20%C3%A9.pdf")
+    res = stranger.get(mint(team["bob"], html)["url"])
+    assert res.headers["content-disposition"].startswith("attachment; filename*=UTF-8''")
+    assert "sandbox" in res.headers["content-security-policy"]
+
+
+def test_link_is_only_minted_for_users_who_can_access_the_attachment(team):
+    att = upload(team["alice"], channel_id=team["channel"]["id"]).json()
+    assert team["erin"].post(f"/attachments/{att['id']}/link").status_code == 404
+    assert team["alice"].post(f"/attachments/{uuid.uuid4()}/link").status_code == 404
+    assert team["alice"].post("/attachments/not-a-uuid/link").status_code == 404
+
+
+def test_link_requires_login(team, new_client):
+    att = upload(team["alice"], channel_id=team["channel"]["id"]).json()
+    assert new_client().post(f"/attachments/{att['id']}/link").status_code == 401
+
+
+def test_dm_link_only_for_participants(team, new_client):
+    convo = open_conversation(team["alice"], team["bob_user"]["id"])
+    att = upload(team["alice"], conversation_id=convo["id"]).json()
+    assert team["erin"].post(f"/attachments/{att['id']}/link").status_code == 404
+    assert new_client().get(mint(team["bob"], att)["url"]).status_code == 200
+
+
+def test_tampered_signed_links_are_404(team, new_client):
+    channel_id = team["channel"]["id"]
+    att = upload(team["alice"], channel_id=channel_id).json()
+    other = upload(team["alice"], channel_id=channel_id).json()
+    exp, sig = signed_parts(mint(team["alice"], att)["url"])
+    _, other_sig = signed_parts(mint(team["alice"], other)["url"])
+    flipped = sig[:-1] + ("A" if sig[-1] != "A" else "B")
+    base = f"/attachments/{att['id']}/signed"
+    stranger = new_client()
+
+    assert stranger.get(f"{base}?exp={exp}&sig={sig}").status_code == 200
+    for query in (
+        f"exp={exp}&sig={flipped}",
+        f"exp={exp + 1}&sig={sig}",
+        f"exp={exp}&sig={other_sig}",
+        f"exp={exp}&sig={sig[:-1]}",
+        f"exp={exp}&sig={sig}A",
+        f"exp={exp}&sig=",
+        f"exp={exp}&sig=%C3%A9{sig[2:]}",
+        f"exp={exp}",
+        f"sig={sig}",
+        f"exp=soon&sig={sig}",
+        f"exp={'9' * 5000}&sig={sig}",
+        "",
+    ):
+        assert stranger.get(f"{base}?{query}").status_code == 404, query
+    assert stranger.get(f"/attachments/{other['id']}/signed?exp={exp}&sig={sig}").status_code == 404
+    assert stranger.get(f"/attachments/not-a-uuid/signed?exp={exp}&sig={sig}").status_code == 404
+
+
+def test_expired_and_overlong_signed_links_are_404(team, new_client):
+    att = upload(team["alice"], channel_id=team["channel"]["id"]).json()
+    attachment_id = uuid.UUID(att["id"])
+    now = datetime.now(timezone.utc)
+    stranger = new_client()
+
+    expired, _ = sign_download(attachment_id, now=now - timedelta(minutes=6))
+    assert stranger.get(expired).status_code == 404
+
+    # Validly signed, but expiring further out than a link is ever minted for.
+    overlong, _ = sign_download(attachment_id, now=now + timedelta(hours=1))
+    assert stranger.get(overlong).status_code == 404
+
+    fresh, _ = sign_download(attachment_id, now=now)
+    assert stranger.get(fresh).status_code == 200
+
+
+def test_verify_download_window_and_key():
+    attachment_id = uuid.uuid4()
+    now = datetime(2030, 1, 1, tzinfo=timezone.utc)
+    url, expires_at = sign_download(attachment_id, now=now)
+    exp, sig = signed_parts(url)
+    assert expires_at == now + SIGNED_URL_TTL
+    assert verify_download(attachment_id, exp, sig, now=now)
+    assert verify_download(attachment_id, exp, sig, now=expires_at - timedelta(seconds=1))
+    assert not verify_download(attachment_id, exp, sig, now=expires_at)
+    assert not verify_download(uuid.uuid4(), exp, sig, now=now)
+    # A far-future exp is rejected even when its signature is genuine.
+    far_url, _ = sign_download(attachment_id, now=now + timedelta(days=1))
+    far_exp, far_sig = signed_parts(far_url)
+    assert not verify_download(attachment_id, far_exp, far_sig, now=now)
+
+
+def test_signed_link_stops_working_when_the_attachment_goes_away(team, sockets, new_client):
+    alice_ws, bob_ws = sockets
+    server_id, channel_id = team["server"]["id"], team["channel"]["id"]
+    stranger = new_client()
+
+    att = upload(team["alice"], channel_id=channel_id).json()
+    frame = channel_frame(server_id, channel_id, [att["id"]])
+    alice_ws.send_json(frame)
+    recv(bob_ws, "message")
+    url = mint(team["bob"], att)["url"]
+    assert stranger.get(url).status_code == 200
+    assert team["alice"].delete(f"/messages/{frame['id']}").status_code == 204
+    assert stranger.get(url).status_code == 404
+
+    row_att = upload(team["alice"], channel_id=channel_id).json()
+    row_url = mint(team["alice"], row_att)["url"]
+
+    async def drop():
+        await Attachment.filter(id=row_att["id"]).delete()
+
+    run(team["alice"], drop)
+    assert stranger.get(row_url).status_code == 404
+
+
+def test_signed_link_is_404_when_the_file_is_gone(team, attachments_dir, new_client):
+    att = upload(team["alice"], channel_id=team["channel"]["id"]).json()
+    url = mint(team["alice"], att)["url"]
+    for path in files_on_disk(attachments_dir):
+        path.unlink()
+    assert new_client().get(url).status_code == 404
+
+
+def test_cookie_route_still_works_next_to_signed_route(team):
+    data = png_bytes(5, 5)
+    att = upload(team["alice"], data, channel_id=team["channel"]["id"]).json()
+    res = team["bob"].get(att["url"])
+    assert res.status_code == 200
+    assert res.content == data
+    assert res.headers["cache-control"] == "private, max-age=3600"
+    assert "referrer-policy" not in res.headers
 
 
 # --- sending over the socket ---------------------------------------------

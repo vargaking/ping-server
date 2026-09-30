@@ -1,12 +1,17 @@
+import base64
+import hashlib
+import hmac
 import logging
 import os
 import re
+import secrets
 import time
 import unicodedata
 import uuid
 from datetime import datetime, timedelta, timezone
 from io import BytesIO
 from pathlib import Path
+from uuid import UUID
 
 import anyio
 from fastapi import HTTPException
@@ -29,6 +34,55 @@ _IMAGE_CONTENT_TYPES = {
     "GIF": "image/gif",
     "WEBP": "image/webp",
 }
+
+SIGNED_URL_TTL = timedelta(minutes=5)
+_SIGNED_URL_SKEW_SECONDS = 60
+_MIN_URL_KEY_BYTES = 32
+_SIGNATURE_LENGTH = 43  # unpadded base64url of a SHA-256 digest
+
+
+def _load_url_key() -> bytes:
+    raw = os.getenv("ATTACHMENT_URL_KEY", "").encode()
+    if len(raw) >= _MIN_URL_KEY_BYTES:
+        return raw
+    if raw:
+        logger.warning(
+            "ATTACHMENT_URL_KEY is shorter than %d bytes and is ignored; "
+            "signed attachment links break on restart", _MIN_URL_KEY_BYTES)
+    else:
+        logger.warning("ATTACHMENT_URL_KEY unset; signed attachment links break on restart")
+    return secrets.token_bytes(_MIN_URL_KEY_BYTES)
+
+
+_URL_KEY = _load_url_key()
+
+
+def _signature(attachment_id: UUID, exp: int) -> str:
+    message = f"attachment-download:{attachment_id}:{exp}".encode()
+    digest = hmac.new(_URL_KEY, message, hashlib.sha256).digest()
+    return base64.urlsafe_b64encode(digest).rstrip(b"=").decode()
+
+
+def sign_download(attachment_id: UUID, *, now: datetime | None = None) -> tuple[str, datetime]:
+    """A relative, unauthenticated download URL for one attachment that stops
+    working after SIGNED_URL_TTL, and the moment it expires."""
+    now = now or datetime.now(timezone.utc)
+    expires_at = (now + SIGNED_URL_TTL).replace(microsecond=0)
+    exp = int(expires_at.timestamp())
+    url = f"/attachments/{attachment_id}/signed?exp={exp}&sig={_signature(attachment_id, exp)}"
+    return url, expires_at
+
+
+def verify_download(attachment_id: UUID, exp: int, sig: str, *, now: datetime | None = None) -> bool:
+    """True if *sig* is a signature we issued for this attachment and *exp* is
+    in the future but no further out than we would ever issue."""
+    now_ts = (now or datetime.now(timezone.utc)).timestamp()
+    limit = SIGNED_URL_TTL.total_seconds() + _SIGNED_URL_SKEW_SECONDS
+    if not now_ts < exp <= now_ts + limit:
+        return False
+    if len(sig) != _SIGNATURE_LENGTH or not sig.isascii():
+        return False
+    return hmac.compare_digest(sig.encode(), _signature(attachment_id, exp).encode())
 
 
 def attachments_root() -> Path:

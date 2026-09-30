@@ -121,6 +121,9 @@ ALLOWED_ORIGIN_REGEX=^https://ping-frontend-[a-z0-9-]+-vargakings-projects\.verc
 # Local-disk media storage (served by the app's StaticFiles mount, or Nginx).
 MEDIA_ROOT=/opt/ping-server-$ENV/uploads
 MEDIA_BASE_URL=/media
+# Signs short-lived attachment download links. Use a different value per env.
+# Generate: python -c "import secrets; print(secrets.token_urlsafe(32))"
+ATTACHMENT_URL_KEY=<generated secret, 32+ bytes>
 GUNICORN_BIND=127.0.0.1:8000   # 8001 for staging
 DEBUG=false
 EOF
