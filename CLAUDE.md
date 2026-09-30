@@ -3,7 +3,10 @@
 ## Tickets (Linear: team Zeta Chat, project Web Alpha)
 - Linear is the source of truth. A dated "Update <date>" section in a ticket overrides older text.
 - Work one ticket at a time. Never run parallel agents on this checkout.
-- Start → In Progress. PR open → In Review, plus a comment with the PR link and manual test path. Never set Done; Dániel does that after testing.
+- Start → In Progress. PR open → In Review, plus a comment with the PR link and manual test path.
+- Linear's GitHub integration can flip a ticket back to In Progress when its PR links. Set In Review after the PR shows on the ticket, and check again before the final message.
+- In Review means someone is reviewing. Merging or closing the PR moves the ticket to Done automatically. Review comments move it back to In Progress: address them, push, and set In Review again.
+- Never set Done yourself.
 - New findings, decisions, scope changes, or bugs you spot go into Linear: a comment on the ticket, or a new ticket. Not only chat.
 - If a ticket looks wrong, conflicts with existing code, or is a bad idea, say so before building it.
 
