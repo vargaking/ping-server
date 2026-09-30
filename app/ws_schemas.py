@@ -6,6 +6,7 @@ before it is dispatched. A frame that does not match is rejected with an
 connection. Unknown fields are ignored (the server never trusts client-supplied
 identity anyway — see ChatService), but the known fields must be well-typed.
 """
+import json
 from typing import Annotated, Any, Literal, Union
 
 from pydantic import BaseModel, Field, TypeAdapter, ValidationError
@@ -13,6 +14,9 @@ from pydantic import BaseModel, Field, TypeAdapter, ValidationError
 from app.services.attachments import MAX_ATTACHMENTS_PER_MESSAGE
 
 __all__ = [
+    "MAX_FRAME_BYTES",
+    "FrameDecodeError",
+    "decode_frame",
     "ConnectionInitFrame",
     "DisconnectFrame",
     "MessageFrame",
@@ -21,6 +25,31 @@ __all__ = [
     "parse_frame",
     "ValidationError",
 ]
+
+
+# Message content is unbounded tiptap JSON and attachments travel over HTTP,
+# so this is the only ceiling on what one frame can carry.
+MAX_FRAME_BYTES = 256 * 1024
+
+
+class FrameDecodeError(ValueError):
+    """The raw socket message could not be turned into a JSON value."""
+
+
+def decode_frame(message: dict) -> Any:
+    """Decode an ASGI ``websocket.receive`` message into a JSON value.
+
+    Raises ``FrameDecodeError`` for binary, oversize or unparseable input.
+    """
+    text = message.get("text")
+    if text is None:
+        raise FrameDecodeError("binary frame")
+    if len(text.encode()) > MAX_FRAME_BYTES:
+        raise FrameDecodeError(f"frame over {MAX_FRAME_BYTES} bytes")
+    try:
+        return json.loads(text)
+    except (ValueError, RecursionError) as exc:
+        raise FrameDecodeError(f"not valid JSON ({type(exc).__name__})") from exc
 
 
 class ConnectionInitFrame(BaseModel):

@@ -15,6 +15,7 @@ from app.rate_limit import limiter
 from app.routers import attachments, auth, channels, conversations, invites, messages, servers, users, voice
 from app.settings import ALLOWED_ORIGINS, ALLOWED_ORIGIN_REGEX, is_origin_allowed
 from app.utils import lifespan
+from app.ws_schemas import FrameDecodeError, decode_frame
 from .middleware import auth_middleware, resolve_user_from_token
 # Initialize application logging (configures file logging)
 from . import logging_config  # noqa: F401
@@ -112,7 +113,14 @@ async def websocket_endpoint(websocket: WebSocket):
     try:
         await comms.connect(user.id, websocket)
         while True:
-            data = await websocket.receive_json()
+            message = await websocket.receive()
+            if message["type"] == "websocket.disconnect":
+                raise WebSocketDisconnect(message["code"], message.get("reason"))
+            try:
+                data = decode_frame(message)
+            except FrameDecodeError as exc:
+                await comms.reject_frame(websocket, str(exc))
+                continue
             await comms.message_switch(data, websocket)
     except WebSocketDisconnect:
         logger.info("WebSocket disconnected (user %s)", user.id)
