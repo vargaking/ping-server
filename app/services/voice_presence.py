@@ -145,6 +145,13 @@ class VoicePresence:
     def channel_participants(self, channel_id: int) -> tuple[VoiceParticipant, ...]:
         return self._snapshot.get(channel_id, ())
 
+    def channels_of(self, user_id: int) -> list[int]:
+        return sorted(
+            channel_id
+            for channel_id, participants in self._snapshot.items()
+            if any(p.user_id == user_id for p in participants)
+        )
+
     def _next_read(self) -> int:
         self._read_seq += 1
         return self._read_seq
