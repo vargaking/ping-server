@@ -12,11 +12,12 @@ from tortoise.contrib.fastapi import register_tortoise
 from app.communication import Communication
 from app.db import TORTOISE_CONFIG
 from app.rate_limit import limiter
-from app.routers import attachments, auth, channels, conversations, invites, messages, push, servers, users, voice
+from app.routers import attachments, auth, channels, client_errors, conversations, invites, messages, push, servers, users, voice
 from app.settings import ALLOWED_ORIGINS, ALLOWED_ORIGIN_REGEX, is_origin_allowed
 from app.utils import lifespan
 from app.ws_schemas import FrameDecodeError, decode_frame
 from .middleware import auth_middleware, resolve_user_from_token
+from .request_context import request_context_middleware
 # Initialize application logging (configures file logging)
 from . import logging_config  # noqa: F401
 
@@ -29,6 +30,10 @@ app = FastAPI(debug=os.getenv("DEBUG", "").lower() == "true", lifespan=lifespan)
 app.state.limiter = limiter
 app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
 
+# Registered before CORS so it sits inside it: the last middleware added is the
+# outermost, and a 500 must pass through CORS to be readable by the browser.
+app.middleware("http")(request_context_middleware)
+
 # CORS middleware. allow_origins is the explicit list; allow_origin_regex
 # additionally matches Vercel branch previews, whose subdomains are randomized
 # and so can't be enumerated (ZET-59). The regex comes from env (app/settings.py).
@@ -39,6 +44,7 @@ app.add_middleware(
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
+    expose_headers=["X-Request-ID"],
 )
 
 # Authentication middleware
@@ -55,6 +61,7 @@ app.include_router(invites.router)
 app.include_router(voice.router)
 app.include_router(attachments.router)
 app.include_router(push.router)
+app.include_router(client_errors.router)
 
 # Serve uploaded media from local disk (avatars, server icons).
 # storage.py writes into MEDIA_ROOT and returns URLs prefixed with MEDIA_BASE_URL;

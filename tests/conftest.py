@@ -29,6 +29,8 @@ os.environ["ALLOWED_ORIGIN_REGEX"] = (
 # lowers them for itself (see test_auth). Limits are read from env per request.
 os.environ.setdefault("AUTH_RATE_LIMIT", "10000/minute")
 os.environ.setdefault("INVITE_USE_RATE_LIMIT", "10000/minute")
+os.environ.setdefault("CLIENT_ERROR_RATE_LIMIT", "10000/minute")
+os.environ.setdefault("CLIENT_ERROR_GLOBAL_RATE_LIMIT", "10000/hour")
 
 import pytest  # noqa: E402
 from fastapi.testclient import TestClient  # noqa: E402

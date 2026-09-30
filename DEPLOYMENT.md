@@ -221,7 +221,8 @@ sudo systemctl restart ping-server@production
 
 ```bash
 sudo systemctl status ping-server@production
-sudo journalctl -u ping-server@production -f      # live gunicorn/uvicorn logs
-tail -f /opt/ping-server-production/logs/app.log  # app file logs
+sudo journalctl -u ping-server@production -f      # live server and app logs
+tail -f /opt/ping-server-production/logs/app.log  # same app logs, in a file
+# lines look like: <time> <LEVEL> [logger] [request_id] message
 sudo systemctl restart ping-server@staging
 ```

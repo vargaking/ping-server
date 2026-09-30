@@ -49,3 +49,13 @@ def auth_rate_limit() -> str:
 def invite_use_rate_limit() -> str:
     """Per-IP + per-invite limit for POST /invites/{id}/use."""
     return os.getenv("INVITE_USE_RATE_LIMIT", "20/minute")
+
+
+def client_error_rate_limit() -> str:
+    """Per-IP limit for POST /api/client-errors."""
+    return os.getenv("CLIENT_ERROR_RATE_LIMIT", "10/minute")
+
+
+def client_error_global_rate_limit() -> str:
+    """Overall limit for POST /api/client-errors across all clients."""
+    return os.getenv("CLIENT_ERROR_GLOBAL_RATE_LIMIT", "300/hour")
