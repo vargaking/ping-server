@@ -117,6 +117,9 @@ async def logout(request: Request, response: Response):
     token = request.cookies.get("access_token")
     if token:
         await Token.filter(token=token).delete()
+        comms = getattr(request.app.state, "comms", None)
+        if comms is not None:
+            await comms.close_session(token)
     response.delete_cookie("access_token", path="/")
     return {"detail": "Logged out"}
 

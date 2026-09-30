@@ -17,6 +17,10 @@ from app.ws_schemas import (
 
 logger = logging.getLogger("app.communication")
 
+# Application-level close code: "no valid session". The frontend must not
+# auto-reconnect on this one (it would loop forever); it should go to login.
+WS_CLOSE_UNAUTHENTICATED = 4401
+
 
 class Communication:
     """Orchestrates WebSocket message routing across chat and voice services."""
@@ -25,7 +29,9 @@ class Communication:
         self.connection_manager = ConnectionManager()
         self.chat_service = ChatService(self.connection_manager)
 
-    async def connect(self, user_id: int, websocket: WebSocket) -> None:
+    async def connect(
+        self, user_id: int, websocket: WebSocket, token: str | None = None
+    ) -> None:
         """Register an *authenticated* socket and announce the user online.
 
         ``user_id`` must come from the session resolved during the handshake,
@@ -35,7 +41,7 @@ class Communication:
         first time the user goes from 0 to 1 sockets.
         """
         was_online = self.connection_manager.is_online(user_id)
-        self.connection_manager.add_connection(user_id, websocket)
+        self.connection_manager.add_connection(user_id, websocket, token)
         await self._notify_presence(user_id, online=True, websocket=websocket,
                                      was_online=was_online)
         await self._send_permissions_snapshot(user_id, websocket)
@@ -49,6 +55,16 @@ class Communication:
         # their presence.
         if user_id and not self.connection_manager.is_online(user_id):
             await self._notify_presence(user_id, online=False)
+
+    async def close_session(self, token: str) -> None:
+        """Close every socket that authenticated with *token* and announce the
+        user offline now, rather than after the client's close handshake."""
+        for websocket in self.connection_manager.get_websockets_for_token(token):
+            try:
+                await websocket.close(code=WS_CLOSE_UNAUTHENTICATED)
+            except Exception:
+                logger.debug("Socket already closed during session close", exc_info=True)
+            await self.remove_connection_by_websocket(websocket)
 
     async def message_switch(self, message, websocket: WebSocket):
         # Identity is whatever the handshake established for this socket. Any
