@@ -11,6 +11,10 @@ from tests.test_websocket import HEADERS, chat_frame, two_members  # noqa: F401
 from tests.conftest import ws_ready
 
 INVALID_FRAME = {"type": "error", "code": "invalid_frame", "ref": None}
+# Python 3.12+ parses a few thousand levels fine; this depth overflows on every
+# version and still fits under the frame cap.
+DEEP_DEPTH = 100_000
+DEEP_FRAME = "[" * DEEP_DEPTH + "]" * DEEP_DEPTH
 
 
 def open_sockets(two_members):
@@ -33,7 +37,7 @@ def test_deeply_nested_frame_is_rejected_and_socket_keeps_working(two_members):
         ws_ready(bob)
         alice.receive_json()  # bob online
 
-        alice.send_text("[" * 1000 + "]" * 1000)
+        alice.send_text(DEEP_FRAME)
         assert alice.receive_json() == INVALID_FRAME
 
         assert_chat_still_works(alice, bob, server, channel)
@@ -132,7 +136,7 @@ def test_each_bad_frame_logs_one_warning(two_members):
         alice.receive_json()
 
         with patch("app.communication.logger") as log:
-            alice.send_text("[" * 1000 + "]" * 1000)
+            alice.send_text(DEEP_FRAME)
             alice.receive_json()
             alice.send_text("not json")
             alice.receive_json()
