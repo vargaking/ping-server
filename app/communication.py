@@ -79,6 +79,12 @@ class Communication:
         elif isinstance(frame, DirectMessageFrame):
             await self.chat_service.handle_direct_message(user_id, frame, websocket)
 
+    async def reject_frame(self, websocket: WebSocket, reason: str) -> None:
+        """Answer a frame that could not even be decoded; the socket stays open."""
+        logger.warning("Rejected frame from user %s: %s",
+                       self.connection_manager.get_user_id(websocket), reason)
+        await self._send_error(websocket, "invalid_frame", None)
+
     @staticmethod
     async def _send_error(websocket: WebSocket, code: str, ref: str | None) -> None:
         try:
