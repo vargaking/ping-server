@@ -23,6 +23,7 @@ from ..permissions import (
 )
 from ..services import read_state
 from ..services.attachments import attachments_by_message
+from ..services.voice_presence import close_voice_channels
 
 logger = logging.getLogger("app.routers.channels")
 
@@ -384,6 +385,7 @@ async def delete_channel(
 ):
     """Delete a channel and all of its messages."""
 
+    was_voice = channel.type == "voice"
     async with in_transaction():
         # Messages cascade at the DB level too, but deleting them explicitly
         # keeps this independent of how the FK was migrated.
@@ -403,3 +405,7 @@ async def delete_channel(
         "server_id": server.id,
         "channel_id": channel_id,
     }, exclude_user_id=current_user.id)
+
+    if was_voice:
+        await close_voice_channels(
+            getattr(request.app.state, "voice_presence", None), [channel_id])

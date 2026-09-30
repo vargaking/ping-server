@@ -143,6 +143,7 @@ class VoiceSource:
     def __init__(self, occupied):
         self.occupied = occupied
         self.removed = []
+        self.deleted = []
 
     async def fetch(self):
         return {}
@@ -155,8 +156,21 @@ class VoiceSource:
             raise RuntimeError("participant not found")
         self.removed.append((channel_id, user_id))
 
+    async def delete_room(self, channel_id):
+        self.deleted.append(channel_id)
+
     async def aclose(self):
         pass
+
+
+def use_voice_source(client, monkeypatch):
+    source = VoiceSource(set())
+
+    async def notify(channel_id, participants):
+        pass
+
+    monkeypatch.setattr(client.app.state, "voice_presence", VoicePresence(source, notify))
+    return source
 
 
 def test_kick_disconnects_the_member_from_voice(client, new_client, monkeypatch):
@@ -173,3 +187,35 @@ def test_kick_disconnects_the_member_from_voice(client, new_client, monkeypatch)
 
     assert client.delete(f"/servers/{server['id']}/members/{bob['id']}").status_code == 204
     assert source.removed == [(lounge["id"], bob["id"])]
+
+
+def test_deleting_a_server_closes_the_rooms_of_its_voice_channels(client, monkeypatch):
+    register(client, "owner-delete-server")
+    server = create_server(client)
+    lounge = create_channel(client, server["id"], name="lounge", channel_type="voice")
+    games = create_channel(client, server["id"], name="games", channel_type="voice")
+    create_channel(client, server["id"], name="chat")
+    source = use_voice_source(client, monkeypatch)
+
+    assert client.delete(f"/servers/{server['id']}").status_code == 204
+    assert sorted(source.deleted) == sorted([lounge["id"], games["id"]])
+
+
+def test_deleting_a_voice_channel_closes_its_room(client, monkeypatch):
+    register(client, "owner-delete-voice")
+    server = create_server(client)
+    lounge = create_channel(client, server["id"], name="lounge", channel_type="voice")
+    source = use_voice_source(client, monkeypatch)
+
+    assert client.delete(f"/channels/{lounge['id']}").status_code == 204
+    assert source.deleted == [lounge["id"]]
+
+
+def test_deleting_a_text_channel_closes_no_room(client, monkeypatch):
+    register(client, "owner-delete-text")
+    server = create_server(client)
+    chat = create_channel(client, server["id"], name="chat")
+    source = use_voice_source(client, monkeypatch)
+
+    assert client.delete(f"/channels/{chat['id']}").status_code == 204
+    assert source.deleted == []

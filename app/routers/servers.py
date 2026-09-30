@@ -16,7 +16,7 @@ from ..models.UserToServer import UserToServer
 from ..services.permissions import permissions
 from ..services.roles import seed_server_roles
 from ..services.storage import ImageValidationError, storage_service
-from ..services.voice_presence import remove_from_voice
+from ..services.voice_presence import close_voice_channels, remove_from_voice
 from ..utils import require_owner
 from .users import UserResponse
 
@@ -232,6 +232,7 @@ async def delete_server(
 
     # Memberships go with the server, so collect who to tell first.
     member_ids = await UserToServer.filter(server_id=server.id).values_list("user_id", flat=True)
+    voice_channel_ids = await Channel.filter(server_id=server.id, type="voice").values_list("id", flat=True)
     await server.delete()
     permissions.invalidate(server_id)
 
@@ -242,6 +243,8 @@ async def delete_server(
             {"type": "server_deleted", "server_id": server_id},
             exclude_user_id=current_user.id,
         )
+
+    await close_voice_channels(getattr(request.app.state, "voice_presence", None), voice_channel_ids)
 
 
 @router.post("/{server_id}/icon", response_model=ServerPublicResponse)
