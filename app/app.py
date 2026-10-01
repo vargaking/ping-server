@@ -9,7 +9,7 @@ from slowapi.errors import RateLimitExceeded
 from slowapi import _rate_limit_exceeded_handler
 from tortoise.contrib.fastapi import register_tortoise
 
-from app.communication import Communication
+from app.communication import WS_CLOSE_UNAUTHENTICATED, Communication
 from app.db import TORTOISE_CONFIG
 from app.rate_limit import limiter
 from app.routers import attachments, auth, channels, client_errors, conversations, invites, messages, push, servers, users, voice
@@ -92,11 +92,6 @@ comms = Communication()
 app.state.comms = comms
 
 
-# Application-level close code: "no valid session". The frontend must not
-# auto-reconnect on this one (it would loop forever); it should go to login.
-WS_CLOSE_UNAUTHENTICATED = 4401
-
-
 @app.websocket("/ws")
 async def websocket_endpoint(websocket: WebSocket):
     # CORS does not apply to WebSockets and the session cookie is SameSite=None
@@ -109,7 +104,8 @@ async def websocket_endpoint(websocket: WebSocket):
         await websocket.close(code=1008)  # before accept() -> HTTP 403
         return
 
-    user = await resolve_user_from_token(websocket.cookies.get("access_token"))
+    token = websocket.cookies.get("access_token")
+    user = await resolve_user_from_token(token)
 
     # Accept first even when unauthenticated: a close code only reaches the
     # browser after the handshake completed.
@@ -119,7 +115,7 @@ async def websocket_endpoint(websocket: WebSocket):
         return
 
     try:
-        await comms.connect(user.id, websocket)
+        await comms.connect(user.id, websocket, token)
         while True:
             message = await websocket.receive()
             if message["type"] == "websocket.disconnect":
