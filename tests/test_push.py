@@ -1,5 +1,6 @@
 """Web Push: the config and subscription endpoints, and when the server pushes
-(DMs to offline peers, @mentions of offline members, read retractions).
+(DMs to peers and @mentions of members with no active session, read
+retractions).
 
 ``push.deliver`` is the only code that touches the network; the tests replace
 it with a recorder, except the ones that point the real one at a local server.
@@ -21,6 +22,7 @@ from app.models.PushSubscription import PushSubscription
 from app.models.Role import Role
 from app.models.RoleToUser import RoleToUser
 from app.permissions import Permission
+from app.services.connection_manager import IDLE_AFTER_SECONDS, ConnectionManager
 from app.services.permissions import permissions
 from app.services.push import mentioned_user_ids, plain_text, push
 from tests.conftest import ORIGIN, create_channel, create_server, register, ws_ready
@@ -122,6 +124,11 @@ def sync(ws):
     ws.send_json({"type": "connection_init"})
     while ws.receive_json()["type"] != "presence_init":
         pass
+
+
+def report(ws, state):
+    ws.send_json({"type": "activity", "state": state})
+    sync(ws)
 
 
 def doc(*nodes):
@@ -493,17 +500,71 @@ def test_dm_count_starts_after_the_peers_read_marker(dm_pair, push_on):
     assert [c["payload"]["count"] for c in push_on.calls] == [1]
 
 
-def test_dm_to_an_online_peer_does_not_push(dm_pair, push_on):
-    with dm_pair.alice_client.websocket_connect("/ws", headers=HEADERS) as alice_ws, \
-            dm_pair.bob_client.websocket_connect("/ws", headers=HEADERS) as bob_ws:
-        ws_ready(alice_ws)
+def send_dm_to_bob(pair, text_value="hi"):
+    with pair.alice_client.websocket_connect("/ws", headers=HEADERS) as ws:
+        ws_ready(ws)
+        ws.send_json(dm_frame(pair.convo["id"], doc(text(text_value))))
+        sync(ws)
+    drain(pair.alice_client)
+
+
+def test_dm_to_a_peer_with_a_silent_socket_pushes(dm_pair, push_on):
+    with dm_pair.bob_client.websocket_connect("/ws", headers=HEADERS) as bob_ws:
         ws_ready(bob_ws)
-        alice_ws.send_json(dm_frame(dm_pair.convo["id"], doc(text("hi"))))
-        while bob_ws.receive_json()["type"] != "direct_message":
-            pass
-        sync(alice_ws)
-    drain(dm_pair.alice_client)
+        send_dm_to_bob(dm_pair)
+    assert len(push_on.calls) == 1
+
+
+def test_dm_to_an_active_peer_does_not_push(dm_pair, push_on):
+    with dm_pair.bob_client.websocket_connect("/ws", headers=HEADERS) as bob_ws:
+        ws_ready(bob_ws)
+        report(bob_ws, "active")
+        send_dm_to_bob(dm_pair)
     assert push_on.calls == []
+
+
+def test_dm_pushes_once_the_peer_has_been_idle_for_five_minutes(dm_pair, push_on, monkeypatch):
+    now = [1000.0]
+    monkeypatch.setattr(ConnectionManager, "clock", staticmethod(lambda: now[0]))
+    with dm_pair.bob_client.websocket_connect("/ws", headers=HEADERS) as bob_ws:
+        ws_ready(bob_ws)
+        report(bob_ws, "active")
+        now[0] += IDLE_AFTER_SECONDS - 1
+        send_dm_to_bob(dm_pair, "early")
+        assert push_on.calls == []
+        now[0] += 2
+        send_dm_to_bob(dm_pair, "late")
+    assert len(push_on.calls) == 1
+    assert push_on.calls[0]["payload"]["body"] == "late"
+
+
+def test_dm_pushes_after_the_peer_reports_idle(dm_pair, push_on):
+    with dm_pair.bob_client.websocket_connect("/ws", headers=HEADERS) as bob_ws:
+        ws_ready(bob_ws)
+        report(bob_ws, "active")
+        report(bob_ws, "idle")
+        send_dm_to_bob(dm_pair)
+    assert len(push_on.calls) == 1
+
+
+def test_dm_does_not_push_while_any_socket_of_the_peer_is_active(dm_pair, push_on):
+    with dm_pair.bob_client.websocket_connect("/ws", headers=HEADERS) as idle_ws, \
+            dm_pair.bob_client.websocket_connect("/ws", headers=HEADERS) as active_ws:
+        ws_ready(idle_ws)
+        ws_ready(active_ws)
+        report(idle_ws, "idle")
+        report(active_ws, "active")
+        send_dm_to_bob(dm_pair)
+    assert push_on.calls == []
+
+
+def test_an_idle_socket_still_counts_as_online_for_presence(channel_team):
+    team = channel_team
+    with team.bob.client.websocket_connect("/ws", headers=HEADERS) as bob_ws:
+        ws_ready(bob_ws)
+        report(bob_ws, "idle")
+        with team.alice_client.websocket_connect("/ws", headers=HEADERS) as alice_ws:
+            assert team.bob.user["id"] in ws_ready(alice_ws)["user_ids"]
 
 
 def test_dm_push_reaches_every_subscription_of_the_peer(dm_pair, push_on):
@@ -641,12 +702,24 @@ def test_mentions_of_the_sender_or_non_members_do_not_push(channel_team, new_cli
     assert push_on.calls == []
 
 
-def test_an_online_mentioned_member_is_not_pushed(channel_team, push_on):
+def test_an_active_mentioned_member_is_not_pushed(channel_team, push_on):
     team = channel_team
     with team.bob.client.websocket_connect("/ws", headers=HEADERS) as bob_ws:
         ws_ready(bob_ws)
+        report(bob_ws, "active")
         send_to_channel(team, doc(mention(team.bob.user["id"]), mention(team.carol.user["id"])))
     assert [c["endpoint"] for c in push_on.calls] == [team.carol.endpoint]
+
+
+def test_an_idle_mentioned_member_is_pushed(channel_team, push_on):
+    team = channel_team
+    with team.bob.client.websocket_connect("/ws", headers=HEADERS) as bob_ws:
+        ws_ready(bob_ws)
+        send_to_channel(team, doc(mention(team.bob.user["id"])))
+        report(bob_ws, "active")
+        report(bob_ws, "idle")
+        send_to_channel(team, doc(mention(team.bob.user["id"])))
+    assert len(push_on.calls) == 2
 
 
 def test_a_mentioned_member_who_cannot_view_the_channel_is_not_pushed(channel_team, push_on):

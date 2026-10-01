@@ -84,6 +84,23 @@ def test_binary_frame_is_rejected_and_socket_stays_open(two_members):
         assert_chat_still_works(alice, bob, server, channel)
 
 
+@pytest.mark.parametrize("frame", [
+    {"type": "activity", "state": "away"},
+    {"type": "activity"},
+])
+def test_bad_activity_frame_is_rejected_and_socket_stays_open(two_members, frame):
+    alice_ws, bob_ws, server, channel = open_sockets(two_members)
+    with alice_ws as alice, bob_ws as bob:
+        ws_ready(alice)
+        ws_ready(bob)
+        alice.receive_json()
+
+        alice.send_json(frame)
+        assert alice.receive_json() == INVALID_FRAME
+
+        assert_chat_still_works(alice, bob, server, channel)
+
+
 def frame_of_size(server_id, channel_id, size):
     """A valid chat frame whose serialized form is exactly *size* bytes."""
     frame = {

@@ -21,6 +21,7 @@ __all__ = [
     "DisconnectFrame",
     "MessageFrame",
     "DirectMessageFrame",
+    "ActivityFrame",
     "WSFrame",
     "parse_frame",
     "ValidationError",
@@ -83,8 +84,16 @@ class DirectMessageFrame(BaseModel):
     attachment_ids: list[str] = Field(default_factory=list, max_length=MAX_ATTACHMENTS_PER_MESSAGE)
 
 
+class ActivityFrame(BaseModel):
+    type: Literal["activity"]
+    state: Literal["active", "idle"]
+
+
 WSFrame = Annotated[
-    Union[ConnectionInitFrame, DisconnectFrame, MessageFrame, DirectMessageFrame],
+    Union[
+        ConnectionInitFrame, DisconnectFrame, MessageFrame, DirectMessageFrame,
+        ActivityFrame,
+    ],
     Field(discriminator="type"),
 ]
 
