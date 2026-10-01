@@ -7,6 +7,7 @@ from .Channel import Channel
 from .Conversation import Conversation
 from .Message import Message
 from .Attachment import Attachment
+from .Reaction import Reaction
 from .Token import Token
 from .Invite import Invite
 from .ReadState import ReadState
@@ -14,4 +15,4 @@ from .PushSubscription import PushSubscription
 
 __all__ = ["Role", "User", "Server", "RoleToUser", "UserToServer",
            "Channel", "Conversation", "Message", "Token", "Invite", "ReadState",
-           "Attachment", "PushSubscription"]
+           "Attachment", "Reaction", "PushSubscription"]
