@@ -104,6 +104,7 @@ class ChatService:
             "content": content,
             "timestamp": message.timestamp,
             "attachments": [a.to_json() for a in attachments],
+            "reactions": [],
         }
 
         member_ids = await UserToServer.filter(
@@ -183,6 +184,7 @@ class ChatService:
             "content": content,
             "timestamp": message.timestamp,
             "attachments": [a.to_json() for a in attachments],
+            "reactions": [],
         }
 
         # Deliver to the peer and back to the sender's other sockets/tabs; only

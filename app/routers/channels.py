@@ -23,6 +23,7 @@ from ..permissions import (
 )
 from ..services import read_state
 from ..services.attachments import attachments_by_message
+from ..services.reactions import reactions_by_message
 from ..services.voice_presence import close_voice_channels
 
 logger = logging.getLogger("app.routers.channels")
@@ -51,7 +52,7 @@ def _decode_cursor(cursor: str) -> tuple[datetime, int]:
         raise HTTPException(status_code=400, detail="Invalid cursor")
 
 
-def _serialize(message: dict, attachments: list[dict]) -> dict:
+def _serialize(message: dict, attachments: list[dict], reactions: list[dict]) -> dict:
     return {
         "id": message["uuid"],
         "content": message["content"],
@@ -61,12 +62,18 @@ def _serialize(message: dict, attachments: list[dict]) -> dict:
         "timestamp": message["timestamp"],
         "edited_at": message["edited_at"],
         "attachments": attachments,
+        "reactions": reactions,
     }
 
 
 async def _serialize_all(rows: list[dict]) -> list[dict]:
-    by_message = await attachments_by_message([row["id"] for row in rows])
-    return [_serialize(row, by_message.get(row["id"], [])) for row in rows]
+    ids = [row["id"] for row in rows]
+    attachments = await attachments_by_message(ids)
+    reactions = await reactions_by_message(ids)
+    return [
+        _serialize(row, attachments.get(row["id"], []), reactions.get(row["id"], []))
+        for row in rows
+    ]
 
 
 CHANNEL_NAME_MAX = 100

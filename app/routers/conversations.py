@@ -13,6 +13,7 @@ from ..models.Message import Message
 from ..models.User import User
 from ..services import read_state
 from ..services.attachments import attachments_by_message
+from ..services.reactions import reactions_by_message
 from .channels import (
     HISTORY_PAGE_SIZE,
     MAX_HISTORY_PAGE_SIZE,
@@ -38,6 +39,7 @@ class MessagePreview(BaseModel):
     timestamp: datetime
     edited_at: Optional[datetime] = None
     attachments: list[dict] = []
+    reactions: list[dict] = []
 
 
 class ConversationResponse(BaseModel):
@@ -85,6 +87,7 @@ async def _preview(row: Optional[dict]) -> Optional[MessagePreview]:
         return None
     # An attachment-only message has empty text, so clients describe it from these.
     attachments = (await attachments_by_message([row["id"]])).get(row["id"], [])
+    reactions = (await reactions_by_message([row["id"]])).get(row["id"], [])
     return MessagePreview(
         id=str(row["uuid"]),
         content=row["content"],
@@ -92,6 +95,7 @@ async def _preview(row: Optional[dict]) -> Optional[MessagePreview]:
         timestamp=row["timestamp"],
         edited_at=row["edited_at"],
         attachments=attachments,
+        reactions=reactions,
     )
 
 
@@ -273,11 +277,16 @@ async def get_conversation_messages(
 
 
 async def _serialize_all(rows: list[dict]) -> list[dict]:
-    by_message = await attachments_by_message([row["id"] for row in rows])
-    return [_serialize(row, by_message.get(row["id"], [])) for row in rows]
+    ids = [row["id"] for row in rows]
+    attachments = await attachments_by_message(ids)
+    reactions = await reactions_by_message(ids)
+    return [
+        _serialize(row, attachments.get(row["id"], []), reactions.get(row["id"], []))
+        for row in rows
+    ]
 
 
-def _serialize(message: dict, attachments: list[dict]) -> dict:
+def _serialize(message: dict, attachments: list[dict], reactions: list[dict]) -> dict:
     return {
         "id": message["uuid"],
         "content": message["content"],
@@ -286,4 +295,5 @@ def _serialize(message: dict, attachments: list[dict]) -> dict:
         "timestamp": message["timestamp"],
         "edited_at": message["edited_at"],
         "attachments": attachments,
+        "reactions": reactions,
     }
