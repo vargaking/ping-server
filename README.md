@@ -22,7 +22,7 @@ python3.13 -m venv venv
 source venv/bin/activate
 pip install -r requirements-dev.txt      # app deps + pytest
 
-# Minimal .env (see "Environment variables" below)
+# Minimal env (or copy .env.example to .env; see "Environment variables" below)
 export DB_CONNECTION_STRING="postgres://user:pass@localhost:5432/ping"
 export ALLOWED_ORIGINS="http://localhost:5173"
 export DEBUG=true
