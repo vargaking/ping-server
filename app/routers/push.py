@@ -2,14 +2,16 @@ import base64
 import binascii
 import re
 
-from fastapi import APIRouter, Depends, Response, status
+from fastapi import APIRouter, Depends, HTTPException, Request, Response, status
 from pydantic import BaseModel, field_validator
 from tortoise.exceptions import IntegrityError
 
 from ..middleware import get_current_user
 from ..models.PushSubscription import PushSubscription
 from ..models.User import User
+from ..rate_limit import limiter
 from ..services.push import is_allowed_endpoint, push
+from ..settings import push_test_rate_limit
 
 router = APIRouter(prefix="/api/push", tags=["push"])
 
@@ -112,6 +114,25 @@ async def delete_subscription(
     await PushSubscription.filter(
         endpoint=body.endpoint, user_id=current_user.id).delete()
     return Response(status_code=status.HTTP_204_NO_CONTENT)
+
+
+@router.post("/test")
+@limiter.limit(push_test_rate_limit)
+async def send_test_push(
+    request: Request,
+    response: Response,
+    current_user: User = Depends(get_current_user),
+):
+    """Push a test notification to every browser of the caller, ignoring
+    whether they are active, and report what each push service answered."""
+    if not push.enabled:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT, detail="Push is not configured on this server")
+    results = await push.send_test(current_user.id)
+    return [
+        {"endpoint_host": r.endpoint_host, "status": r.status, "error": r.error}
+        for r in results
+    ]
 
 
 async def _enforce_cap(user_id: int, *, keep_id: int) -> None:
