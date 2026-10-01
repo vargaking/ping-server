@@ -12,11 +12,9 @@ from ..models.User import User
 from ..models.UserToServer import UserToServer
 from ..permissions import (
     Permission,
-    check_permission,
-    invite_from_path,
+    manage_invite,
     require_permission,
     server_from_path,
-    server_of_invite,
 )
 from ..rate_limit import invite_use_key, limiter
 from ..settings import invite_use_rate_limit
@@ -44,6 +42,7 @@ class InviteResponse(BaseModel):
     id: UUID
     server_id: int
     created_by_id: int
+    created_by_username: str
     created_at: datetime
     valid_until: Optional[datetime]
     max_uses: Optional[int]
@@ -57,6 +56,7 @@ class InviteResponse(BaseModel):
             id=invite.id,
             server_id=invite.server_id,
             created_by_id=invite.created_by_id,
+            created_by_username=invite.created_by.username,
             created_at=invite.created_at,
             valid_until=invite.valid_until,
             max_uses=invite.max_uses,
@@ -122,7 +122,7 @@ async def list_server_invites(
 ):
     """Every invite for holders of MANAGE_INVITES, otherwise only the caller's own."""
     mask = await require_permission(current_user, server, Permission(0))
-    invites = Invite.filter(server=server)
+    invites = Invite.filter(server=server).prefetch_related("created_by")
     if Permission.MANAGE_INVITES not in mask:
         if Permission.CREATE_INVITE not in mask:
             raise HTTPException(status_code=403, detail="Missing permission")
@@ -156,19 +156,18 @@ async def get_invite(
 @router.put("/{invite_id}", response_model=InviteResponse)
 async def update_invite(
     body: InviteUpdate,
-    invite: Invite = Depends(invite_from_path),
-    _server: Server = Depends(check_permission(Permission.MANAGE_INVITES, server_of_invite)),
+    invite: Invite = Depends(manage_invite),
 ):
     update_data = body.model_dump(exclude_unset=True)
     await invite.update_from_dict(update_data)
     await invite.save()
+    await invite.fetch_related("created_by")
     return InviteResponse.from_invite(invite)
 
 
 @router.delete("/{invite_id}", status_code=status.HTTP_204_NO_CONTENT)
 async def delete_invite(
-    invite: Invite = Depends(invite_from_path),
-    _server: Server = Depends(check_permission(Permission.MANAGE_INVITES, server_of_invite)),
+    invite: Invite = Depends(manage_invite),
 ):
     await invite.delete()
 
@@ -193,9 +192,9 @@ async def use_invite(
     # Password check
     if invite.password_hash:
         if not body.password:
-            raise HTTPException(status_code=401, detail="Password required")
+            raise HTTPException(status_code=403, detail="Password required")
         if not invite.check_password(body.password):
-            raise HTTPException(status_code=401, detail="Incorrect password")
+            raise HTTPException(status_code=403, detail="Incorrect password")
 
     # Already a member?
     server = await Server.get(id=invite.server_id)
