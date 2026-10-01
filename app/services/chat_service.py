@@ -17,9 +17,13 @@ from app.services import read_state
 from app.services.connection_manager import ConnectionManager
 from app.services.permissions import permissions
 from app.services.push import mentioned_user_ids, plain_text, push
+from app.services.replies import reply_json, reply_refs
 from app.ws_schemas import DirectMessageFrame, MessageFrame
 
 logger = logging.getLogger("app.services.chat_service")
+
+
+_INVALID_REPLY = object()
 
 
 class _AttachmentsUnavailable(Exception):
@@ -65,6 +69,12 @@ class ChatService:
             await self._send_error(sender_ws, "invalid_attachments", message.id)
             return
 
+        reply_to_uuid = await self._resolve_reply(
+            message.reply_to, channel_id=channel_id)
+        if reply_to_uuid is _INVALID_REPLY:
+            await self._send_error(sender_ws, "invalid_reply", message.id)
+            return
+
         content = message.content
         if attachments and content is None:
             content = ""
@@ -82,6 +92,7 @@ class ChatService:
             channel_id=channel_id,
             timestamp=message.timestamp,
             metadata=message.metadata,
+            reply_to_uuid=reply_to_uuid,
         )
         if created is None:
             await self._send_error(sender_ws, "invalid_attachments", message.id)
@@ -95,6 +106,7 @@ class ChatService:
         # Rebuild the frame from known fields instead of relaying the client's
         # dict, so the sender can't smuggle a forged user_id (or anything else)
         # to other clients.
+        refs = await reply_refs([reply_to_uuid])
         outgoing = {
             "type": "message",
             "id": message.id,
@@ -105,6 +117,7 @@ class ChatService:
             "timestamp": message.timestamp,
             "attachments": [a.to_json() for a in attachments],
             "reactions": [],
+            "reply_to": reply_json(reply_to_uuid, refs),
         }
 
         member_ids = await UserToServer.filter(
@@ -148,6 +161,12 @@ class ChatService:
             await self._send_error(sender_ws, "invalid_attachments", message.id)
             return
 
+        reply_to_uuid = await self._resolve_reply(
+            message.reply_to, conversation_id=conversation.id)
+        if reply_to_uuid is _INVALID_REPLY:
+            await self._send_error(sender_ws, "invalid_reply", message.id)
+            return
+
         content = message.content
         if attachments and content is None:
             content = ""
@@ -164,6 +183,7 @@ class ChatService:
             conversation_id=conversation.id,
             timestamp=message.timestamp,
             metadata=message.metadata,
+            reply_to_uuid=reply_to_uuid,
         )
         if created is None:
             await self._send_error(sender_ws, "invalid_attachments", message.id)
@@ -176,6 +196,7 @@ class ChatService:
 
         # Rebuild from known fields so the sender can't smuggle a forged
         # user_id (or anything else) to the peer.
+        refs = await reply_refs([reply_to_uuid])
         outgoing = {
             "type": "direct_message",
             "id": message.id,
@@ -185,6 +206,7 @@ class ChatService:
             "timestamp": message.timestamp,
             "attachments": [a.to_json() for a in attachments],
             "reactions": [],
+            "reply_to": reply_json(reply_to_uuid, refs),
         }
 
         # Deliver to the peer and back to the sender's other sockets/tabs; only
@@ -260,6 +282,26 @@ class ChatService:
                 continue
             push.track(uid, tag, message_pk)
             await push.send_to_user(uid, payload, topic=tag, urgency="high")
+
+    @staticmethod
+    async def _resolve_reply(
+        raw: str | None,
+        *,
+        channel_id: int | None = None,
+        conversation_id: int | None = None,
+    ) -> UUID | None | object:
+        """The original's uuid, None for a non-reply, or _INVALID_REPLY if it
+        isn't a uuid or isn't a message of this channel or conversation."""
+        if raw is None:
+            return None
+        try:
+            original = UUID(raw)
+        except ValueError:
+            return _INVALID_REPLY
+        exists = await Message.filter(
+            uuid=original, channel_id=channel_id, conversation_id=conversation_id,
+        ).exists()
+        return original if exists else _INVALID_REPLY
 
     @staticmethod
     async def _load_attachments(

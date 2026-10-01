@@ -19,6 +19,9 @@ class Message(models.Model):
     timestamp = fields.DatetimeField()
     edited_at = fields.DatetimeField(null=True)
     metadata = fields.JSONField(default=dict)
+    # The original's uuid. Deliberately not a foreign key: messages are
+    # hard-deleted, and a missing original is what marks the quote as deleted.
+    reply_to_uuid = fields.UUIDField(null=True, index=True)
 
     def __str__(self):
         where = f"channel {self.channel_id}" if self.channel_id else f"conversation {self.conversation_id}"

@@ -70,6 +70,7 @@ class MessageFrame(BaseModel):
     timestamp: str
     metadata: dict = Field(default_factory=dict)
     attachment_ids: list[str] = Field(default_factory=list, max_length=MAX_ATTACHMENTS_PER_MESSAGE)
+    reply_to: str | None = None
 
 
 class DirectMessageFrame(BaseModel):
@@ -81,6 +82,7 @@ class DirectMessageFrame(BaseModel):
     timestamp: str
     metadata: dict = Field(default_factory=dict)
     attachment_ids: list[str] = Field(default_factory=list, max_length=MAX_ATTACHMENTS_PER_MESSAGE)
+    reply_to: str | None = None
 
 
 WSFrame = Annotated[

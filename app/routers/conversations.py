@@ -14,6 +14,7 @@ from ..models.User import User
 from ..services import read_state
 from ..services.attachments import attachments_by_message
 from ..services.reactions import reactions_by_message
+from ..services.replies import reply_json, reply_refs
 from .channels import (
     HISTORY_PAGE_SIZE,
     MAX_HISTORY_PAGE_SIZE,
@@ -259,6 +260,7 @@ async def get_conversation_messages(
         "timestamp",
         "created_at",
         "edited_at",
+        "reply_to_uuid",
     )
 
     has_more = len(rows) > limit
@@ -280,13 +282,17 @@ async def _serialize_all(rows: list[dict]) -> list[dict]:
     ids = [row["id"] for row in rows]
     attachments = await attachments_by_message(ids)
     reactions = await reactions_by_message(ids)
+    refs = await reply_refs(row["reply_to_uuid"] for row in rows)
     return [
-        _serialize(row, attachments.get(row["id"], []), reactions.get(row["id"], []))
+        _serialize(
+            row, attachments.get(row["id"], []), reactions.get(row["id"], []), refs)
         for row in rows
     ]
 
 
-def _serialize(message: dict, attachments: list[dict], reactions: list[dict]) -> dict:
+def _serialize(
+    message: dict, attachments: list[dict], reactions: list[dict], refs: dict[UUID, dict]
+) -> dict:
     return {
         "id": message["uuid"],
         "content": message["content"],
@@ -296,4 +302,5 @@ def _serialize(message: dict, attachments: list[dict], reactions: list[dict]) ->
         "edited_at": message["edited_at"],
         "attachments": attachments,
         "reactions": reactions,
+        "reply_to": reply_json(message["reply_to_uuid"], refs),
     }

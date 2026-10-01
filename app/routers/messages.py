@@ -23,6 +23,7 @@ from ..services.reactions import (
     normalize_emoji,
     reactions_by_message,
 )
+from ..services.replies import reply_json, reply_refs
 
 logger = logging.getLogger("app.routers.messages")
 
@@ -89,7 +90,11 @@ async def _notify(
 
 
 def _wire_message(
-    message: Message, content: Any, attachments: list[dict], reactions: list[dict]
+    message: Message,
+    content: Any,
+    attachments: list[dict],
+    reactions: list[dict],
+    reply_to: dict | None,
 ) -> dict:
     """Build a JSON-serialisable message payload for the REST reply and the WS
     frame. content is the raw (un-stringified) form the client sees."""
@@ -106,6 +111,7 @@ def _wire_message(
         "edited_at": edited_at.isoformat() if isinstance(edited_at, datetime) else edited_at,
         "attachments": attachments,
         "reactions": reactions,
+        "reply_to": reply_to,
     }
 
 
@@ -131,7 +137,10 @@ async def edit_message(
 
     attachments = (await attachments_by_message([message.id])).get(message.id, [])
     reactions = (await reactions_by_message([message.id])).get(message.id, [])
-    payload = _wire_message(message, content, attachments, reactions)
+    refs = await reply_refs([message.reply_to_uuid])
+    payload = _wire_message(
+        message, content, attachments, reactions,
+        reply_json(message.reply_to_uuid, refs))
     await _notify(
         request, server, conversation,
         {"type": "message_updated", **payload}, current_user.id,
