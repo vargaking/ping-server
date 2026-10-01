@@ -17,6 +17,7 @@ worker_class = "uvicorn.workers.UvicornWorker"
 # ("refresh to see it") even though messages still persist. Rely on async
 # concurrency within this single worker. Raising this is safe only once a
 # cross-worker (Redis pub/sub) backplane exists to fan messages out.
+# Per-socket activity state (used to decide Web Push) is per-process too.
 workers = int(os.getenv("GUNICORN_WORKERS", "1"))
 
 # Restart workers periodically to bound memory growth.

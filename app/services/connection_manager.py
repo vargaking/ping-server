@@ -1,4 +1,8 @@
+import time
+
 from fastapi import WebSocket
+
+IDLE_AFTER_SECONDS = 300
 
 
 class ConnectionManager:
@@ -6,12 +10,19 @@ class ConnectionManager:
 
     A user may have more than one live socket (multiple tabs/devices), so each
     user id maps to a *set* of sockets rather than a single one.
+
+    A socket is *active* while its client reported activity within the last
+    ``IDLE_AFTER_SECONDS``; sockets start idle. Like the socket maps, this is
+    per-process.
     """
+
+    clock = staticmethod(time.monotonic)
 
     def __init__(self) -> None:
         self.user_to_websockets: dict[int, set[WebSocket]] = {}
         self.websocket_to_user: dict[WebSocket, int] = {}
         self.websocket_to_token: dict[WebSocket, str] = {}
+        self.last_active: dict[WebSocket, float] = {}
 
     def add_connection(
         self, user_id: int, websocket: WebSocket, token: str | None = None
@@ -24,6 +35,7 @@ class ConnectionManager:
     def remove_connection_by_websocket(self, websocket: WebSocket) -> int | None:
         user_id = self.websocket_to_user.pop(websocket, None)
         self.websocket_to_token.pop(websocket, None)
+        self.last_active.pop(websocket, None)
         if user_id is not None:
             sockets = self.user_to_websockets.get(user_id)
             if sockets is not None:
@@ -43,3 +55,19 @@ class ConnectionManager:
 
     def is_online(self, user_id: int) -> bool:
         return bool(self.user_to_websockets.get(user_id))
+
+    def set_activity(self, websocket: WebSocket, active: bool) -> None:
+        if websocket not in self.websocket_to_user:
+            return
+        if active:
+            self.last_active[websocket] = self.clock()
+        else:
+            self.last_active.pop(websocket, None)
+
+    def is_active(self, user_id: int) -> bool:
+        now = self.clock()
+        return any(
+            now - self.last_active[ws] < IDLE_AFTER_SECONDS
+            for ws in self.user_to_websockets.get(user_id, ())
+            if ws in self.last_active
+        )
