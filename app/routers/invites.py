@@ -5,7 +5,7 @@ from uuid import UUID
 from fastapi import APIRouter, Depends, HTTPException, Request, Response, status
 from pydantic import BaseModel
 
-from ..middleware import get_current_user
+from ..middleware import get_current_user, get_optional_user
 from ..models.Invite import Invite
 from ..models.Server import Server
 from ..models.User import User
@@ -74,6 +74,7 @@ class InvitePublicResponse(BaseModel):
     server_icon: Optional[str] = None
     server_icon_text: Optional[str] = None
     server_icon_tone: Optional[int] = None
+    member_count: int
     is_valid: bool
     has_password: bool
 
@@ -136,10 +137,13 @@ async def list_server_invites(
 @router.get("/{invite_id}", response_model=InvitePublicResponse)
 async def get_invite(
     invite_id: UUID,
-    current_user: User = Depends(get_current_user),
+    current_user: Optional[User] = Depends(get_optional_user),
 ):
     invite = await Invite.get_or_none(id=invite_id).prefetch_related("server")
-    if not invite:
+    is_valid = invite is not None and _is_valid(invite)
+    # Link unfurlers and logged-out visitors read this without a session, so a
+    # dead invite must not reveal the server it pointed at.
+    if not invite or (current_user is None and not is_valid):
         raise HTTPException(status_code=404, detail="Invite not found")
 
     # Holding the invite is what grants a preview of the server: /servers/{id}
@@ -152,7 +156,8 @@ async def get_invite(
         server_icon=(server.server_profile or {}).get("icon"),
         server_icon_text=server.icon_text,
         server_icon_tone=server.icon_tone,
-        is_valid=_is_valid(invite),
+        member_count=await UserToServer.filter(server_id=invite.server_id).count(),
+        is_valid=is_valid,
         has_password=invite.password_hash is not None,
     )
 

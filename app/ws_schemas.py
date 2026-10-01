@@ -21,6 +21,7 @@ __all__ = [
     "DisconnectFrame",
     "MessageFrame",
     "DirectMessageFrame",
+    "ActivityFrame",
     "WSFrame",
     "parse_frame",
     "ValidationError",
@@ -85,8 +86,16 @@ class DirectMessageFrame(BaseModel):
     reply_to: str | None = None
 
 
+class ActivityFrame(BaseModel):
+    type: Literal["activity"]
+    state: Literal["active", "idle"]
+
+
 WSFrame = Annotated[
-    Union[ConnectionInitFrame, DisconnectFrame, MessageFrame, DirectMessageFrame],
+    Union[
+        ConnectionInitFrame, DisconnectFrame, MessageFrame, DirectMessageFrame,
+        ActivityFrame,
+    ],
     Field(discriminator="type"),
 ]
 

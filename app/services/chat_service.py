@@ -215,7 +215,7 @@ class ChatService:
         await self._fan_out(outgoing, [peer_id, sender_id], sender_ws=sender_ws)
 
         if push.enabled and peer_id != sender_id \
-                and not self.connection_manager.is_online(peer_id):
+                and not self.connection_manager.is_active(peer_id):
             push.schedule(self._push_direct_message(
                 sender_id, peer_id, conversation.id, created.id, content, attachments))
 
@@ -223,7 +223,7 @@ class ChatService:
         self, sender_id: int, peer_id: int, conversation_id: int,
         message_pk: int, content, attachments: list[Attachment],
     ) -> None:
-        """Web Push for a DM to a peer with no live socket."""
+        """Web Push for a DM to a peer with no active session."""
         marker = await read_state.get_marker(peer_id, conversation_id=conversation_id)
         unread = await Message.filter(
             conversation_id=conversation_id, author_id=sender_id,
@@ -251,13 +251,13 @@ class ChatService:
         self, sender_id: int, server_id: int, channel_id: int, message_pk: int,
         content, attachments: list[Attachment], mentioned: set[int], member_ids,
     ) -> None:
-        """Web Push to offline server members who can see the channel and were
-        @mentioned."""
+        """Web Push to server members with no active session who can see the
+        channel and were @mentioned."""
         members = set(member_ids)
         recipients = [
             uid for uid in mentioned
             if uid != sender_id and uid in members
-            and not self.connection_manager.is_online(uid)
+            and not self.connection_manager.is_active(uid)
         ]
         if not recipients:
             return
