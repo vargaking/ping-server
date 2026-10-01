@@ -13,7 +13,8 @@ def main() -> None:
     private_key = base64.urlsafe_b64encode(private_value.to_bytes(32, "big")).rstrip(b"=").decode()
     print(f"VAPID_PUBLIC_KEY={public_key_b64(vapid)}")
     print(f"VAPID_PRIVATE_KEY={private_key}")
-    print("VAPID_SUBJECT=mailto:you@example.com")
+    print("# Optional; defaults to the first https origin in ALLOWED_ORIGINS.")
+    print("# VAPID_SUBJECT=https://example.com")
 
 
 if __name__ == "__main__":

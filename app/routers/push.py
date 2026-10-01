@@ -127,7 +127,8 @@ async def send_test_push(
     whether they are active, and report what each push service answered."""
     if not push.enabled:
         raise HTTPException(
-            status_code=status.HTTP_409_CONFLICT, detail="Push is not configured on this server")
+            status_code=status.HTTP_409_CONFLICT,
+            detail=f"push not configured: {push.disabled_reason}")
     results = await push.send_test(current_user.id)
     return [
         {"endpoint_host": r.endpoint_host, "status": r.status, "error": r.error}

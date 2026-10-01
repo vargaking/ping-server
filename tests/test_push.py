@@ -28,8 +28,8 @@ from app.permissions import Permission
 from app.services.connection_manager import IDLE_AFTER_SECONDS, ConnectionManager
 from app.services.permissions import permissions
 from app.services.push import (
-    DeliveryResult, dm_payload, endpoint_host, mention_payload, mentioned_user_ids, plain_text,
-    push, read_payload)
+    DeliveryResult, dm_payload, endpoint_host, is_valid_subject, mention_payload,
+    mentioned_user_ids, normalize_subject, plain_text, push, read_payload)
 from app.services.push import test_payload as build_test_payload
 from tests.conftest import ORIGIN, create_channel, create_server, register, ws_ready
 from tests.test_realtime_events import invite_and_join
@@ -266,6 +266,93 @@ def test_a_pem_private_key_is_accepted(client, monkeypatch, push_on, vapid_env):
     assert push.enabled
 
 
+def test_normalize_subject_strips_everything_but_the_host():
+    assert normalize_subject("https://x.app/") == "https://x.app"
+    assert normalize_subject("  https://x.app/some/path?q=1#f ") == "https://x.app"
+    assert normalize_subject("HTTPS://user@x.app:8443/") == "https://x.app"
+    assert normalize_subject("mailto:me@x.app") == "mailto:me@x.app"
+    assert normalize_subject("hello") == "hello"
+
+
+@pytest.mark.parametrize("value", ["mailto:me@example.com", "https://x.app"])
+def test_valid_subjects(value):
+    assert is_valid_subject(value)
+
+
+@pytest.mark.parametrize("value", ["hello", "http://x.app", "mailto:nobody", "", "https://x.app/"])
+def test_invalid_subjects(value):
+    assert not is_valid_subject(value)
+
+
+@pytest.mark.parametrize("subject", ["https://x.app/", "https://x.app/some/path"])
+def test_a_url_subject_is_normalized_and_signs_a_real_push(
+        client, monkeypatch, vapid_env, push_endpoint, subject):
+    for key, value in vapid_env.items():
+        monkeypatch.setenv(key, value)
+    monkeypatch.setenv("VAPID_SUBJECT", subject)
+    push.configure()
+    handler, endpoint = push_endpoint
+    try:
+        assert push.enabled
+        assert push.subject == "https://x.app"
+        result = client.portal.call(
+            lambda: push.deliver(real_sub(endpoint), {"v": 1}, topic="dm-9", urgency="high"))
+    finally:
+        monkeypatch.undo()
+        push.configure()
+
+    assert result.status == 201
+    assert jwt_claims(handler.seen[0][0]["authorization"])["sub"] == "https://x.app"
+
+
+def test_the_subject_defaults_to_the_first_https_origin(push_on, monkeypatch, caplog):
+    monkeypatch.delenv("VAPID_SUBJECT")
+    monkeypatch.setenv("ALLOWED_ORIGINS", "http://localhost:5173,https://x.app/")
+    with caplog.at_level(logging.INFO, logger="app.services.push"):
+        push.configure()
+    assert push.enabled
+    assert push.subject == "https://x.app"
+    assert caplog.text.count("https://x.app") == 1
+
+
+def test_a_mailto_subject_is_kept(push_on, monkeypatch):
+    monkeypatch.setenv("VAPID_SUBJECT", "mailto:me@example.com")
+    push.configure()
+    assert push.enabled
+    assert push.subject == "mailto:me@example.com"
+
+
+def assert_disabled_by_subject(client, caplog):
+    assert not push.enabled
+    assert push.public_key is None
+    assert [r for r in caplog.records if r.levelno == logging.ERROR and "VAPID_SUBJECT" in r.message]
+    register(client)
+    assert client.get("/api/push/config").json() == {"enabled": False, "public_key": None}
+    res = post_test(client)
+    assert res.status_code == 409
+    assert res.json()["detail"] == "push not configured: invalid VAPID subject"
+
+
+def test_no_subject_and_no_https_origin_disables_push(client, push_on, monkeypatch, caplog):
+    monkeypatch.delenv("VAPID_SUBJECT")
+    monkeypatch.setenv("ALLOWED_ORIGINS", "http://localhost:5173")
+    push.configure()
+    assert_disabled_by_subject(client, caplog)
+
+
+@pytest.mark.parametrize("subject", ["hello", "http://x.app", "mailto:nobody"])
+def test_a_garbage_subject_disables_push(client, push_on, monkeypatch, caplog, subject):
+    monkeypatch.setenv("VAPID_SUBJECT", subject)
+    push.configure()
+    assert_disabled_by_subject(client, caplog)
+
+
+def test_no_keys_disables_push_without_an_error(push_off, caplog):
+    push.configure()
+    assert not push.enabled
+    assert not [r for r in caplog.records if r.levelno >= logging.ERROR]
+
+
 # -- subscribe -------------------------------------------------------------
 
 def test_subscribing_requires_login(client):
@@ -351,6 +438,8 @@ def test_subscribing_twice_is_idempotent(client):
     assert first.status_code == 201
     assert second.status_code == 200
     assert second.json() == first.json()
+    third, _ = subscribe(client, endpoint)
+    assert third.status_code == 200
     assert run(client, PushSubscription.filter(endpoint=endpoint).count()) == 1
 
 
@@ -994,7 +1083,7 @@ def test_the_test_endpoint_is_a_conflict_when_push_is_disabled(client, push_off)
     register(client, "tester")
     res = post_test(client)
     assert res.status_code == 409
-    assert res.json()["detail"] == "Push is not configured on this server"
+    assert res.json()["detail"] == "push not configured: VAPID keys not set"
 
 
 def test_the_test_endpoint_returns_an_empty_list_without_subscriptions(client, push_on):
@@ -1062,6 +1151,17 @@ def test_the_test_endpoint_deletes_a_gone_subscription(client, push_on):
     res = post_test(client)
     assert res.json()[0]["status"] == 410
     assert run(client, PushSubscription.all().count()) == 0
+
+
+def test_the_test_endpoint_drops_a_gone_subscription_for_good(client, push_on):
+    register(client, "tester")
+    _, gone = subscribe(client)
+    _, fine = subscribe(client)
+    push_on.statuses[gone] = 410
+
+    assert sorted(r["status"] for r in post_test(client).json()) == [201, 410]
+    assert run(client, PushSubscription.filter(endpoint=gone).count()) == 0
+    assert [r["status"] for r in post_test(client).json()] == [201]
 
 
 def test_the_test_endpoint_does_not_track_for_read_retraction(client, push_on):
