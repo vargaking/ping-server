@@ -4,6 +4,9 @@ import base64
 import json
 import logging
 import os
+import time
+import uuid
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from urllib.parse import urlparse
 
@@ -20,6 +23,9 @@ PUSH_TTL_SECONDS = 4 * 24 * 60 * 60
 DELIVER_TIMEOUT_SECONDS = 10
 PREVIEW_MAX_CHARS = 140
 MAX_TRACKED_THREADS = 10_000
+VAPID_CLAIM_LIFETIME_SECONDS = 12 * 60 * 60
+MAX_BODY_CHARS = 500
+PAYLOAD_VERSION = 1
 
 # Push services the browsers use. The server POSTs to whatever endpoint a
 # client registers, so anything else is refused. Matched by host suffix.
@@ -46,6 +52,91 @@ def is_allowed_endpoint(endpoint: str) -> bool:
     extra = tuple(
         h.strip().lower() for h in os.getenv("PUSH_EXTRA_HOSTS", "").split(",") if h.strip())
     return any(host == s or host.endswith(f".{s}") for s in PUSH_HOST_SUFFIXES + extra)
+
+
+def endpoint_origin(endpoint: str) -> str:
+    """scheme://host[:port] of a push endpoint: the VAPID audience."""
+    parsed = urlparse(endpoint)
+    return f"{parsed.scheme}://{parsed.netloc}"
+
+
+def endpoint_host(endpoint: str) -> str:
+    """Host of a push endpoint. The full URL is a capability, so logs and
+    responses only ever carry this."""
+    return urlparse(endpoint).hostname or ""
+
+
+@dataclass(frozen=True)
+class DeliveryResult:
+    status: int
+    body: str = ""
+
+
+@dataclass(frozen=True)
+class SendResult:
+    endpoint_host: str
+    status: int | None
+    error: str | None
+
+
+# The service worker drops any push that is not JSON with v === 1, a string
+# tag and a kind of "dm", "mention" or "read". Every payload is built here.
+def dm_tag(conversation_id: int) -> str:
+    return f"dm-{conversation_id}"
+
+
+def channel_tag(channel_id: int) -> str:
+    return f"ch-{channel_id}"
+
+
+def _message_payload(
+    kind: str, *, tag: str, title: str, body: str, url: str, count: int,
+    message_id: int, message_uuid: str,
+) -> dict:
+    return {
+        "v": PAYLOAD_VERSION,
+        "kind": kind,
+        "tag": tag,
+        "title": title,
+        "body": body,
+        "url": url,
+        "count": count,
+        "message_id": message_id,
+        "message_uuid": message_uuid,
+        "sent_at": datetime.now(timezone.utc).isoformat(),
+    }
+
+
+def dm_payload(
+    *, conversation_id: int, sender_name: str, body: str, count: int,
+    message_id: int, message_uuid: str,
+) -> dict:
+    return _message_payload(
+        "dm", tag=dm_tag(conversation_id), title=sender_name, body=body,
+        url=f"/app/direct/{conversation_id}/", count=count,
+        message_id=message_id, message_uuid=message_uuid)
+
+
+def mention_payload(
+    *, server_id: int, channel_id: int, channel_name: str, sender_name: str,
+    body: str, message_id: int, message_uuid: str,
+) -> dict:
+    return _message_payload(
+        "mention", tag=channel_tag(channel_id), title=f"{sender_name} in #{channel_name}",
+        body=body, url=f"/app/server/{server_id}/channel/{channel_id}/", count=1,
+        message_id=message_id, message_uuid=message_uuid)
+
+
+def read_payload(tag: str) -> dict:
+    return {"v": PAYLOAD_VERSION, "kind": "read", "tag": tag}
+
+
+def test_payload() -> dict:
+    """A "dm" payload, so service workers already deployed show it."""
+    return _message_payload(
+        "dm", tag="test", title="Test notification",
+        body="Push notifications are working.", url="/app/", count=1,
+        message_id=0, message_uuid=str(uuid.uuid4()))
 
 
 # Message content is client-controlled: bound how much of it we read.
@@ -203,12 +294,16 @@ class PushService:
     def enabled(self) -> bool:
         return self._vapid is not None
 
-    async def deliver(self, sub: PushSubscription, payload: dict, *, topic: str, urgency: str) -> int:
+    async def deliver(
+        self, sub: PushSubscription, payload: dict, *, topic: str, urgency: str,
+    ) -> DeliveryResult:
         """Encrypt and POST *payload* to one subscription; returns the push
-        service's HTTP status. The only place that talks to the network."""
+        service's HTTP status and body. The only place that talks to the network."""
         return await asyncio.to_thread(self._deliver_blocking, sub, payload, topic, urgency)
 
-    def _deliver_blocking(self, sub: PushSubscription, payload: dict, topic: str, urgency: str) -> int:
+    def _deliver_blocking(
+        self, sub: PushSubscription, payload: dict, topic: str, urgency: str,
+    ) -> DeliveryResult:
         session = requests.Session()
         # The endpoint was allowlisted; never follow it somewhere else.
         session.max_redirects = 0
@@ -220,16 +315,21 @@ class PushService:
                 },
                 data=json.dumps(payload, separators=(",", ":")),
                 vapid_private_key=self._vapid,
-                vapid_claims={"sub": self.subject},
+                vapid_claims={
+                    "sub": self.subject,
+                    "aud": endpoint_origin(sub.endpoint),
+                    "exp": int(time.time()) + VAPID_CLAIM_LIFETIME_SECONDS,
+                },
+                content_encoding="aes128gcm",
                 ttl=PUSH_TTL_SECONDS,
                 headers={"Topic": topic, "Urgency": urgency},
                 timeout=DELIVER_TIMEOUT_SECONDS,
                 requests_session=session,
             )
-            return response.status_code
+            return DeliveryResult(response.status_code, response.text[:MAX_BODY_CHARS])
         except WebPushException as exc:
             if exc.response is not None:
-                return exc.response.status_code
+                return DeliveryResult(exc.response.status_code, exc.response.text[:MAX_BODY_CHARS])
             raise
         finally:
             session.close()
@@ -238,24 +338,44 @@ class PushService:
         """Push *payload* to every subscription of *user_id*. Gone
         subscriptions (404/410) are deleted; other failures are only logged."""
         subs = await PushSubscription.filter(user_id=user_id)
+        if not subs:
+            logger.info("Push skipped for user %s: no subscription", user_id)
+            return
         await asyncio.gather(*(
             self._send_one(sub, payload, topic, urgency) for sub in subs))
 
-    async def _send_one(self, sub: PushSubscription, payload: dict, topic: str, urgency: str) -> None:
+    async def send_test(self, user_id: int) -> list[SendResult]:
+        """Send a test push to every subscription of *user_id* right now and
+        report what each push service answered."""
+        subs = await PushSubscription.filter(user_id=user_id)
+        payload = test_payload()
+        return list(await asyncio.gather(*(
+            self._send_one(sub, payload, "test", "high") for sub in subs)))
+
+    async def _send_one(
+        self, sub: PushSubscription, payload: dict, topic: str, urgency: str,
+    ) -> SendResult:
+        host = endpoint_host(sub.endpoint)
         try:
-            status = await self.deliver(sub, payload, topic=topic, urgency=urgency)
-            if status in (404, 410):
-                await PushSubscription.filter(id=sub.id).delete()
-            elif 200 <= status < 300:
-                await PushSubscription.filter(id=sub.id).update(
-                    last_used_at=datetime.now(timezone.utc))
-            else:
-                logger.warning(
-                    "Push to subscription %s (user %s) failed with status %s",
-                    sub.id, sub.user_id, status)
-        except Exception:
+            result = await self.deliver(sub, payload, topic=topic, urgency=urgency)
+        except Exception as exc:
             logger.warning(
-                "Push to subscription %s (user %s) failed", sub.id, sub.user_id, exc_info=True)
+                "Push to user %s via %s raised", sub.user_id, host, exc_info=True)
+            return SendResult(host, None, f"{type(exc).__name__}: {exc}")
+
+        status = result.status
+        if 200 <= status < 300:
+            logger.info("Push sent to user %s via %s: %s", sub.user_id, host, status)
+            await PushSubscription.filter(id=sub.id).update(
+                last_used_at=datetime.now(timezone.utc))
+            return SendResult(host, status, None)
+
+        logger.warning(
+            "Push to user %s via %s failed: %s %s", sub.user_id, host, status, result.body)
+        if status in (404, 410):
+            logger.info("Subscription of user %s via %s is gone; removed", sub.user_id, host)
+            await PushSubscription.filter(id=sub.id).delete()
+        return SendResult(host, status, result.body or f"HTTP {status}")
 
     def schedule(self, coro) -> None:
         """Run *coro* in the background. The sender's socket handler must
@@ -292,8 +412,7 @@ class PushService:
         if not self.enabled:
             return
         self.schedule(self.send_to_user(
-            user_id, {"v": 1, "kind": "read", "tag": tag}, topic=tag, urgency="normal"))
-
+            user_id, read_payload(tag), topic=tag, urgency="normal"))
 
 
 push = PushService()

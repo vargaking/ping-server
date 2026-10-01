@@ -7,7 +7,9 @@ it with a recorder, except the ones that point the real one at a local server.
 """
 import base64
 import json
+import logging
 import threading
+import time
 import uuid
 from datetime import datetime, timezone
 from http.server import BaseHTTPRequestHandler, HTTPServer
@@ -18,13 +20,17 @@ from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric import ec
 from py_vapid import Vapid
 
+from app.models.Message import Message
 from app.models.PushSubscription import PushSubscription
 from app.models.Role import Role
 from app.models.RoleToUser import RoleToUser
 from app.permissions import Permission
 from app.services.connection_manager import IDLE_AFTER_SECONDS, ConnectionManager
 from app.services.permissions import permissions
-from app.services.push import mentioned_user_ids, plain_text, push
+from app.services.push import (
+    DeliveryResult, dm_payload, endpoint_host, mention_payload, mentioned_user_ids, plain_text,
+    push, read_payload)
+from app.services.push import test_payload as build_test_payload
 from tests.conftest import ORIGIN, create_channel, create_server, register, ws_ready
 from tests.test_realtime_events import invite_and_join
 
@@ -57,12 +63,17 @@ class Recorder:
     def __init__(self):
         self.calls: list[dict] = []
         self.statuses: dict[str, int] = {}
+        self.bodies: dict[str, str] = {}
+        self.errors: dict[str, Exception] = {}
 
     async def deliver(self, sub, payload, *, topic, urgency):
         self.calls.append({
             "endpoint": sub.endpoint, "user_id": sub.user_id, "payload": payload,
             "topic": topic, "urgency": urgency})
-        return self.statuses.get(sub.endpoint, 201)
+        if sub.endpoint in self.errors:
+            raise self.errors[sub.endpoint]
+        return DeliveryResult(
+            self.statuses.get(sub.endpoint, 201), self.bodies.get(sub.endpoint, ""))
 
 
 @pytest.fixture
@@ -433,6 +444,10 @@ def test_unsubscribe_deletes_only_your_own_row_and_is_idempotent(client, new_cli
     assert unsubscribe(client, "https://nowhere.example/none").status_code == 204
 
 
+def stored_uuid(client) -> str:
+    return str(run(client, Message.all().order_by("-id").first()).uuid)
+
+
 # -- DMs -------------------------------------------------------------------
 
 def test_dm_to_an_offline_peer_pushes_once(dm_pair, push_on):
@@ -452,6 +467,7 @@ def test_dm_to_an_offline_peer_pushes_once(dm_pair, push_on):
     sent_at = payload.pop("sent_at")
     assert datetime.fromisoformat(sent_at).tzinfo is not None
     assert isinstance(payload.pop("message_id"), int)
+    assert payload.pop("message_uuid") == stored_uuid(dm_pair.alice_client)
     assert payload == {
         "v": 1,
         "kind": "dm",
@@ -634,7 +650,7 @@ def test_a_slow_push_service_does_not_hold_up_the_sender(dm_pair, push_on, monke
         import asyncio
         while not release.is_set():
             await asyncio.sleep(0.01)
-        return 201
+        return DeliveryResult(201)
 
     monkeypatch.setattr(push, "deliver", slow)
     with dm_pair.alice_client.websocket_connect("/ws", headers=HEADERS) as ws:
@@ -669,6 +685,7 @@ def test_a_mention_pushes_to_the_offline_member_only(channel_team, push_on):
     payload = call["payload"]
     payload.pop("sent_at")
     assert isinstance(payload.pop("message_id"), int)
+    assert payload.pop("message_uuid") == stored_uuid(team.alice_client)
     assert payload == {
         "v": 1,
         "kind": "mention",
@@ -905,6 +922,214 @@ def test_mentioned_user_ids_walks_nested_nodes():
     assert mentioned_user_ids({"type": "doc", "content": "oops"}) == set()
 
 
+# -- payload contract ------------------------------------------------------
+
+KEYS_BY_KIND = {
+    "dm": {"v", "kind", "tag", "title", "body", "url", "count",
+           "message_id", "message_uuid", "sent_at"},
+    "read": {"v", "kind", "tag"},
+}
+KEYS_BY_KIND["mention"] = KEYS_BY_KIND["dm"]
+
+
+def assert_service_worker_contract(payload):
+    assert payload["v"] == 1 and type(payload["v"]) is int
+    assert isinstance(payload["tag"], str)
+    assert payload["kind"] in {"dm", "mention", "read"}
+    assert set(payload) == KEYS_BY_KIND[payload["kind"]]
+
+
+def test_payload_builders_satisfy_the_service_worker_contract():
+    message_uuid = str(uuid.uuid4())
+    dm = dm_payload(conversation_id=4, sender_name="amy", body="hi", count=2,
+                    message_id=9, message_uuid=message_uuid)
+    mention = mention_payload(server_id=1, channel_id=2, channel_name="general",
+                              sender_name="amy", body="hi", message_id=9,
+                              message_uuid=message_uuid)
+    for payload in (dm, mention, read_payload("dm-4"), build_test_payload()):
+        assert_service_worker_contract(payload)
+    assert (dm["tag"], dm["title"], dm["url"], dm["count"]) == ("dm-4", "amy", "/app/direct/4/", 2)
+    assert mention["tag"] == "ch-2"
+    assert mention["title"] == "amy in #general"
+    assert mention["url"] == "/app/server/1/channel/2/"
+    assert dm["message_uuid"] == message_uuid
+
+
+def test_a_real_dm_push_carries_the_uuid_the_peer_sees(dm_pair, push_on):
+    frame = dm_frame(dm_pair.convo["id"], doc(text("hi")))
+    with dm_pair.bob_client.websocket_connect("/ws", headers=HEADERS) as bob_ws:
+        ws_ready(bob_ws)
+        with dm_pair.alice_client.websocket_connect("/ws", headers=HEADERS) as ws:
+            ws_ready(ws)
+            ws.send_json(frame)
+            sync(ws)
+        received = bob_ws.receive_json()
+    drain(dm_pair.alice_client)
+
+    payload = push_on.calls[0]["payload"]
+    assert_service_worker_contract(payload)
+    assert received["type"] == "direct_message"
+    assert payload["message_uuid"] == received["id"] == frame["id"]
+
+
+def test_a_real_mention_push_carries_the_uuid_of_the_stored_message(channel_team, push_on):
+    team = channel_team
+    send_to_channel(team, doc(mention(team.bob.user["id"])))
+    payload = push_on.calls[0]["payload"]
+    assert_service_worker_contract(payload)
+    assert payload["message_uuid"] == stored_uuid(team.alice_client)
+
+
+# -- test endpoint ---------------------------------------------------------
+
+def post_test(client):
+    return client.post("/api/push/test")
+
+
+def test_the_test_endpoint_requires_login(client):
+    assert post_test(client).status_code == 401
+
+
+def test_the_test_endpoint_is_a_conflict_when_push_is_disabled(client, push_off):
+    register(client, "tester")
+    res = post_test(client)
+    assert res.status_code == 409
+    assert res.json()["detail"] == "Push is not configured on this server"
+
+
+def test_the_test_endpoint_returns_an_empty_list_without_subscriptions(client, push_on):
+    register(client, "tester")
+    res = post_test(client)
+    assert res.status_code == 200
+    assert res.json() == []
+    assert push_on.calls == []
+
+
+def test_the_test_endpoint_pushes_to_every_subscription_of_the_caller_only(client, new_client, push_on):
+    register(client, "tester")
+    _, first = subscribe(client)
+    _, second = subscribe(client)
+    other_client = new_client()
+    register(other_client, "someone-else")
+    subscribe(other_client)
+
+    res = post_test(client)
+
+    assert res.status_code == 200
+    assert res.json() == [
+        {"endpoint_host": "fcm.googleapis.com", "status": 201, "error": None}] * 2
+    assert {c["endpoint"] for c in push_on.calls} == {first, second}
+    for call in push_on.calls:
+        assert (call["topic"], call["urgency"]) == ("test", "high")
+        assert_service_worker_contract(call["payload"])
+        assert call["payload"]["kind"] == "dm"
+        assert call["payload"]["tag"] == "test"
+        assert call["payload"]["message_id"] == 0
+
+
+def test_the_test_endpoint_ignores_the_active_session_check(client, push_on):
+    register(client, "tester")
+    subscribe(client)
+    with client.websocket_connect("/ws", headers=HEADERS) as ws:
+        ws_ready(ws)
+        report(ws, "active")
+        res = post_test(client)
+    assert len(res.json()) == 1
+    assert len(push_on.calls) == 1
+
+
+def test_the_test_endpoint_reports_failures_per_subscription(client, push_on):
+    register(client, "tester")
+    _, rejected = subscribe(client)
+    _, broken = subscribe(client)
+    _, fine = subscribe(client)
+    push_on.statuses[rejected] = 403
+    push_on.bodies[rejected] = "invalid JWT provided"
+    push_on.errors[broken] = ConnectionError("connection refused")
+
+    by_status = {r["status"]: r for r in post_test(client).json()}
+
+    assert by_status[403]["error"] == "invalid JWT provided"
+    assert by_status[None]["error"] == "ConnectionError: connection refused"
+    assert by_status[201]["error"] is None
+    assert run(client, PushSubscription.all().count()) == 3
+
+
+def test_the_test_endpoint_deletes_a_gone_subscription(client, push_on):
+    register(client, "tester")
+    _, gone = subscribe(client)
+    push_on.statuses[gone] = 410
+    res = post_test(client)
+    assert res.json()[0]["status"] == 410
+    assert run(client, PushSubscription.all().count()) == 0
+
+
+def test_the_test_endpoint_does_not_track_for_read_retraction(client, push_on):
+    register(client, "tester")
+    subscribe(client)
+    post_test(client)
+    assert push._pushed == {}
+
+
+def test_the_test_endpoint_is_rate_limited(client, push_on, monkeypatch):
+    monkeypatch.setenv("PUSH_TEST_RATE_LIMIT", "2/minute")
+    register(client, "tester")
+    assert [post_test(client).status_code for _ in range(3)] == [200, 200, 429]
+
+
+# -- logging ---------------------------------------------------------------
+
+def test_a_sent_push_logs_user_host_and_status_but_not_the_endpoint(dm_pair, push_on, caplog):
+    caplog.set_level(logging.INFO, logger="app.services.push")
+    send_dm_to_bob(dm_pair)
+    assert f"Push sent to user {dm_pair.bob['id']} via fcm.googleapis.com: 201" in caplog.text
+    assert dm_pair.bob_endpoint not in caplog.text
+    assert endpoint_host(dm_pair.bob_endpoint) == "fcm.googleapis.com"
+
+
+def test_a_failed_push_logs_the_response_body(dm_pair, push_on, caplog):
+    caplog.set_level(logging.INFO, logger="app.services.push")
+    push_on.statuses[dm_pair.bob_endpoint] = 403
+    push_on.bodies[dm_pair.bob_endpoint] = "invalid JWT provided"
+    send_dm_to_bob(dm_pair)
+    assert "failed: 403 invalid JWT provided" in caplog.text
+    assert dm_pair.bob_endpoint not in caplog.text
+
+
+def test_a_raised_delivery_error_is_logged_with_user_and_host(dm_pair, push_on, caplog):
+    caplog.set_level(logging.INFO, logger="app.services.push")
+    push_on.errors[dm_pair.bob_endpoint] = RuntimeError("network down")
+    send_dm_to_bob(dm_pair)
+    assert f"Push to user {dm_pair.bob['id']} via fcm.googleapis.com raised" in caplog.text
+    assert dm_pair.bob_endpoint not in caplog.text
+
+
+def test_a_user_without_subscriptions_logs_the_skip(dm_pair, push_on, caplog):
+    caplog.set_level(logging.INFO, logger="app.services.push")
+    run(dm_pair.alice_client, PushSubscription.all().delete())
+    send_dm_to_bob(dm_pair)
+    assert f"Push skipped for user {dm_pair.bob['id']}: no subscription" in caplog.text
+
+
+def test_a_dm_to_an_active_peer_logs_the_skip(dm_pair, push_on, caplog):
+    caplog.set_level(logging.INFO, logger="app.services.chat_service")
+    with dm_pair.bob_client.websocket_connect("/ws", headers=HEADERS) as bob_ws:
+        ws_ready(bob_ws)
+        report(bob_ws, "active")
+        send_dm_to_bob(dm_pair)
+    assert f"Push skipped for user {dm_pair.bob['id']}: active session" in caplog.text
+
+
+def test_an_active_mentioned_member_logs_the_skip(channel_team, push_on, caplog):
+    caplog.set_level(logging.INFO, logger="app.services.chat_service")
+    team = channel_team
+    with team.bob.client.websocket_connect("/ws", headers=HEADERS) as bob_ws:
+        ws_ready(bob_ws)
+        report(bob_ws, "active")
+        send_to_channel(team, doc(mention(team.bob.user["id"])))
+    assert f"Push skipped for user {team.bob.user['id']}: active session" in caplog.text
+
+
 # -- the real deliver ------------------------------------------------------
 
 class _Capture(BaseHTTPRequestHandler):
@@ -944,19 +1169,25 @@ def _ua_public() -> bytes:
         serialization.Encoding.X962, serialization.PublicFormat.UncompressedPoint)
 
 
+def jwt_claims(authorization: str) -> dict:
+    token = authorization.removeprefix("vapid t=").split(",")[0]
+    segment = token.split(".")[1]
+    return json.loads(base64.urlsafe_b64decode(segment + "=" * (-len(segment) % 4)))
+
+
 def test_deliver_sends_an_encrypted_vapid_signed_request(client, monkeypatch, vapid_env, push_endpoint):
     for key, value in vapid_env.items():
         monkeypatch.setenv(key, value)
     push.configure()
     handler, endpoint = push_endpoint
     try:
-        status = client.portal.call(
+        result = client.portal.call(
             lambda: push.deliver(real_sub(endpoint), {"v": 1}, topic="dm-9", urgency="high"))
     finally:
         monkeypatch.undo()
         push.configure()
 
-    assert status == 201
+    assert result.status == 201
     headers, body = handler.seen[0]
     assert headers["ttl"] == "345600"
     assert headers["topic"] == "dm-9"
@@ -966,6 +1197,11 @@ def test_deliver_sends_an_encrypted_vapid_signed_request(client, monkeypatch, va
     assert f"k={vapid_env['VAPID_PUBLIC_KEY']}" in headers["authorization"]
     assert b'"v"' not in body  # encrypted
 
+    claims = jwt_claims(headers["authorization"])
+    assert claims["aud"] == endpoint.rsplit("/push/", 1)[0]
+    assert claims["sub"] == "mailto:admin@example.com"
+    assert abs(claims["exp"] - (time.time() + 12 * 60 * 60)) < 60
+
 
 def test_deliver_returns_the_error_status_of_the_push_service(client, monkeypatch, vapid_env, push_endpoint):
     for key, value in vapid_env.items():
@@ -974,12 +1210,12 @@ def test_deliver_returns_the_error_status_of_the_push_service(client, monkeypatc
     handler, endpoint = push_endpoint
     handler.status = 410
     try:
-        status = client.portal.call(
+        result = client.portal.call(
             lambda: push.deliver(real_sub(endpoint), {"v": 1}, topic="dm-9", urgency="normal"))
     finally:
         monkeypatch.undo()
         push.configure()
-    assert status == 410
+    assert result.status == 410
 
 
 def test_deliver_does_not_follow_redirects(client, monkeypatch, vapid_env, push_endpoint):
