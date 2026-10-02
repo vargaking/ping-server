@@ -44,6 +44,7 @@ python-multipart==0.0.20
 pytz==2025.2
 pywebpush==2.3.0
 PyYAML==6.0.3
+regex==2026.9.29
 requests==2.34.2
 rich==14.2.0
 rich-toolkit==0.15.1

@@ -72,6 +72,8 @@ class InvitePublicResponse(BaseModel):
     server_id: int
     server_name: str
     server_icon: Optional[str] = None
+    server_icon_text: Optional[str] = None
+    server_icon_tone: Optional[int] = None
     member_count: int
     is_valid: bool
     has_password: bool
@@ -152,6 +154,8 @@ async def get_invite(
         server_id=invite.server_id,
         server_name=server.name,
         server_icon=(server.server_profile or {}).get("icon"),
+        server_icon_text=server.icon_text,
+        server_icon_tone=server.icon_tone,
         member_count=await UserToServer.filter(server_id=invite.server_id).count(),
         is_valid=is_valid,
         has_password=invite.password_hash is not None,

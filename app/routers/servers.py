@@ -15,6 +15,7 @@ from ..models.User import User
 from ..models.UserToServer import UserToServer
 from ..services.permissions import permissions
 from ..services.roles import seed_server_roles
+from ..services.server_icon import clean_icon_text, clean_icon_tone
 from ..services.storage import ImageValidationError, storage_service
 from ..services.voice_presence import close_voice_channels, remove_from_voice
 from ..utils import require_owner
@@ -48,14 +49,21 @@ class ServerUpdate(BaseModel):
     name: Optional[str] = None
     server_profile: Optional[dict] = None
     server_settings: Optional[dict] = None
+    icon_text: Optional[str] = None
+    icon_tone: Optional[int] = None
 
     _name = field_validator("name")(_clean_name)
+    _icon_text = field_validator("icon_text")(clean_icon_text)
+    _icon_tone = field_validator("icon_tone")(clean_icon_tone)
+
 
 class ServerPublicResponse(BaseModel):
     id: int
     name: str
     created_at: datetime
     server_profile: dict
+    icon_text: Optional[str] = None
+    icon_tone: Optional[int] = None
 
     @classmethod
     def from_server(cls, server: Server):
@@ -64,6 +72,8 @@ class ServerPublicResponse(BaseModel):
             name=server.name,
             created_at=server.created_at,
             server_profile=server.server_profile,
+            icon_text=server.icon_text,
+            icon_tone=server.icon_tone,
         )
 
 
@@ -73,6 +83,8 @@ class ServerResponse(BaseModel):
     created_at: datetime
     server_profile: dict
     server_settings: dict
+    icon_text: Optional[str] = None
+    icon_tone: Optional[int] = None
     owner_id: Optional[int] = None
     members: List[UserResponse] = []
     # The caller's effective permission mask as a decimal string (JS numbers
@@ -92,6 +104,8 @@ class ServerResponse(BaseModel):
             created_at=server.created_at,
             server_profile=server.server_profile,
             server_settings=server.server_settings,
+            icon_text=server.icon_text,
+            icon_tone=server.icon_tone,
             owner_id=server.owner_id,
             members=members
         )
@@ -212,6 +226,8 @@ async def update_server(
     if "name" in update_data and update_data["name"] is None:
         raise HTTPException(status_code=422, detail="Server name can't be empty")
     await server.update_from_dict(update_data)
+    if server.icon_text and server.icon_tone is None:
+        server.icon_tone = 1
     await server.save()
 
     await _broadcast_server_updated(request, server, current_user.id)
@@ -268,6 +284,18 @@ async def upload_server_icon(
         raise HTTPException(status_code=500, detail="Failed to upload file")
 
     server.server_profile['icon'] = url
+    await server.save()
+    await _broadcast_server_updated(request, server, current_user.id)
+    return ServerPublicResponse.from_server(server)
+
+
+@router.delete("/{server_id}/icon", response_model=ServerPublicResponse)
+async def delete_server_icon(
+    request: Request,
+    server: Server = Depends(check_permission(Permission.MANAGE_SERVER)),
+    current_user: User = Depends(get_current_user),
+):
+    server.server_profile.pop('icon', None)
     await server.save()
     await _broadcast_server_updated(request, server, current_user.id)
     return ServerPublicResponse.from_server(server)

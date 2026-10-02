@@ -7,6 +7,8 @@ class Server(models.Model):
     created_at = fields.DatetimeField(auto_now_add=True)
     server_profile = fields.JSONField(default=dict)
     server_settings = fields.JSONField(default=dict)
+    icon_text = fields.CharField(max_length=32, null=True)
+    icon_tone = fields.SmallIntField(null=True)
     # The user who owns the server. Nullable so a server can outlive its owner
     # (on account deletion the FK is set to NULL rather than cascading).
     owner = fields.ForeignKeyField(
