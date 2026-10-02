@@ -56,7 +56,8 @@ The interactive API docs are then at http://localhost:8000/docs.
 | `INVITE_USE_RATE_LIMIT` | no | `20/minute` | Per-IP + per-invite limit on `POST /invites/{id}/use`. |
 | `LIVEKIT_*` | for voice | — | LiveKit API host/key/secret used to mint voice tokens. |
 | `LIVEKIT_API_URL` | no | `LIVEKIT_URL` with `ws`→`http` | Address the server uses to call LiveKit's API for voice presence. |
-| `VAPID_PUBLIC_KEY`, `VAPID_PRIVATE_KEY`, `VAPID_SUBJECT` | for push | — | Web Push signing keys and contact. Push is off unless all three are set. See "Web Push". |
+| `VAPID_PUBLIC_KEY`, `VAPID_PRIVATE_KEY` | for push | — | Web Push signing keys. Push is off unless both are set. See "Web Push". |
+| `VAPID_SUBJECT` | no | first `https://` origin in `ALLOWED_ORIGINS` | Push contact: `https://host` or `mailto:you@example.com`. See "Web Push". |
 | `PUSH_EXTRA_HOSTS` | no | *(empty)* | Comma-separated extra push-service hosts (suffix match), for tests or self-hosted push. |
 
 > Session tokens expire 30 days after login/register; expired tokens are
@@ -65,7 +66,7 @@ The interactive API docs are then at http://localhost:8000/docs.
 ## Web Push
 
 DMs and @mentions can reach users whose tabs are closed. Generate a key pair
-once per environment and put the three lines in `.env`:
+once per environment and put the key lines in `.env`:
 
 ```bash
 python -m app.scripts.gen_vapid
@@ -73,9 +74,14 @@ python -m app.scripts.gen_vapid
 
 `VAPID_PUBLIC_KEY` is the base64url uncompressed P-256 point the browser
 subscribes with. `VAPID_PRIVATE_KEY` is the base64url raw 32-byte key (a PEM is
-also accepted). `VAPID_SUBJECT` is a `mailto:` or `https://` contact; edit the
-generated placeholder. Keep the keys stable: changing them invalidates every
+also accepted). Keep the keys stable: changing them invalidates every
 existing subscription.
+
+`VAPID_SUBJECT` is optional and defaults to the app's public URL (the first
+`https://` origin in `ALLOWED_ORIGINS`). A bare `https://host` is fine, no email
+needed; a path or trailing slash is stripped automatically, and ports are not
+allowed. Or use `mailto:you@example.com`. A missing or invalid subject disables
+push with one error at startup.
 
 Subscription endpoints are only accepted from known push services (Google,
 Mozilla, Windows, Apple). `PUSH_EXTRA_HOSTS` adds more.

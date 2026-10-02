@@ -1,6 +1,5 @@
 import json
 import logging
-from datetime import datetime, timezone
 from uuid import UUID
 
 from fastapi import WebSocket
@@ -16,7 +15,8 @@ from app.permissions import Permission
 from app.services import read_state
 from app.services.connection_manager import ConnectionManager
 from app.services.permissions import permissions
-from app.services.push import mentioned_user_ids, plain_text, push
+from app.services.push import (
+    channel_tag, dm_payload, dm_tag, mention_payload, mentioned_user_ids, plain_text, push)
 from app.services.replies import reply_json, reply_refs
 from app.ws_schemas import DirectMessageFrame, MessageFrame
 
@@ -133,7 +133,7 @@ class ChatService:
                 if mentioned:
                     push.schedule(self._push_mentions(
                         sender_id, server_id, channel_id, created.id,
-                        content, attachments, mentioned, member_ids))
+                        str(created.uuid), content, attachments, mentioned, member_ids))
             except Exception:
                 logger.warning("Failed to schedule mention pushes", exc_info=True)
 
@@ -214,14 +214,17 @@ class ChatService:
         peer_id = conversation.other_user_id(sender_id)
         await self._fan_out(outgoing, [peer_id, sender_id], sender_ws=sender_ws)
 
-        if push.enabled and peer_id != sender_id \
-                and not self.connection_manager.is_active(peer_id):
-            push.schedule(self._push_direct_message(
-                sender_id, peer_id, conversation.id, created.id, content, attachments))
+        if push.enabled and peer_id != sender_id:
+            if self.connection_manager.is_active(peer_id):
+                logger.info("Push skipped for user %s: active session", peer_id)
+            else:
+                push.schedule(self._push_direct_message(
+                    sender_id, peer_id, conversation.id, created.id,
+                    str(created.uuid), content, attachments))
 
     async def _push_direct_message(
         self, sender_id: int, peer_id: int, conversation_id: int,
-        message_pk: int, content, attachments: list[Attachment],
+        message_pk: int, message_uuid: str, content, attachments: list[Attachment],
     ) -> None:
         """Web Push for a DM to a peer with no active session."""
         marker = await read_state.get_marker(peer_id, conversation_id=conversation_id)
@@ -229,56 +232,57 @@ class ChatService:
             conversation_id=conversation_id, author_id=sender_id,
             id__gt=marker or 0).count()
         if unread == 0:
+            logger.info("Push skipped for user %s: already read", peer_id)
             return
         sender = await User.get_or_none(id=sender_id)
         if sender is None:
             return
-        tag = f"dm-{conversation_id}"
+        tag = dm_tag(conversation_id)
         push.track(peer_id, tag, message_pk)
-        await push.send_to_user(peer_id, {
-            "v": 1,
-            "kind": "dm",
-            "tag": tag,
-            "title": sender.username,
-            "body": plain_text(content, attachments),
-            "url": f"/app/direct/{conversation_id}/",
-            "count": unread,
-            "message_id": message_pk,
-            "sent_at": datetime.now(timezone.utc).isoformat(),
-        }, topic=tag, urgency="high")
+        await push.send_to_user(peer_id, dm_payload(
+            conversation_id=conversation_id,
+            sender_name=sender.username,
+            body=plain_text(content, attachments),
+            count=unread,
+            message_id=message_pk,
+            message_uuid=message_uuid,
+        ), topic=tag, urgency="high")
 
     async def _push_mentions(
         self, sender_id: int, server_id: int, channel_id: int, message_pk: int,
-        content, attachments: list[Attachment], mentioned: set[int], member_ids,
+        message_uuid: str, content, attachments: list[Attachment],
+        mentioned: set[int], member_ids,
     ) -> None:
         """Web Push to server members with no active session who can see the
         channel and were @mentioned."""
         members = set(member_ids)
-        recipients = [
-            uid for uid in mentioned
-            if uid != sender_id and uid in members
-            and not self.connection_manager.is_active(uid)
-        ]
+        recipients = []
+        for uid in mentioned:
+            if uid == sender_id or uid not in members:
+                continue
+            if self.connection_manager.is_active(uid):
+                logger.info("Push skipped for user %s: active session", uid)
+                continue
+            recipients.append(uid)
         if not recipients:
             return
         channel = await Channel.get_or_none(id=channel_id)
         sender = await User.get_or_none(id=sender_id)
         if channel is None or sender is None:
             return
-        tag = f"ch-{channel_id}"
-        payload = {
-            "v": 1,
-            "kind": "mention",
-            "tag": tag,
-            "title": f"{sender.username} in #{channel.name}",
-            "body": plain_text(content, attachments),
-            "url": f"/app/server/{server_id}/channel/{channel_id}/",
-            "count": 1,
-            "message_id": message_pk,
-            "sent_at": datetime.now(timezone.utc).isoformat(),
-        }
+        tag = channel_tag(channel_id)
+        payload = mention_payload(
+            server_id=server_id,
+            channel_id=channel_id,
+            channel_name=channel.name,
+            sender_name=sender.username,
+            body=plain_text(content, attachments),
+            message_id=message_pk,
+            message_uuid=message_uuid,
+        )
         for uid in recipients:
             if not await permissions.has(uid, server_id, Permission.VIEW_CHANNEL):
+                logger.info("Push skipped for user %s: cannot view channel", uid)
                 continue
             push.track(uid, tag, message_pk)
             await push.send_to_user(uid, payload, topic=tag, urgency="high")

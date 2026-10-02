@@ -59,3 +59,8 @@ def client_error_rate_limit() -> str:
 def client_error_global_rate_limit() -> str:
     """Overall limit for POST /api/client-errors across all clients."""
     return os.getenv("CLIENT_ERROR_GLOBAL_RATE_LIMIT", "300/hour")
+
+
+def push_test_rate_limit() -> str:
+    """Per-IP limit for POST /api/push/test."""
+    return os.getenv("PUSH_TEST_RATE_LIMIT", "10/minute")

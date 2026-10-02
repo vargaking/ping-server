@@ -124,6 +124,11 @@ MEDIA_BASE_URL=/media
 # Signs short-lived attachment download links. Use a different value per env.
 # Generate: python -c "import secrets; print(secrets.token_urlsafe(32))"
 ATTACHMENT_URL_KEY=<generated secret, 32+ bytes>
+# Web Push keys: generate with `python -m app.scripts.gen_vapid`.
+VAPID_PUBLIC_KEY=...
+VAPID_PRIVATE_KEY=...
+# Optional: defaults to the first https origin above. Bare https://host or mailto:you@example.com.
+VAPID_SUBJECT=https://dpkchat.vercel.app
 GUNICORN_BIND=127.0.0.1:8000   # 8001 for staging
 DEBUG=false
 EOF
