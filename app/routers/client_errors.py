@@ -8,6 +8,7 @@ from pydantic import BaseModel, Field
 from ..middleware import get_optional_user
 from ..models.User import User
 from ..rate_limit import limiter
+from ..services.error_counter import client_errors
 from ..settings import client_error_global_rate_limit, client_error_rate_limit
 
 router = APIRouter(prefix="/api/client-errors", tags=["client-errors"])
@@ -44,6 +45,7 @@ async def report_client_error(
     request: Request,
     user: Optional[User] = Depends(get_optional_user),
 ) -> Response:
+    client_errors.record()
     user_agent = request.headers.get("user-agent", "")[:MAX_USER_AGENT_LENGTH]
     logger.warning(
         "client_error kind=%s user_id=%s url=%s line=%s col=%s ua=%s message=%s stack=%s",

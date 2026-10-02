@@ -10,6 +10,7 @@ class User(models.Model):
     profile = fields.JSONField(default=dict)
     password_hash = fields.TextField()
     is_platform_admin = fields.BooleanField(default=False)
+    last_active_at = fields.DatetimeField(null=True, db_index=True)
 
     def set_password(self, password: str):
         salt = bcrypt.gensalt()
