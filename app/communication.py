@@ -8,6 +8,7 @@ from app.services.connection_manager import ConnectionManager
 from app.services.chat_service import ChatService
 from app.ws_schemas import (
     ActivityFrame,
+    PingFrame,
     ConnectionInitFrame,
     DirectMessageFrame,
     DisconnectFrame,
@@ -84,7 +85,9 @@ class Communication:
             await self._send_error(websocket, "invalid_frame", ref)
             return
 
-        if isinstance(frame, ConnectionInitFrame):
+        if isinstance(frame, PingFrame):
+            await websocket.send_json({"type": "pong", "t": frame.t})
+        elif isinstance(frame, ConnectionInitFrame):
             # Legacy frame: registration now happens at handshake. Older
             # frontends still send it, so answer with a fresh presence snapshot
             # instead of erroring.

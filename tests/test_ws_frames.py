@@ -101,6 +101,37 @@ def test_bad_activity_frame_is_rejected_and_socket_stays_open(two_members, frame
         assert_chat_still_works(alice, bob, server, channel)
 
 
+def test_ping_is_answered_with_a_pong_echoing_t(two_members):
+    alice_ws, bob_ws, server, channel = open_sockets(two_members)
+    with alice_ws as alice, bob_ws as bob:
+        ws_ready(alice)
+        ws_ready(bob)
+        alice.receive_json()
+
+        alice.send_json({"type": "ping", "t": 12345.5})
+        assert alice.receive_json() == {"type": "pong", "t": 12345.5}
+
+        assert_chat_still_works(alice, bob, server, channel)
+
+
+@pytest.mark.parametrize("frame", [
+    {"type": "ping", "t": "x"},
+    {"type": "ping"},
+])
+def test_bad_ping_is_rejected_and_socket_stays_open(two_members, frame):
+    alice_ws, bob_ws, server, channel = open_sockets(two_members)
+    with alice_ws as alice, bob_ws as bob:
+        ws_ready(alice)
+        ws_ready(bob)
+        alice.receive_json()
+
+        alice.send_json(frame)
+        assert alice.receive_json() == INVALID_FRAME
+
+        alice.send_json({"type": "ping", "t": 1})
+        assert alice.receive_json() == {"type": "pong", "t": 1}
+
+
 def frame_of_size(server_id, channel_id, size):
     """A valid chat frame whose serialized form is exactly *size* bytes."""
     frame = {

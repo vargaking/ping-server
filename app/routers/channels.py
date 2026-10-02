@@ -410,8 +410,14 @@ async def delete_channel(
         server = await Server.get(id=server.id)
         server_settings = server.server_settings or {}
         order = server_settings.get("channel_order")
+        changed = False
         if order and channel_id in order:
             server_settings["channel_order"] = [cid for cid in order if cid != channel_id]
+            changed = True
+        if server_settings.get("default_channel_id") == channel_id:
+            del server_settings["default_channel_id"]
+            changed = True
+        if changed:
             server.server_settings = server_settings
             await server.save(update_fields=["server_settings"])
 

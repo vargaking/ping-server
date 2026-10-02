@@ -1,5 +1,5 @@
 """Server name validation and the server_updated / server_deleted frames."""
-from tests.conftest import ORIGIN, create_server, register, ws_ready
+from tests.conftest import ORIGIN, create_channel, create_server, register, ws_ready
 
 HEADERS = {"origin": ORIGIN}
 PNG_1PX = bytes.fromhex(
@@ -189,3 +189,101 @@ def test_delete_image_keeps_text_icon(client):
     fetched = client.get(f"/servers/{server['id']}").json()
     assert "icon" not in fetched["server_profile"]
     assert client.delete(f"/servers/{server['id']}/icon").status_code == 200
+
+
+def test_profile_and_settings_updates_merge(client):
+    register(client)
+    server = create_server(client)
+    sid = server["id"]
+    client.post(f"/servers/{sid}/icon", files={"file": ("icon.png", PNG_1PX, "image/png")})
+    client.put(f"/servers/{sid}", json={"server_settings": {"channel_order": [1, 2]}})
+
+    res = client.put(f"/servers/{sid}", json={
+        "server_profile": {"welcome_message": "  Hello there  "},
+        "server_settings": {"default_channel_id": None},
+    })
+    assert res.status_code == 200, res.text
+    body = client.get(f"/servers/{sid}").json()
+    assert body["server_profile"]["welcome_message"] == "Hello there"
+    assert body["server_profile"]["icon"]
+    assert body["server_settings"]["channel_order"] == [1, 2]
+
+    res = client.put(f"/servers/{sid}", json={"server_profile": {"welcome_message": None}})
+    assert "welcome_message" not in res.json()["server_profile"]
+    assert res.json()["server_profile"]["icon"]
+    res = client.put(f"/servers/{sid}", json={"server_profile": {"welcome_message": "x"}})
+    res = client.put(f"/servers/{sid}", json={"server_profile": {"welcome_message": "   "}})
+    assert "welcome_message" not in res.json()["server_profile"]
+
+
+def test_icon_cannot_be_set_through_profile(client):
+    register(client)
+    server = create_server(client)
+    sid = server["id"]
+    res = client.put(f"/servers/{sid}", json={"server_profile": {"icon": "https://evil/x.png"}})
+    assert res.status_code == 200, res.text
+    assert "icon" not in res.json()["server_profile"]
+
+    uploaded = client.post(f"/servers/{sid}/icon",
+                           files={"file": ("icon.png", PNG_1PX, "image/png")}).json()
+    res = client.put(f"/servers/{sid}", json={"server_profile": {"icon": None}})
+    assert res.json()["server_profile"]["icon"] == uploaded["server_profile"]["icon"]
+
+
+def test_welcome_message_validation(client):
+    register(client)
+    sid = create_server(client)["id"]
+    ok = client.put(f"/servers/{sid}", json={"server_profile": {"welcome_message": "x" * 1000}})
+    assert ok.status_code == 200, ok.text
+    for bad in ("x" * 1001, 5, ["hi"]):
+        res = client.put(f"/servers/{sid}", json={"server_profile": {"welcome_message": bad}})
+        assert res.status_code == 422, (bad, res.text)
+    assert client.get(f"/servers/{sid}").json()["server_profile"]["welcome_message"] == "x" * 1000
+
+
+def test_default_channel_must_be_a_text_channel_of_the_server(client):
+    register(client)
+    sid = create_server(client)["id"]
+    other_sid = create_server(client, "Other")["id"]
+    text = create_channel(client, sid, "general")
+    voice = create_channel(client, sid, "lounge", "voice")
+    foreign = create_channel(client, other_sid, "elsewhere")
+
+    for bad in (voice["id"], foreign["id"], 99999, "1", True):
+        res = client.put(f"/servers/{sid}", json={"server_settings": {"default_channel_id": bad}})
+        assert res.status_code == 422, (bad, res.text)
+
+    res = client.put(f"/servers/{sid}", json={"server_settings": {"default_channel_id": text["id"]}})
+    assert res.status_code == 200, res.text
+    settings = client.get(f"/servers/{sid}").json()["server_settings"]
+    assert settings["default_channel_id"] == text["id"]
+    assert settings["channel_order"] == [text["id"], voice["id"]]
+
+    client.put(f"/servers/{sid}", json={"server_settings": {"default_channel_id": None}})
+    assert "default_channel_id" not in client.get(f"/servers/{sid}").json()["server_settings"]
+
+
+def test_deleting_the_default_channel_clears_it(client):
+    register(client)
+    sid = create_server(client)["id"]
+    keep = create_channel(client, sid, "keep")
+    default = create_channel(client, sid, "default")
+    client.put(f"/servers/{sid}", json={"server_settings": {"default_channel_id": default["id"]}})
+
+    assert client.delete(f"/channels/{keep['id']}").status_code == 204
+    assert client.get(f"/servers/{sid}").json()["server_settings"]["default_channel_id"] == default["id"]
+
+    assert client.delete(f"/channels/{default['id']}").status_code == 204
+    assert "default_channel_id" not in client.get(f"/servers/{sid}").json()["server_settings"]
+
+
+def test_welcome_and_landing_need_manage_server(client, new_client):
+    register(client, "alice-wm")
+    sid = create_server(client)["id"]
+    bob = new_client()
+    register(bob, "bob-wm")
+    _join(client, bob, sid)
+
+    res = bob.put(f"/servers/{sid}", json={"server_profile": {"welcome_message": "hi"}})
+    assert res.status_code == 403
+    assert "welcome_message" not in client.get(f"/servers/{sid}").json()["server_profile"]

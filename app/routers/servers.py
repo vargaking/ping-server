@@ -25,6 +25,20 @@ from .users import UserResponse
 
 router = APIRouter(prefix="/servers", tags=["servers"])
 
+SERVER_NAME_MAX = 100
+WELCOME_MESSAGE_MAX = 1000
+
+
+def _clean_name(value: Optional[str]) -> Optional[str]:
+    if value is None:
+        return None
+    value = value.strip()
+    if not value:
+        raise ValueError("Server name can't be empty")
+    if len(value) > SERVER_NAME_MAX:
+        raise ValueError(f"Server name must be at most {SERVER_NAME_MAX} characters")
+    return value
+
 
 class ServerCreate(BaseModel):
     name: str
@@ -207,6 +221,47 @@ def _is_channel_reorder(update_data: dict) -> bool:
     )
 
 
+def _merge_json(current: Optional[dict], incoming: dict) -> dict:
+    """Incoming keys overwrite, absent keys stay, null removes."""
+    merged = dict(current or {})
+    for key, value in incoming.items():
+        if value is None:
+            merged.pop(key, None)
+        else:
+            merged[key] = value
+    return merged
+
+
+def _clean_profile_update(profile: dict) -> dict:
+    # The icon has its own upload and delete endpoints.
+    profile = {key: value for key, value in profile.items() if key != "icon"}
+    message = profile.get("welcome_message")
+    if message is not None:
+        if not isinstance(message, str):
+            raise HTTPException(status_code=422, detail="Welcome message must be text")
+        message = message.strip()
+        if len(message) > WELCOME_MESSAGE_MAX:
+            raise HTTPException(
+                status_code=422,
+                detail=f"Welcome message must be at most {WELCOME_MESSAGE_MAX} characters",
+            )
+        profile["welcome_message"] = message or None
+    return profile
+
+
+async def _check_default_channel(server: Server, channel_id) -> None:
+    if channel_id is None:
+        return
+    is_text_channel = (
+        isinstance(channel_id, int)
+        and not isinstance(channel_id, bool)
+        and await Channel.filter(id=channel_id, server_id=server.id, type="text").exists()
+    )
+    if not is_text_channel:
+        raise HTTPException(
+            status_code=422, detail="Default channel must be a text channel in this server")
+
+
 @router.put("/{server_id}", response_model=ServerPublicResponse)
 async def update_server(
     server_update: ServerUpdate,
@@ -224,6 +279,14 @@ async def update_server(
 
     if "name" in update_data and update_data["name"] is None:
         raise HTTPException(status_code=422, detail="Server name can't be empty")
+    if update_data.get("server_profile") is not None:
+        update_data["server_profile"] = _merge_json(
+            server.server_profile, _clean_profile_update(update_data["server_profile"]))
+    if update_data.get("server_settings") is not None:
+        incoming = update_data["server_settings"]
+        if "default_channel_id" in incoming:
+            await _check_default_channel(server, incoming["default_channel_id"])
+        update_data["server_settings"] = _merge_json(server.server_settings, incoming)
     await server.update_from_dict(update_data)
     if server.icon_text and server.icon_tone is None:
         server.icon_tone = 1
