@@ -270,6 +270,41 @@ def test_invite_list_includes_creator_username(team, client):
     assert names[team["owner"]["id"]] == team["owner"]["username"]
 
 
+def test_invite_list_mine_returns_only_the_callers_invites(team, client):
+    sid = team["server"]["id"]
+    own = client.post("/invites/", json={"server_id": sid}).json()
+    team["admin_client"].post("/invites/", json={"server_id": sid})
+    team["member_client"].post("/invites/", json={"server_id": sid})
+
+    everything = client.get(f"/invites/server/{sid}").json()
+    mine = client.get(f"/invites/server/{sid}", params={"mine": True})
+
+    assert mine.status_code == 200
+    assert {i["created_by_id"] for i in everything} > {team["owner"]["id"]}
+    assert [i["id"] for i in mine.json()] == [
+        i["id"] for i in everything if i["created_by_id"] == team["owner"]["id"]]
+    assert own["id"] in [i["id"] for i in mine.json()]
+
+
+def test_invite_list_mine_for_a_create_invite_only_member(team):
+    member, sid = team["member_client"], team["server"]["id"]
+    team["admin_client"].post("/invites/", json={"server_id": sid})
+    own = member.post("/invites/", json={"server_id": sid}).json()
+
+    for params in ({}, {"mine": True}):
+        listed = member.get(f"/invites/server/{sid}", params=params)
+        assert listed.status_code == 200
+        assert [i["id"] for i in listed.json()] == [own["id"]]
+
+
+def test_invite_list_needs_an_invite_permission_with_or_without_mine(team, client):
+    member, sid = team["member_client"], team["server"]["id"]
+    _deny(client, team, "No invites", Permission.CREATE_INVITE)
+
+    assert member.get(f"/invites/server/{sid}").status_code == 403
+    assert member.get(f"/invites/server/{sid}", params={"mine": True}).status_code == 403
+
+
 def test_wrong_invite_password_is_forbidden_not_unauthorized(team, new_client):
     sid = team["server"]["id"]
     invite = team["admin_client"].post(

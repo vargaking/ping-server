@@ -122,13 +122,18 @@ async def create_invite(
 async def list_server_invites(
     current_user: User = Depends(get_current_user),
     server: Server = Depends(server_from_path),
+    mine: bool = False,
 ):
-    """Every invite for holders of MANAGE_INVITES, otherwise only the caller's own."""
+    """Every invite for holders of MANAGE_INVITES, otherwise only the caller's own.
+
+    `mine` narrows the list to the caller's own invites for everyone.
+    """
     mask = await require_permission(current_user, server, Permission(0))
     invites = Invite.filter(server=server).prefetch_related("created_by")
-    if Permission.MANAGE_INVITES not in mask:
-        if Permission.CREATE_INVITE not in mask:
-            raise HTTPException(status_code=403, detail="Missing permission")
+    can_manage = Permission.MANAGE_INVITES in mask
+    if not can_manage and Permission.CREATE_INVITE not in mask:
+        raise HTTPException(status_code=403, detail="Missing permission")
+    if mine or not can_manage:
         invites = invites.filter(created_by=current_user)
     invites = await invites
     return [InviteResponse.from_invite(inv) for inv in invites]
