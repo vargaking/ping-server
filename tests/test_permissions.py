@@ -392,6 +392,24 @@ def test_channel_reorder_needs_only_manage_channels(team, client):
     assert member_res.status_code == 403
 
 
+def test_channel_reorder_still_works_with_a_default_channel_set(team, client):
+    admin, sid = team["admin_client"], team["server"]["id"]
+    channel_id = team["channel"]["id"]
+    second = create_channel(client, sid, "second")
+    res = client.put(f"/servers/{sid}", json={"server_settings": {"default_channel_id": channel_id}})
+    assert res.status_code == 200, res.text
+
+    order = [second["id"], channel_id]
+    res = admin.put(f"/servers/{sid}", json={"server_settings": {"channel_order": order}})
+    assert res.status_code == 200, res.text
+    settings = client.get(f"/servers/{sid}").json()["server_settings"]
+    assert settings["channel_order"] == order
+    assert settings["default_channel_id"] == channel_id
+
+    res = admin.put(f"/servers/{sid}", json={"server_settings": {"default_channel_id": None}})
+    assert res.status_code == 403
+
+
 def test_moderators_delete_other_peoples_messages_but_members_do_not(team, client):
     sid, cid = team["server"]["id"], team["channel"]["id"]
     member_client, admin_client = team["member_client"], team["admin_client"]
