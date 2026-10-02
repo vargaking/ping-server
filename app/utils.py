@@ -34,6 +34,13 @@ async def lifespan(app: FastAPI):
     except Exception:
         logger.warning("Failed to prune expired tokens on startup", exc_info=True)
 
+    try:
+        # Imported here because the push service imports models that import this module.
+        from .services.push import push
+        push.configure()
+    except Exception:
+        logger.warning("Failed to configure push", exc_info=True)
+
     presence = None
     presence_task = None
     try:

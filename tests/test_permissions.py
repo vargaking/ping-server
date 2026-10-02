@@ -227,6 +227,64 @@ def test_admin_manages_invites(team):
     assert admin.delete(f"/invites/{invite_id}").status_code == 204
 
 
+def test_creator_edits_and_revokes_own_invite_without_manage_invites(team):
+    member, sid = team["member_client"], team["server"]["id"]
+    own = member.post("/invites/", json={"server_id": sid}).json()
+    assert own["created_by_username"] == team["member"]["username"]
+
+    updated = member.put(f"/invites/{own['id']}", json={"max_uses": 3, "valid_until": None})
+    assert updated.status_code == 200, updated.text
+    assert updated.json()["max_uses"] == 3
+    assert updated.json()["created_by_username"] == team["member"]["username"]
+    cleared = member.put(f"/invites/{own['id']}", json={"max_uses": None})
+    assert cleared.json()["max_uses"] is None
+    assert member.delete(f"/invites/{own['id']}").status_code == 204
+    assert member.delete(f"/invites/{own['id']}").status_code == 404
+
+
+def test_creator_cannot_touch_another_members_invite(team):
+    member, admin, sid = team["member_client"], team["admin_client"], team["server"]["id"]
+    admins_invite = admin.post("/invites/", json={"server_id": sid}).json()
+
+    assert member.put(f"/invites/{admins_invite['id']}", json={"max_uses": 1}).status_code == 403
+    assert member.delete(f"/invites/{admins_invite['id']}").status_code == 403
+
+
+def test_creator_who_lost_create_invite_cannot_edit_their_invite(team, client):
+    member, sid = team["member_client"], team["server"]["id"]
+    own = member.post("/invites/", json={"server_id": sid}).json()
+
+    _deny(client, team, "No invites", Permission.CREATE_INVITE)
+
+    assert member.put(f"/invites/{own['id']}", json={"max_uses": 1}).status_code == 403
+    assert member.delete(f"/invites/{own['id']}").status_code == 403
+
+
+def test_invite_list_includes_creator_username(team, client):
+    sid = team["server"]["id"]
+    team["member_client"].post("/invites/", json={"server_id": sid})
+
+    listed = client.get(f"/invites/server/{sid}").json()
+    names = {i["created_by_id"]: i["created_by_username"] for i in listed}
+    assert names[team["member"]["id"]] == team["member"]["username"]
+    assert names[team["owner"]["id"]] == team["owner"]["username"]
+
+
+def test_wrong_invite_password_is_forbidden_not_unauthorized(team, new_client):
+    sid = team["server"]["id"]
+    invite = team["admin_client"].post(
+        "/invites/", json={"server_id": sid, "password": "hunter2"}).json()
+    joiner = new_client()
+    register(joiner)
+
+    missing = joiner.post(f"/invites/{invite['id']}/use", json={})
+    assert (missing.status_code, missing.json()["detail"]) == (403, "Password required")
+    wrong = joiner.post(f"/invites/{invite['id']}/use", json={"password": "nope"})
+    assert (wrong.status_code, wrong.json()["detail"]) == (403, "Incorrect password")
+    assert joiner.post(
+        f"/invites/{invite['id']}/use", json={"password": "hunter2"}).status_code == 200
+
+
 def test_admin_kicks_a_member(team, client):
     sid = team["server"]["id"]
     res = team["admin_client"].delete(f"/servers/{sid}/members/{team['member']['id']}")
@@ -288,7 +346,8 @@ def test_member_is_limited_to_reading_chatting_and_own_invites(team, client):
 
     assert member.put(f"/invites/{owners_invite['id']}", json={"is_active": False}).status_code == 403
     assert member.delete(f"/invites/{owners_invite['id']}").status_code == 403
-    assert member.delete(f"/invites/{own.json()['id']}").status_code == 403
+    assert member.put(f"/invites/{own.json()['id']}", json={"max_uses": 5}).json()["max_uses"] == 5
+    assert member.delete(f"/invites/{own.json()['id']}").status_code == 204
 
 
 def test_non_members_get_403_or_404_never_data(team, new_client):
