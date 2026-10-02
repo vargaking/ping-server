@@ -101,7 +101,9 @@ sudo chgrp -R ping "$DIR" && sudo chmod -R g+rwX "$DIR"
 
 ### 4. `.env` per environment
 
-`.env` is **not** in git. Create one in each env directory. The key difference
+`.env` is **not** in git. Create one in each env directory.
+[`.env.example`](.env.example) lists every variable; the block below is the
+production minimum plus voice and push. The key difference
 is `GUNICORN_BIND` (port) — and for staging, remember it points at the **same**
 `DB_CONNECTION_STRING` as production.
 
@@ -124,11 +126,15 @@ MEDIA_BASE_URL=/media
 # Signs short-lived attachment download links. Use a different value per env.
 # Generate: python -c "import secrets; print(secrets.token_urlsafe(32))"
 ATTACHMENT_URL_KEY=<generated secret, 32+ bytes>
-# Web Push keys: generate with `python -m app.scripts.gen_vapid`.
-VAPID_PUBLIC_KEY=...
-VAPID_PRIVATE_KEY=...
-# Optional: defaults to the first https origin above. Bare https://host or mailto:you@example.com.
-VAPID_SUBJECT=https://dpkchat.vercel.app
+# Voice (LiveKit). Voice is off unless all three are set.
+LIVEKIT_URL=wss://livekit.example.com
+LIVEKIT_API_KEY=<livekit api key>
+LIVEKIT_API_SECRET=<livekit api secret>
+# Web Push, see "Web Push (VAPID)" below. Push is off unless all three are set.
+VAPID_PUBLIC_KEY=<generated>
+VAPID_PRIVATE_KEY=<generated>
+VAPID_SUBJECT=mailto:you@example.com
+LOG_DIR=/opt/ping-server-$ENV/logs
 GUNICORN_BIND=127.0.0.1:8000   # 8001 for staging
 DEBUG=false
 EOF
@@ -141,6 +147,19 @@ chmod 600 /opt/ping-server-$ENV/.env
 > and always anchor it on the team slug (`-vargakings-projects.vercel.app`): a
 > bare `.vercel.app` pattern would let anyone's deployment reach the API with
 > credentials. The regex covers both CORS and the `/ws` handshake.
+
+### Web Push (VAPID)
+
+Generate the keys once, from the env directory:
+
+```bash
+./venv/bin/python -m app.scripts.gen_vapid
+```
+
+Put all three `VAPID_*` lines in `.env` and keep them stable. **Rotating the
+keys kills every existing push subscription**: users have to turn "Notify me
+when Zeta is closed" off and on again. Details are in the README's
+[Web Push](README.md#web-push) section. The keys were set on 30 Sep.
 
 ### 5. systemd (template unit)
 
@@ -211,6 +230,27 @@ Repo → **Settings → Secrets and variables → Actions**:
 - **Manual (+ optional migration on staging):** Actions → *Deploy ping-server* →
   Run workflow → pick branch, optionally check **Run migrations**.
 
+## Frontend (Vercel)
+
+The frontend deploys from ping-frontend's `master` on Vercel.
+`adapter-auto` resolves to `adapter-vercel`, which is enough for the one SSR
+route (`/invite/[code]`, used for link previews). If the frontend is ever
+served from the homelab instead, it needs `adapter-node`.
+
+Vercel env vars:
+
+- `PUBLIC_BASE_URL` and `PUBLIC_WS_URL`: where the browser reaches the API.
+- `API_URL`: the absolute, publicly reachable API base that the invite-preview
+  server load fetches from (once the invite-preview PR is merged). Never a
+  homelab-internal host: the load runs on Vercel.
+
+## Merge and deploy order
+
+WS/API contract changes ship server first, frontend second. Frontend merges
+auto-deploy on Vercel, so merge order is deploy order. Migrations run on the
+production deploy via `aerich upgrade`; staging skips them by default (see the
+staging warning under [How it works](#how-it-works)).
+
 ## Rollback
 
 ```bash
@@ -231,3 +271,50 @@ tail -f /opt/ping-server-production/logs/app.log  # same app logs, in a file
 # lines look like: <time> <LEVEL> [logger] [request_id] message
 sudo systemctl restart ping-server@staging
 ```
+
+Client crash reports (`POST /api/client-errors`) are logged under the
+`app.client` logger into the same app log (`logs/app.log` and journald). To
+find them: `grep app.client /opt/ping-server-production/logs/app.log`. There is
+no external service.
+
+## Alpha checklist
+
+To be ticked by hand on the real box. Nothing here has been checked yet.
+
+- [ ] Single Gunicorn worker: `GUNICORN_WORKERS` unset or `1`. Check: `ps -ef | grep gunicorn` shows one worker under the master.
+- [ ] `LIVEKIT_URL`, `LIVEKIT_API_KEY`, `LIVEKIT_API_SECRET` set; voice joins work.
+- [ ] TURN reachable from a typical home network **and** from a phone on mobile data (not just home Wi-Fi): audio both ways.
+- [ ] HTTPS on API and client, `DEBUG=false`, and the session cookie arrives as `SameSite=None; Secure`. Check in a real browser: devtools, Application, Cookies.
+- [ ] `ALLOWED_ORIGINS` / `ALLOWED_ORIGIN_REGEX` from env cover the prod frontend (and previews if wanted). A WS connect from the prod origin succeeds.
+- [ ] VAPID keys set and stable; the push toggle shows in the app; a DM to a closed tab arrives.
+- [ ] `ATTACHMENT_URL_KEY` set (32+ bytes). Check: open an attachment link, restart the service, request a fresh link; no `ATTACHMENT_URL_KEY unset` warning in the log.
+- [ ] Nightly Postgres backup, plus a backup of `MEDIA_ROOT` and `ATTACHMENTS_ROOT`. Sample root crontab (placeholder paths):
+
+  ```cron
+  15 3 * * * pg_dump -Fc "$DB_URL" > /var/backups/ping/db-$(date +\%F).dump
+  30 3 * * * tar -czf /var/backups/ping/files-$(date +\%F).tgz /opt/ping-server-production/uploads /opt/ping-server-production/attachments
+  ```
+
+  Delete old dumps on a schedule too, and copy them off the box.
+- [ ] Restore test: last night's dump loads into a scratch DB and has yesterday's messages.
+
+  ```bash
+  createdb ping_restore_test
+  pg_restore -d ping_restore_test /var/backups/ping/db-<date>.dump
+  psql ping_restore_test -c "select count(*) from messages where created_at > now() - interval '1 day'"
+  dropdb ping_restore_test
+  ```
+
+- [ ] Crash reports land in the app log: trigger one from the browser console, then `grep app.client` the log.
+- [ ] Frontend: Vercel env (`PUBLIC_*`, `API_URL`) set. Check: `curl -s https://<frontend>/invite/<code>/ | grep og:` shows tags.
+- [ ] Branch protection on `master` and `staging` in both repos (require PR, require CI). `deploy.yml` runs only on push to `master`/`staging` and `workflow_dispatch`, never `pull_request`; fork-PR workflows need approval.
+- [ ] `.env.example` in both repos matches what prod actually sets.
+
+Smoke test, from a fresh browser on another network:
+
+- [ ] Register a new account.
+- [ ] Join a server via an invite link.
+- [ ] Send a message.
+- [ ] Join voice with a second person on mobile data.
+
+Checked on: ____ by ____
