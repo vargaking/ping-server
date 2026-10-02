@@ -12,7 +12,7 @@ from urllib.parse import urlparse
 
 import requests
 from cryptography.hazmat.primitives.serialization import Encoding, PublicFormat
-from py_vapid import Vapid
+from py_vapid import Vapid, _check_sub
 from pywebpush import WebPushException, webpush
 
 from app.models.PushSubscription import PushSubscription
@@ -252,6 +252,32 @@ def load_private_key(value: str) -> Vapid:
     return Vapid.from_string(value)
 
 
+def normalize_subject(value: str) -> str:
+    """A VAPID subject in the one shape push services accept: https URLs lose
+    their path, query, userinfo and port; mailto: and anything else is kept."""
+    value = value.strip()
+    if not value.lower().startswith("https://"):
+        return value
+    try:
+        host = urlparse(value).hostname
+    except ValueError:
+        return value
+    return f"https://{host}" if host else value
+
+
+def is_valid_subject(value: str) -> bool:
+    return bool(_check_sub(value))
+
+
+def default_subject() -> str | None:
+    """The app's public URL: the first https origin in ALLOWED_ORIGINS."""
+    for origin in os.getenv("ALLOWED_ORIGINS", "").split(","):
+        origin = origin.strip()
+        if origin.lower().startswith("https://"):
+            return origin
+    return None
+
+
 class PushService:
     """Sends Web Push messages to a user's subscribed browsers."""
 
@@ -261,34 +287,57 @@ class PushService:
         # In memory and single-process, like the permission cache; a restart
         # only means an outstanding notification isn't closed by a read.
         self._pushed: dict[tuple[int, str], int] = {}
-        self.configure()
+        self.configure(log=False)
 
-    def configure(self) -> None:
+    def configure(self, *, log: bool = True) -> None:
         """(Re)read the VAPID settings from the environment. Push stays
-        disabled unless all three are set and usable."""
+        disabled unless both keys are usable and the subject is valid."""
         self._vapid: Vapid | None = None
         self.public_key: str | None = None
         self.subject: str | None = None
+        self.disabled_reason: str | None = None
 
         public_key = os.getenv("VAPID_PUBLIC_KEY", "").strip()
         private_key = os.getenv("VAPID_PRIVATE_KEY", "").strip()
-        subject = os.getenv("VAPID_SUBJECT", "").strip()
-        if not (public_key and private_key and subject):
+        if not (public_key and private_key):
+            self.disabled_reason = "VAPID keys not set"
             return
+
+        def disable(reason: str, message: str, *args) -> None:
+            self.disabled_reason = reason
+            if log:
+                logger.error(message, *args)
+
         try:
             vapid = load_private_key(private_key)
         except Exception:
-            logger.error("VAPID_PRIVATE_KEY is not a usable key; push disabled")
+            disable("invalid VAPID keys", "VAPID_PRIVATE_KEY is not a usable key; push disabled")
             return
         if public_key_b64(vapid) != public_key.rstrip("="):
-            logger.error("VAPID_PUBLIC_KEY does not match VAPID_PRIVATE_KEY; push disabled")
+            disable(
+                "invalid VAPID keys",
+                "VAPID_PUBLIC_KEY does not match VAPID_PRIVATE_KEY; push disabled")
             return
-        if not subject.startswith(("mailto:", "https://")):
-            logger.error("VAPID_SUBJECT must be a mailto: or https:// URL; push disabled")
+
+        configured = os.getenv("VAPID_SUBJECT", "").strip()
+        subject = normalize_subject(configured or default_subject() or "")
+        if not is_valid_subject(subject):
+            if configured:
+                disable(
+                    "invalid VAPID subject",
+                    "VAPID_SUBJECT is missing or invalid (%r); it must be mailto:<address> "
+                    "or https://<host>. Push disabled", configured)
+            else:
+                disable(
+                    "invalid VAPID subject",
+                    "VAPID_SUBJECT is unset and ALLOWED_ORIGINS has no https origin; it must "
+                    "be mailto:<address> or https://<host>. Push disabled")
             return
         self._vapid = vapid
         self.public_key = public_key
         self.subject = subject
+        if log:
+            logger.info("Push enabled; VAPID subject %s", self.subject)
 
     @property
     def enabled(self) -> bool:
