@@ -22,6 +22,7 @@ __all__ = [
     "MessageFrame",
     "DirectMessageFrame",
     "ActivityFrame",
+    "PingFrame",
     "WSFrame",
     "parse_frame",
     "ValidationError",
@@ -91,10 +92,15 @@ class ActivityFrame(BaseModel):
     state: Literal["active", "idle"]
 
 
+class PingFrame(BaseModel):
+    type: Literal["ping"]
+    t: float = Field(allow_inf_nan=False)
+
+
 WSFrame = Annotated[
     Union[
         ConnectionInitFrame, DisconnectFrame, MessageFrame, DirectMessageFrame,
-        ActivityFrame,
+        ActivityFrame, PingFrame,
     ],
     Field(discriminator="type"),
 ]
