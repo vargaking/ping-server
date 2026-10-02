@@ -12,7 +12,8 @@ from .Token import Token
 from .Invite import Invite
 from .ReadState import ReadState
 from .PushSubscription import PushSubscription
+from .ServerRequest import ServerRequest
 
 __all__ = ["Role", "User", "Server", "RoleToUser", "UserToServer",
            "Channel", "Conversation", "Message", "Token", "Invite", "ReadState",
-           "Attachment", "Reaction", "PushSubscription"]
+           "Attachment", "Reaction", "PushSubscription", "ServerRequest"]

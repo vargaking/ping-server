@@ -59,6 +59,7 @@ The interactive API docs are then at http://localhost:8000/docs.
 | `VAPID_PUBLIC_KEY`, `VAPID_PRIVATE_KEY` | for push | — | Web Push signing keys. Push is off unless both are set. See "Web Push". |
 | `VAPID_SUBJECT` | no | first `https://` origin in `ALLOWED_ORIGINS` | Push contact: `https://host` or `mailto:you@example.com`. See "Web Push". |
 | `PUSH_EXTRA_HOSTS` | no | *(empty)* | Comma-separated extra push-service hosts (suffix match), for tests or self-hosted push. |
+| `SERVER_CREATION` | no | `open` | `open` lets anyone create servers. `waitlist` limits creation to platform admins; everyone else submits a request. Grant admin with `python -m app.scripts.platform_admin <username> --grant`. |
 
 > Session tokens expire 30 days after login/register; expired tokens are
 > rejected and deleted on next use, and pruned on startup.

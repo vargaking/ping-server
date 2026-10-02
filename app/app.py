@@ -12,7 +12,7 @@ from tortoise.contrib.fastapi import register_tortoise
 from app.communication import WS_CLOSE_UNAUTHENTICATED, Communication
 from app.db import TORTOISE_CONFIG
 from app.rate_limit import limiter
-from app.routers import attachments, auth, channels, client_errors, conversations, invites, messages, push, servers, users, voice
+from app.routers import attachments, auth, channels, client_errors, conversations, invites, messages, push, server_requests, servers, users, voice
 from app.settings import ALLOWED_ORIGINS, ALLOWED_ORIGIN_REGEX, is_origin_allowed
 from app.utils import lifespan
 from app.ws_schemas import FrameDecodeError, decode_frame
@@ -54,6 +54,7 @@ app.middleware("http")(auth_middleware)
 app.include_router(auth.router)
 app.include_router(users.router)
 app.include_router(servers.router)
+app.include_router(server_requests.router)
 app.include_router(channels.router)
 app.include_router(conversations.router)
 app.include_router(messages.router)
