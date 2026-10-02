@@ -130,10 +130,11 @@ ATTACHMENT_URL_KEY=<generated secret, 32+ bytes>
 LIVEKIT_URL=wss://livekit.example.com
 LIVEKIT_API_KEY=<livekit api key>
 LIVEKIT_API_SECRET=<livekit api secret>
-# Web Push, see "Web Push (VAPID)" below. Push is off unless all three are set.
-VAPID_PUBLIC_KEY=<generated>
-VAPID_PRIVATE_KEY=<generated>
-VAPID_SUBJECT=mailto:you@example.com
+# Web Push keys: generate with `python -m app.scripts.gen_vapid`.
+VAPID_PUBLIC_KEY=...
+VAPID_PRIVATE_KEY=...
+# Optional: defaults to the first https origin above. Bare https://host or mailto:you@example.com.
+VAPID_SUBJECT=https://dpkchat.vercel.app
 LOG_DIR=/opt/ping-server-$ENV/logs
 GUNICORN_BIND=127.0.0.1:8000   # 8001 for staging
 DEBUG=false
@@ -156,7 +157,8 @@ Generate the keys once, from the env directory:
 ./venv/bin/python -m app.scripts.gen_vapid
 ```
 
-Put all three `VAPID_*` lines in `.env` and keep them stable. **Rotating the
+Put the two keys in `.env` (and `VAPID_SUBJECT` if the default, the first https
+origin in `ALLOWED_ORIGINS`, isn't right) and keep them stable. **Rotating the
 keys kills every existing push subscription**: users have to turn "Notify me
 when Zeta is closed" off and on again. Details are in the README's
 [Web Push](README.md#web-push) section. The keys were set on 30 Sep.

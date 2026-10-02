@@ -7,6 +7,7 @@ from app.services.permissions import permissions
 from app.services.connection_manager import ConnectionManager
 from app.services.chat_service import ChatService
 from app.ws_schemas import (
+    ActivityFrame,
     ConnectionInitFrame,
     DirectMessageFrame,
     DisconnectFrame,
@@ -94,6 +95,8 @@ class Communication:
             await self.chat_service.handle_message(user_id, frame, websocket)
         elif isinstance(frame, DirectMessageFrame):
             await self.chat_service.handle_direct_message(user_id, frame, websocket)
+        elif isinstance(frame, ActivityFrame):
+            self.connection_manager.set_activity(websocket, frame.state == "active")
 
     async def reject_frame(self, websocket: WebSocket, reason: str) -> None:
         """Answer a frame that could not even be decoded; the socket stays open."""

@@ -120,3 +120,20 @@ def check_permission(
         return server
 
     return dependency
+
+
+async def manage_invite(
+    current_user: User = Depends(get_current_user),
+    invite: Invite = Depends(invite_from_path),
+    server: Server = Depends(server_of_invite),
+) -> Invite:
+    """Let MANAGE_INVITES holders and an invite's creator (while they still
+    hold CREATE_INVITE) edit or revoke it."""
+    if invite.created_by_id == current_user.id:
+        try:
+            await require_permission(current_user, server, Permission.CREATE_INVITE)
+            return invite
+        except HTTPException:
+            pass
+    await require_permission(current_user, server, Permission.MANAGE_INVITES)
+    return invite
