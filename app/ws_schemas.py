@@ -8,8 +8,9 @@ identity anyway — see ChatService), but the known fields must be well-typed.
 """
 import json
 from typing import Annotated, Any, Literal, Union
+from urllib.parse import urlsplit
 
-from pydantic import BaseModel, Field, TypeAdapter, ValidationError
+from pydantic import AfterValidator, BaseModel, Field, TypeAdapter, ValidationError
 
 from app.services.attachments import MAX_ATTACHMENTS_PER_MESSAGE
 
@@ -21,6 +22,7 @@ __all__ = [
     "DisconnectFrame",
     "MessageFrame",
     "DirectMessageFrame",
+    "EmbedIn",
     "ActivityFrame",
     "WSFrame",
     "parse_frame",
@@ -61,6 +63,33 @@ class DisconnectFrame(BaseModel):
     type: Literal["disconnect"]
 
 
+MAX_URL_LENGTH = 2048
+MAX_EMBEDS_PER_MESSAGE = 1
+
+
+def _http_url(value: str) -> str:
+    try:
+        parts = urlsplit(value)
+        hostname = parts.hostname
+    except ValueError:
+        raise ValueError("not a valid URL")
+    if parts.scheme not in ("http", "https") or not hostname:
+        raise ValueError("must be an http(s) URL")
+    return value
+
+
+HttpUrlStr = Annotated[str, Field(max_length=MAX_URL_LENGTH), AfterValidator(_http_url)]
+
+
+class EmbedIn(BaseModel):
+    """Link preview as returned by GET /unfurl and attached to a message."""
+    url: HttpUrlStr
+    site_name: str | None = Field(None, max_length=100)
+    title: str | None = Field(None, max_length=300)
+    description: str | None = Field(None, max_length=1000)
+    image_url: HttpUrlStr | None = None
+
+
 class MessageFrame(BaseModel):
     type: Literal["message"]
     id: str
@@ -72,6 +101,7 @@ class MessageFrame(BaseModel):
     metadata: dict = Field(default_factory=dict)
     attachment_ids: list[str] = Field(default_factory=list, max_length=MAX_ATTACHMENTS_PER_MESSAGE)
     reply_to: str | None = None
+    embeds: list[EmbedIn] = Field(default_factory=list, max_length=MAX_EMBEDS_PER_MESSAGE)
 
 
 class DirectMessageFrame(BaseModel):
@@ -84,6 +114,7 @@ class DirectMessageFrame(BaseModel):
     metadata: dict = Field(default_factory=dict)
     attachment_ids: list[str] = Field(default_factory=list, max_length=MAX_ATTACHMENTS_PER_MESSAGE)
     reply_to: str | None = None
+    embeds: list[EmbedIn] = Field(default_factory=list, max_length=MAX_EMBEDS_PER_MESSAGE)
 
 
 class ActivityFrame(BaseModel):

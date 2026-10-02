@@ -64,3 +64,8 @@ def client_error_global_rate_limit() -> str:
 def push_test_rate_limit() -> str:
     """Per-IP limit for POST /api/push/test."""
     return os.getenv("PUSH_TEST_RATE_LIMIT", "10/minute")
+
+
+def unfurl_rate_limit() -> str:
+    """Per-user limit for GET /unfurl."""
+    return os.getenv("UNFURL_RATE_LIMIT", "30/minute")

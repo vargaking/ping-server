@@ -32,6 +32,7 @@ os.environ.setdefault("INVITE_USE_RATE_LIMIT", "10000/minute")
 os.environ.setdefault("CLIENT_ERROR_RATE_LIMIT", "10000/minute")
 os.environ.setdefault("PUSH_TEST_RATE_LIMIT", "10000/minute")
 os.environ.setdefault("CLIENT_ERROR_GLOBAL_RATE_LIMIT", "10000/hour")
+os.environ.setdefault("UNFURL_RATE_LIMIT", "10000/minute")
 
 import pytest  # noqa: E402
 from fastapi.testclient import TestClient  # noqa: E402

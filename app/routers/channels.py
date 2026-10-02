@@ -67,6 +67,7 @@ def _serialize(
         "attachments": attachments,
         "reactions": reactions,
         "reply_to": reply_json(message["reply_to_uuid"], refs),
+        "embeds": (message["metadata"] or {}).get("embeds", []),
     }
 
 
@@ -193,6 +194,7 @@ async def get_messages(
         "timestamp",
         "edited_at",
         "reply_to_uuid",
+        "metadata",
     )
 
     return await _serialize_all(messages)
@@ -231,6 +233,7 @@ async def get_channel_messages(
         "created_at",
         "edited_at",
         "reply_to_uuid",
+        "metadata",
     )
 
     has_more = len(rows) > limit

@@ -91,7 +91,7 @@ class ChatService:
             server_id=server_id,
             channel_id=channel_id,
             timestamp=message.timestamp,
-            metadata=message.metadata,
+            metadata=self._stored_metadata(message),
             reply_to_uuid=reply_to_uuid,
         )
         if created is None:
@@ -117,6 +117,7 @@ class ChatService:
             "timestamp": message.timestamp,
             "attachments": [a.to_json() for a in attachments],
             "reactions": [],
+            "embeds": [e.model_dump() for e in message.embeds],
             "reply_to": reply_json(reply_to_uuid, refs),
         }
 
@@ -182,7 +183,7 @@ class ChatService:
             author_id=sender_id,
             conversation_id=conversation.id,
             timestamp=message.timestamp,
-            metadata=message.metadata,
+            metadata=self._stored_metadata(message),
             reply_to_uuid=reply_to_uuid,
         )
         if created is None:
@@ -206,6 +207,7 @@ class ChatService:
             "timestamp": message.timestamp,
             "attachments": [a.to_json() for a in attachments],
             "reactions": [],
+            "embeds": [e.model_dump() for e in message.embeds],
             "reply_to": reply_json(reply_to_uuid, refs),
         }
 
@@ -341,6 +343,14 @@ class ChatService:
                 return None
             attachments.append(attachment)
         return attachments
+
+    @staticmethod
+    def _stored_metadata(message: MessageFrame | DirectMessageFrame) -> dict:
+        """Client metadata with embeds replaced by the validated ones."""
+        metadata = {k: v for k, v in message.metadata.items() if k != "embeds"}
+        if message.embeds:
+            metadata["embeds"] = [e.model_dump() for e in message.embeds]
+        return metadata
 
     @staticmethod
     async def _create_message(attachments: list[Attachment], **fields) -> Message | None:

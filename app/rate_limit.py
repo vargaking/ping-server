@@ -20,3 +20,9 @@ def invite_use_key(request: Request) -> str:
     can be hammered from a pool of addresses."""
     invite_id = request.path_params.get("invite_id")
     return f"{get_remote_address(request)}:{invite_id}"
+
+
+def user_key(request: Request) -> str:
+    """Rate-limit per signed-in user, falling back to the client IP."""
+    user = getattr(request.state, "user", None)
+    return f"user:{user.id}" if user else get_remote_address(request)

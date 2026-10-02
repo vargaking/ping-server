@@ -261,6 +261,7 @@ async def get_conversation_messages(
         "created_at",
         "edited_at",
         "reply_to_uuid",
+        "metadata",
     )
 
     has_more = len(rows) > limit
@@ -303,4 +304,5 @@ def _serialize(
         "attachments": attachments,
         "reactions": reactions,
         "reply_to": reply_json(message["reply_to_uuid"], refs),
+        "embeds": (message["metadata"] or {}).get("embeds", []),
     }
