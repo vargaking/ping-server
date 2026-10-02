@@ -6,6 +6,8 @@ from contextvars import ContextVar
 from fastapi import Request
 from fastapi.responses import JSONResponse
 
+from .services.error_counter import server_5xx
+
 request_id_var: ContextVar[str] = ContextVar("request_id", default="-")
 
 _VALID_REQUEST_ID = re.compile(r"^[A-Za-z0-9-]{1,64}$")
@@ -38,5 +40,7 @@ async def request_context_middleware(request: Request, call_next):
             status_code=500,
         )
 
+    if response.status_code >= 500:
+        server_5xx.record()
     response.headers["X-Request-ID"] = request_id
     return response

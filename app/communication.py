@@ -3,6 +3,7 @@ import logging
 from fastapi import WebSocket
 
 from app.models.UserToServer import UserToServer
+from app.services.activity import touch_last_active
 from app.services.permissions import permissions
 from app.services.connection_manager import ConnectionManager
 from app.services.chat_service import ChatService
@@ -41,6 +42,7 @@ class Communication:
         presence_init snapshot, but the online presence_update only fires the
         first time the user goes from 0 to 1 sockets.
         """
+        await touch_last_active(user_id)
         was_online = self.connection_manager.is_online(user_id)
         self.connection_manager.add_connection(user_id, websocket, token)
         await self._notify_presence(user_id, online=True, websocket=websocket,
@@ -96,7 +98,10 @@ class Communication:
         elif isinstance(frame, DirectMessageFrame):
             await self.chat_service.handle_direct_message(user_id, frame, websocket)
         elif isinstance(frame, ActivityFrame):
-            self.connection_manager.set_activity(websocket, frame.state == "active")
+            active = frame.state == "active"
+            self.connection_manager.set_activity(websocket, active)
+            if active:
+                await touch_last_active(user_id)
 
     async def reject_frame(self, websocket: WebSocket, reason: str) -> None:
         """Answer a frame that could not even be decoded; the socket stays open."""
