@@ -79,7 +79,7 @@ class SendResult:
 
 
 # The service worker drops any push that is not JSON with v === 1, a string
-# tag and a kind of "dm", "mention" or "read". Every payload is built here.
+# tag and a kind of "dm", "mention", "server_request" or "read". Every payload is built here.
 def dm_tag(conversation_id: int) -> str:
     return f"dm-{conversation_id}"
 
@@ -124,6 +124,18 @@ def mention_payload(
         "mention", tag=channel_tag(channel_id), title=f"{sender_name} in #{channel_name}",
         body=body, url=f"/app/server/{server_id}/channel/{channel_id}/", count=1,
         message_id=message_id, message_uuid=message_uuid)
+
+
+def server_request_payload(*, request_id: int, server_id: int, server_name: str) -> dict:
+    return {
+        "v": PAYLOAD_VERSION,
+        "kind": "server_request",
+        "tag": f"server-request-{request_id}",
+        "title": "Your server was approved",
+        "body": server_name,
+        "url": f"/app/server/{server_id}/",
+        "sent_at": datetime.now(timezone.utc).isoformat(),
+    }
 
 
 def read_payload(tag: str) -> dict:

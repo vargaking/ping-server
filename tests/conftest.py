@@ -38,6 +38,7 @@ from fastapi.testclient import TestClient  # noqa: E402
 from starlette.testclient import WebSocketTestSession  # noqa: E402
 
 from app.app import app  # noqa: E402
+from app.services import activity  # noqa: E402
 from app.services.permissions import permissions  # noqa: E402
 
 ORIGIN = "http://localhost:5173"
@@ -55,6 +56,7 @@ def app_lifespan():
     # Ids restart with every fresh database, so masks cached by a previous
     # test would be attributed to unrelated users and servers.
     permissions.clear()
+    activity.forget_all()
     with TestClient(app) as primary:
         clients = [primary]
 

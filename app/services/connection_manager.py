@@ -56,6 +56,9 @@ class ConnectionManager:
     def is_online(self, user_id: int) -> bool:
         return bool(self.user_to_websockets.get(user_id))
 
+    def online_user_ids(self) -> list[int]:
+        return list(self.user_to_websockets)
+
     def set_activity(self, websocket: WebSocket, active: bool) -> None:
         if websocket not in self.websocket_to_user:
             return

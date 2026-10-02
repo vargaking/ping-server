@@ -16,8 +16,10 @@ from ..models.UserToServer import UserToServer
 from ..services.permissions import permissions
 from ..services.roles import seed_server_roles
 from ..services.server_icon import clean_icon_text, clean_icon_tone
+from ..services.server_name import clean_server_name
 from ..services.storage import ImageValidationError, storage_service
 from ..services.voice_presence import close_voice_channels, remove_from_voice
+from ..settings import server_creation_mode
 from ..utils import require_owner
 from .users import UserResponse
 
@@ -43,7 +45,7 @@ class ServerCreate(BaseModel):
     server_profile: dict = {}
     server_settings: dict = {}
 
-    _name = field_validator("name")(_clean_name)
+    _name = field_validator("name")(clean_server_name)
 
 
 class ServerUpdate(BaseModel):
@@ -53,7 +55,7 @@ class ServerUpdate(BaseModel):
     icon_text: Optional[str] = None
     icon_tone: Optional[int] = None
 
-    _name = field_validator("name")(_clean_name)
+    _name = field_validator("name")(clean_server_name)
     _icon_text = field_validator("icon_text")(clean_icon_text)
     _icon_tone = field_validator("icon_tone")(clean_icon_tone)
 
@@ -143,22 +145,32 @@ class MemberRolesUpdate(BaseModel):
     role_ids: List[int]
 
 
-async def _server_response(server: Server, user: User) -> ServerResponse:
+async def server_response(server: Server, user: User) -> ServerResponse:
     response = ServerResponse.from_server(server)
     mask = await permissions.effective(user.id, server)
     response.permissions = str(int(mask or 0))
     return response
 
 
+async def create_server_for(owner: User, **fields) -> Server:
+    """Create a server owned by *owner*, with the owner as its first member.
+    Call inside a transaction."""
+    server = await Server.create(**fields, owner=owner)
+    await UserToServer.create(user=owner, server=server)
+    await seed_server_roles(server)
+    return server
+
+
 @router.post("/", response_model=ServerResponse, status_code=status.HTTP_201_CREATED)
 async def create_server(server: ServerCreate, current_user: User = Depends(get_current_user)):
+    if server_creation_mode() == "waitlist" and not current_user.is_platform_admin:
+        raise HTTPException(
+            status_code=403,
+            detail="Server creation requires approval. Submit a request instead.")
     async with in_transaction():
-        server_obj = await Server.create(**server.model_dump(), owner=current_user)
-        # Automatically add the creator as a member
-        await UserToServer.create(user=current_user, server=server_obj)
-        await seed_server_roles(server_obj)
+        server_obj = await create_server_for(current_user, **server.model_dump())
     await server_obj.fetch_related('server_users__user')
-    return await _server_response(server_obj, current_user)
+    return await server_response(server_obj, current_user)
 
 
 @router.get("/", response_model=List[ServerPublicResponse])
@@ -175,7 +187,7 @@ async def get_my_servers(current_user: User = Depends(get_current_user)):
     # Return servers the current user belongs to
     user_server_relations = await UserToServer.filter(user=current_user).prefetch_related("server__server_users__user")
     servers = [relation.server for relation in user_server_relations]
-    return [await _server_response(server, current_user) for server in servers]
+    return [await server_response(server, current_user) for server in servers]
 
 
 @router.get("/{server_id}", response_model=ServerResponse)
@@ -184,7 +196,7 @@ async def get_server(
     current_user: User = Depends(get_current_user),
 ):
     await server.fetch_related('server_users__user')
-    return await _server_response(server, current_user)
+    return await server_response(server, current_user)
 
 
 async def _broadcast_server_updated(request: Request, server: Server, actor_id: int) -> None:
