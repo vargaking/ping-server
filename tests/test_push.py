@@ -5,6 +5,7 @@ retractions).
 ``push.deliver`` is the only code that touches the network; the tests replace
 it with a recorder, except the ones that point the real one at a local server.
 """
+import asyncio
 import base64
 import json
 import logging
@@ -28,13 +29,14 @@ from app.permissions import Permission
 from app.services.connection_manager import IDLE_AFTER_SECONDS, ConnectionManager
 from app.services.permissions import permissions
 from app.services.push import (
-    DeliveryResult, dm_payload, endpoint_host, is_valid_subject, mention_payload,
-    mentioned_user_ids, normalize_subject, plain_text, push, read_payload)
+    DeliveryResult, PushService, dm_payload, endpoint_host, is_valid_subject,
+    mention_payload, mentioned_user_ids, normalize_subject, plain_text, push, read_payload)
 from app.services.push import test_payload as build_test_payload
 from tests.conftest import ORIGIN, create_channel, create_server, register, ws_ready
 from tests.test_realtime_events import invite_and_join
 
 HEADERS = {"origin": ORIGIN}
+DRAIN_TIMEOUT_SECONDS = 15
 FCM = "https://fcm.googleapis.com/fcm/send/"
 
 
@@ -127,7 +129,10 @@ def run(client, awaitable):
 
 
 def drain(client):
-    client.portal.call(push.drain)
+    async def bounded():
+        await asyncio.wait_for(push.drain(), DRAIN_TIMEOUT_SECONDS)
+
+    client.portal.call(bounded)
 
 
 def sync(ws):
@@ -736,20 +741,37 @@ def test_a_slow_push_service_does_not_hold_up_the_sender(dm_pair, push_on, monke
     release = threading.Event()
 
     async def slow(sub, payload, *, topic, urgency):
-        import asyncio
         while not release.is_set():
             await asyncio.sleep(0.01)
         return DeliveryResult(201)
 
     monkeypatch.setattr(push, "deliver", slow)
-    with dm_pair.alice_client.websocket_connect("/ws", headers=HEADERS) as ws:
-        ws_ready(ws)
-        ws.send_json(dm_frame(dm_pair.convo["id"], doc(text("hi"))))
-        sync(ws)  # returns while the push is still pending
-        assert push._tasks
+    try:
+        with dm_pair.alice_client.websocket_connect("/ws", headers=HEADERS) as ws:
+            ws_ready(ws)
+            ws.send_json(dm_frame(dm_pair.convo["id"], doc(text("hi"))))
+            sync(ws)  # returns while the push is still pending
+            assert push._tasks
+    finally:
         release.set()
     drain(dm_pair.alice_client)
     assert not push._tasks
+
+
+def test_drain_returns_when_a_finished_push_is_still_in_the_set():
+    service = PushService()
+
+    async def scenario():
+        async def noop():
+            pass
+
+        service.schedule(noop())
+        await asyncio.sleep(0)  # the task finishes; its done-callback is still queued
+        assert [task.done() for task in service._tasks] == [True]
+        await service.drain()
+
+    asyncio.run(scenario())
+    assert not service._tasks
 
 
 # -- mentions --------------------------------------------------------------

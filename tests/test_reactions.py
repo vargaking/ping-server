@@ -276,7 +276,7 @@ def test_frames_reach_members_including_the_actor(client, channel_team):
             bob_client.websocket_connect("/ws", headers=HEADERS) as bob_ws:
         ws_ready(alice_ws)
         ws_ready(bob_ws)
-        alice_ws.receive_json()  # bob online
+        recv_type(alice_ws, "presence_update")  # bob online
 
         assert client.put(react_path(mid, THUMBS_UP)).status_code == 204
         assert recv_type(alice_ws, "reaction_added") == {"type": "reaction_added", **expected}
