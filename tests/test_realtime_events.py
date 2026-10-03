@@ -84,3 +84,32 @@ def test_member_joined_broadcasts_to_existing_members(client, new_client):
         assert frame["server_id"] == server["id"]
         assert frame["member"]["id"] == carol["id"]
         assert frame["member"]["username"] == carol["username"]
+
+
+def test_creating_a_server_reaches_the_creators_other_tabs(client):
+    register(client, "maker-tabs")
+
+    with client.websocket_connect("/ws", headers=HEADERS) as other_tab:
+        ws_ready(other_tab)
+        server = create_server(client)
+
+        frame = other_tab.receive_json()
+        assert frame["type"] == "server_added"
+        assert frame["server"]["id"] == server["id"]
+        assert frame["server"]["permissions"] != "0"
+
+
+def test_joining_a_server_reaches_the_joiners_other_tabs(client, new_client):
+    register(client, "owner-tabs")
+    server = create_server(client)
+    joiner_client = new_client()
+    register(joiner_client, "joiner-tabs")
+
+    with joiner_client.websocket_connect("/ws", headers=HEADERS) as other_tab:
+        ws_ready(other_tab)
+        invite_and_join(client, joiner_client, server["id"])
+
+        frame = other_tab.receive_json()
+        assert frame["type"] == "server_added"
+        assert frame["server"]["id"] == server["id"]
+        assert frame["server"]["permissions"] != "0"

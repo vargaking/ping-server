@@ -152,6 +152,20 @@ async def server_response(server: Server, user: User) -> ServerResponse:
     return response
 
 
+async def announce_server_added(request: Request, server: Server, user: User) -> None:
+    """Tell all of *user*'s sockets about a server they now belong to, so tabs
+    other than the one that acted pick it up without a reload."""
+    comms = getattr(request.app.state, "comms", None)
+    if comms is None:
+        return
+    await server.fetch_related("server_users__user")
+    added = await server_response(server, user)
+    await comms.send_to_user(user.id, {
+        "type": "server_added",
+        "server": added.model_dump(mode="json"),
+    })
+
+
 async def create_server_for(owner: User, **fields) -> Server:
     """Create a server owned by *owner*, with the owner as its first member.
     Call inside a transaction."""
@@ -162,13 +176,18 @@ async def create_server_for(owner: User, **fields) -> Server:
 
 
 @router.post("/", response_model=ServerResponse, status_code=status.HTTP_201_CREATED)
-async def create_server(server: ServerCreate, current_user: User = Depends(get_current_user)):
+async def create_server(
+    server: ServerCreate,
+    request: Request,
+    current_user: User = Depends(get_current_user),
+):
     if server_creation_mode() == "waitlist" and not current_user.is_platform_admin:
         raise HTTPException(
             status_code=403,
             detail="Server creation requires approval. Submit a request instead.")
     async with in_transaction():
         server_obj = await create_server_for(current_user, **server.model_dump())
+    await announce_server_added(request, server_obj, current_user)
     await server_obj.fetch_related('server_users__user')
     return await server_response(server_obj, current_user)
 

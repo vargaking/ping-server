@@ -18,6 +18,7 @@ from ..permissions import (
 )
 from ..rate_limit import invite_use_key, limiter
 from ..settings import invite_use_rate_limit
+from .servers import announce_server_added
 from .users import UserResponse
 
 router = APIRouter(prefix="/invites", tags=["invites"])
@@ -234,5 +235,6 @@ async def use_invite(
             },
             exclude_user_id=current_user.id,
         )
+    await announce_server_added(request, server, current_user)
 
     return {"detail": "Successfully joined the server", "server_id": server.id}

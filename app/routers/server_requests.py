@@ -14,7 +14,7 @@ from ..platform import require_platform_admin
 from ..services.push import push, server_request_payload
 from ..services.server_name import clean_server_name
 from ..settings import server_creation_mode
-from .servers import create_server_for, server_response
+from .servers import announce_server_added, create_server_for
 
 router = APIRouter(prefix="/server-requests", tags=["server-requests"])
 
@@ -195,16 +195,11 @@ async def approve_request(
 
     comms = getattr(request.app.state, "comms", None)
     if comms is not None:
-        await server.fetch_related("server_users__user")
-        added = await server_response(server, req.user)
         await comms.send_to_user(req.user.id, {
             "type": "server_request_updated",
             "request": ServerRequestOut.from_request(req).model_dump(mode="json"),
         })
-        await comms.send_to_user(req.user.id, {
-            "type": "server_added",
-            "server": added.model_dump(mode="json"),
-        })
+        await announce_server_added(request, server, req.user)
         if push.enabled and not comms.connection_manager.is_active(req.user.id):
             tag = f"server-request-{req.id}"
             push.schedule(push.send_to_user(
