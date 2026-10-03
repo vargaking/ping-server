@@ -17,6 +17,7 @@ from ..models.UserToServer import UserToServer
 from ..platform import require_platform_admin
 from ..services import error_counter, recent_errors
 from ..services.host_metrics import host_metrics
+from ..services.stats_history import build_history, sampling_enabled
 from ..services.voice_stats import voice_snapshot
 
 router = APIRouter(prefix="/admin", tags=["admin"], dependencies=[Depends(require_platform_admin)])
@@ -48,12 +49,12 @@ async def _load() -> dict:
 
 async def _users(request: Request, now: datetime) -> dict:
     comms = request.app.state.comms.connection_manager
-    online = comms.online_user_ids()
+    online, active = comms.online_and_active_counts()
     return {
         "total": await User.all().count(),
         "new_7d": await User.filter(created_at__gte=now - timedelta(days=7)).count(),
-        "active_now": sum(1 for user_id in online if comms.is_active(user_id)),
-        "online": len(online),
+        "active_now": active,
+        "online": online,
         "dau": await User.filter(last_active_at__gte=now - timedelta(days=1)).count(),
         "wau": await User.filter(last_active_at__gte=now - timedelta(days=7)).count(),
     }
@@ -137,6 +138,13 @@ async def get_stats(request: Request) -> dict:
         "servers": await _section("servers", lambda: _servers(request, now)),
         "errors": await _section("errors", _errors),
     }
+
+
+@router.get("/stats/history")
+async def get_stats_history(range: Literal["1h", "24h", "7d", "30d"] = "1h") -> dict:
+    """Bucketed averages and maxima per metric, aggregates only."""
+    history = await build_history(range, datetime.now(timezone.utc))
+    return {**history, "uplink_mbps": uplink_mbps(), "sampling": sampling_enabled()}
 
 
 @router.get("/errors")

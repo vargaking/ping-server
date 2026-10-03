@@ -59,6 +59,10 @@ class ConnectionManager:
     def online_user_ids(self) -> list[int]:
         return list(self.user_to_websockets)
 
+    def online_and_active_counts(self) -> tuple[int, int]:
+        online = self.online_user_ids()
+        return len(online), sum(1 for user_id in online if self.is_active(user_id))
+
     def set_activity(self, websocket: WebSocket, active: bool) -> None:
         if websocket not in self.websocket_to_user:
             return
