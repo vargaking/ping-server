@@ -55,6 +55,7 @@ The interactive API docs are then at http://localhost:8000/docs.
 | `ATTACHMENT_URL_KEY` | yes (prod) | random per process | Secret (32+ bytes) that signs the 5-minute attachment download links from `POST /attachments/{id}/link`. If unset, a random key is generated at startup and links stop working on restart. Generate one with `python -c "import secrets; print(secrets.token_urlsafe(32))"`. |
 | `AUTH_RATE_LIMIT` | no | `10/minute` | Per-IP limit on `/auth/login` and `/auth/register`. |
 | `INVITE_USE_RATE_LIMIT` | no | `20/minute` | Per-IP + per-invite limit on `POST /invites/{id}/use`. |
+| `UNFURL_RATE_LIMIT` | no | `30/minute` | Per-user limit on `GET /unfurl`. |
 | `LIVEKIT_*` | for voice | — | LiveKit API host/key/secret used to mint voice tokens. |
 | `LIVEKIT_API_URL` | no | `LIVEKIT_URL` with `ws`→`http` | Address the server uses to call LiveKit's API for voice presence. |
 | `VAPID_PUBLIC_KEY`, `VAPID_PRIVATE_KEY` | for push | — | Web Push signing keys. Push is off unless both are set. See "Web Push". |
@@ -88,6 +89,14 @@ push with one error at startup.
 
 Subscription endpoints are only accepted from known push services (Google,
 Mozilla, Windows, Apple). `PUSH_EXTRA_HOSTS` adds more.
+
+## Link previews
+
+`GET /unfurl?url=...` fetches a page and returns its title, description and
+image for a message card. Only http(s) on ports 80/443 is fetched, every
+address a host resolves to must be public (the connection is pinned to the
+address that was checked, redirects are re-checked), and environment proxy
+settings are ignored. Responses are capped at 512 KiB and 3 seconds.
 
 ## Database migrations
 

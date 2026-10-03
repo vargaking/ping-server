@@ -112,6 +112,7 @@ def _wire_message(
         "attachments": attachments,
         "reactions": reactions,
         "reply_to": reply_to,
+        "embeds": (message.metadata or {}).get("embeds", []),
     }
 
 
