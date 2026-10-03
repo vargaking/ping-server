@@ -230,6 +230,36 @@ def test_icon_cannot_be_set_through_profile(client):
     assert res.json()["server_profile"]["icon"] == uploaded["server_profile"]["icon"]
 
 
+def test_create_ignores_profile_and_settings(client):
+    register(client)
+    res = client.post("/servers/", json={
+        "name": "x",
+        "server_profile": {"icon": "https://example.com/x.png"},
+        "server_settings": {"default_channel_id": 999},
+    })
+    assert res.status_code == 201, res.text
+    body = res.json()
+    assert "icon" not in body["server_profile"]
+    fetched = client.get(f"/servers/{body['id']}").json()
+    assert "icon" not in fetched["server_profile"]
+    assert "default_channel_id" not in fetched["server_settings"]
+
+
+def test_external_icon_does_not_replace_uploaded_icon(client):
+    register(client)
+    sid = create_server(client)["id"]
+    uploaded = client.post(f"/servers/{sid}/icon",
+                           files={"file": ("icon.png", PNG_1PX, "image/png")}).json()
+    icon = uploaded["server_profile"]["icon"]
+    assert icon.startswith("/media")
+
+    res = client.put(f"/servers/{sid}",
+                     json={"server_profile": {"icon": "https://example.com/x.png"}})
+    assert res.status_code == 200, res.text
+    assert res.json()["server_profile"]["icon"] == icon
+    assert client.get(f"/servers/{sid}").json()["server_profile"]["icon"] == icon
+
+
 def test_welcome_message_validation(client):
     register(client)
     sid = create_server(client)["id"]

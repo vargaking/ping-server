@@ -42,8 +42,6 @@ def _clean_name(value: Optional[str]) -> Optional[str]:
 
 class ServerCreate(BaseModel):
     name: str
-    server_profile: dict = {}
-    server_settings: dict = {}
 
     _name = field_validator("name")(clean_server_name)
 
