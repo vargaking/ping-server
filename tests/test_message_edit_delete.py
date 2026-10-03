@@ -52,6 +52,7 @@ def post_message(sender_ws, receiver_ws, server_id, channel_id):
     sender_ws.send_json(chat_frame(server_id, channel_id, message_id))
     frame = receiver_ws.receive_json()
     assert frame["type"] == "message" and frame["id"] == message_id
+    assert sender_ws.receive_json() == {"type": "message_ack", "id": message_id}
     return message_id
 
 
