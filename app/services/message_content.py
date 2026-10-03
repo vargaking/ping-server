@@ -45,7 +45,7 @@ class Node(BaseModel):
 
 EMPTY_DOC = {"type": "doc", "content": []}
 
-_VISIBLE_NODE_TYPES = {"text", "mention", "hardBreak"}
+_VISIBLE_NODE_TYPES = {"text", "mention", "hardBreak", "horizontalRule"}
 
 
 def _check_size(raw: dict) -> None:

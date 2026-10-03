@@ -138,7 +138,6 @@ def test_rejects_too_many_nodes():
     {"type": "doc"},
     {"type": "doc", "content": []},
     doc(para(), para()),
-    doc({"type": "horizontalRule"}),
 ])
 def test_empty_content_needs_attachments(raw):
     with pytest.raises(InvalidContent):
@@ -146,11 +145,13 @@ def test_empty_content_needs_attachments(raw):
     assert normalize_content(raw, allow_empty=True) == {"type": "doc", "content": []}
 
 
-def test_content_with_only_a_mention_or_break_is_not_empty():
+def test_content_with_only_a_mention_break_or_rule_is_not_empty():
     mention = doc(para({"type": "mention", "attrs": {"id": "1"}}))
     assert normalize_content(mention, allow_empty=False) == mention
     breaks = doc(para({"type": "hardBreak"}))
     assert normalize_content(breaks, allow_empty=False) == breaks
+    rule = doc({"type": "horizontalRule"})
+    assert normalize_content(rule, allow_empty=False) == rule
 
 
 def test_empty_doc_result_is_not_shared():
