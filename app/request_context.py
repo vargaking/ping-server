@@ -1,11 +1,13 @@
 import logging
 import re
+import traceback
 import uuid
 from contextvars import ContextVar
 
 from fastapi import Request
 from fastapi.responses import JSONResponse
 
+from .services import recent_errors
 from .services.error_counter import server_5xx
 
 request_id_var: ContextVar[str] = ContextVar("request_id", default="-")
@@ -25,8 +27,18 @@ async def request_context_middleware(request: Request, call_next):
 
     try:
         response = await call_next(request)
-    except Exception:
+    except Exception as exc:
         user = getattr(request.state, "user", None)
+        recent_errors.server.record(
+            source="server",
+            kind=type(exc).__name__,
+            message=str(exc) or type(exc).__name__,
+            method=request.method,
+            path=request.url.path,
+            user_id=user.id if user else None,
+            request_id=request_id,
+            stack=traceback.format_exc(),
+        )
         logger.error(
             "Unhandled error %s %s request_id=%s user_id=%s",
             request.method,
@@ -39,6 +51,18 @@ async def request_context_middleware(request: Request, call_next):
             {"detail": "Internal server error", "request_id": request_id},
             status_code=500,
         )
+    else:
+        if response.status_code >= 500:
+            user = getattr(request.state, "user", None)
+            recent_errors.server.record(
+                source="server",
+                kind=f"http_{response.status_code}",
+                message=f"HTTP {response.status_code}",
+                method=request.method,
+                path=request.url.path,
+                user_id=user.id if user else None,
+                request_id=request_id,
+            )
 
     if response.status_code >= 500:
         server_5xx.record()
