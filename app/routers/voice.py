@@ -10,8 +10,15 @@ from ..middleware import get_current_user
 from ..models.Channel import Channel
 from ..models.Server import Server
 from ..models.User import User
+from ..models.UserToServer import UserToServer
 from ..permissions import Permission, require_permission
-from ..services.voice_presence import remove_from_voice
+from ..services.permissions import permissions
+from ..services.voice_moderation import (
+    SERVER_MUTED_ATTRIBUTE,
+    publish_sources,
+    server_muted_attributes,
+)
+from ..services.voice_presence import VoicePresence, remove_from_voice
 
 router = APIRouter(prefix="/api/voice", tags=["voice"])
 
@@ -70,11 +77,10 @@ async def create_voice_token(
         other_channels = [c for c in presence.channels_of(current_user.id) if c != channel.id]
         await remove_from_voice(presence, other_channels, current_user.id)
 
-    sources = []
-    if effective & Permission.SPEAK:
-        sources.append("microphone")
-    if effective & Permission.STREAM:
-        sources += ["screen_share", "screen_share_audio"]
+    moderation = getattr(request.app.state, "voice_moderation", None)
+    server_muted = moderation is not None and moderation.is_muted(
+        channel.server_id, current_user.id)
+    sources = publish_sources(effective, server_muted)
 
     room = f"channel_{channel.id}"
 
@@ -98,8 +104,10 @@ async def create_voice_token(
         .with_metadata(json.dumps(current_user.profile or {}))
         .with_ttl(timedelta(seconds=TOKEN_TTL_SECONDS))
         .with_grants(grant)
-        .to_jwt()
     )
+    if server_muted:
+        token = token.with_attributes({SERVER_MUTED_ATTRIBUTE: "true"})
+    token = token.to_jwt()
 
     return VoiceTokenResponse(token=token, url=LIVEKIT_URL, room=room)
 
@@ -108,6 +116,7 @@ class VoicePresenceParticipant(BaseModel):
     user_id: int
     muted: bool
     deafened: bool
+    server_muted: bool
 
 
 class VoicePresenceChannel(BaseModel):
@@ -168,4 +177,98 @@ async def refresh_voice_presence(
     presence = getattr(request.app.state, "voice_presence", None)
     if presence is not None:
         presence.refresh(channel_id)
+    return Response(status_code=204)
+
+
+async def _check_moderation(
+    current_user: User, server_id: int, target_id: int, perm: Permission, *, own_action: str
+) -> Server:
+    server = await Server.get_or_none(id=server_id)
+    if not server:
+        raise HTTPException(status_code=404, detail="Server not found")
+    await require_permission(current_user, server, perm, hide=True)
+
+    if target_id == current_user.id:
+        raise HTTPException(status_code=400, detail=own_action)
+    if target_id == server.owner_id:
+        raise HTTPException(status_code=403, detail="The owner can't be moderated")
+    if current_user.id != server.owner_id:
+        target_mask = await permissions.effective(target_id, server)
+        if target_mask is not None and perm in target_mask:
+            raise HTTPException(
+                status_code=403, detail="Only the owner can moderate members with this permission")
+    if not await UserToServer.filter(user_id=target_id, server_id=server.id).exists():
+        raise HTTPException(status_code=404, detail="Member not found")
+    return server
+
+
+async def _voice_channels_of(
+    presence: VoicePresence | None, server_id: int, user_id: int
+) -> list[int]:
+    if presence is None:
+        return []
+    in_voice = presence.channels_of(user_id)
+    if not in_voice:
+        return []
+    server_channels = await Channel.filter(
+        server_id=server_id, type="voice", id__in=in_voice).values_list("id", flat=True)
+    return list(server_channels)
+
+
+@router.put("/servers/{server_id}/members/{user_id}/server-mute", status_code=204)
+async def server_mute_member(
+    server_id: int,
+    user_id: int,
+    request: Request,
+    current_user: User = Depends(get_current_user),
+) -> Response:
+    """Take a member's microphone away in this server's voice channels until unmuted."""
+    server = await _check_moderation(
+        current_user, server_id, user_id, Permission.MUTE_MEMBERS, own_action="Use your own mute")
+    await _set_server_mute(request, server, user_id, True)
+    return Response(status_code=204)
+
+
+@router.delete("/servers/{server_id}/members/{user_id}/server-mute", status_code=204)
+async def server_unmute_member(
+    server_id: int,
+    user_id: int,
+    request: Request,
+    current_user: User = Depends(get_current_user),
+) -> Response:
+    server = await _check_moderation(
+        current_user, server_id, user_id, Permission.MUTE_MEMBERS, own_action="Use your own mute")
+    await _set_server_mute(request, server, user_id, False)
+    return Response(status_code=204)
+
+
+async def _set_server_mute(request: Request, server: Server, user_id: int, muted: bool) -> None:
+    moderation = request.app.state.voice_moderation
+    moderation.set_muted(server.id, user_id, muted)
+
+    presence = getattr(request.app.state, "voice_presence", None)
+    channel_ids = await _voice_channels_of(presence, server.id, user_id)
+    if not channel_ids:
+        return
+    effective = await permissions.effective(user_id, server) or Permission(0)
+    sources = publish_sources(effective, muted)
+    for channel_id in channel_ids:
+        await presence.update_participant(
+            channel_id, user_id, sources, server_muted_attributes(muted))
+
+
+@router.post("/servers/{server_id}/members/{user_id}/disconnect", status_code=204)
+async def disconnect_member(
+    server_id: int,
+    user_id: int,
+    request: Request,
+    current_user: User = Depends(get_current_user),
+) -> Response:
+    """Pull a member out of this server's voice channels. They can rejoin."""
+    server = await _check_moderation(
+        current_user, server_id, user_id, Permission.MOVE_MEMBERS,
+        own_action="Leave voice instead")
+    presence = getattr(request.app.state, "voice_presence", None)
+    await remove_from_voice(
+        presence, await _voice_channels_of(presence, server.id, user_id), user_id)
     return Response(status_code=204)
