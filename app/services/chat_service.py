@@ -1,5 +1,6 @@
 import json
 import logging
+import time
 from uuid import UUID
 
 from fastapi import WebSocket
@@ -18,12 +19,15 @@ from app.services.permissions import permissions
 from app.services.push import (
     channel_tag, dm_payload, dm_tag, mention_payload, mentioned_user_ids, plain_text, push)
 from app.services.replies import reply_json, reply_refs
-from app.ws_schemas import DirectMessageFrame, MessageFrame
+from app.ws_schemas import DirectMessageFrame, MessageFrame, TypingFrame
 
 logger = logging.getLogger("app.services.chat_service")
 
 
 _INVALID_REPLY = object()
+
+TYPING_MIN_INTERVAL = 2.0
+_TYPING_PRUNE_THRESHOLD = 1024
 
 
 class _AttachmentsUnavailable(Exception):
@@ -34,8 +38,11 @@ class _AttachmentsUnavailable(Exception):
 class ChatService:
     """Handles incoming chat messages: persists to DB and broadcasts to server members."""
 
+    clock = staticmethod(time.monotonic)
+
     def __init__(self, connection_manager: ConnectionManager) -> None:
         self.connection_manager = connection_manager
+        self._typing_accepted: dict[tuple[int, tuple[str, int]], float] = {}
 
     async def handle_message(
         self, sender_id: int, message: MessageFrame, sender_ws: WebSocket
@@ -224,6 +231,68 @@ class ChatService:
                     sender_id, peer_id, conversation.id, created.id,
                     str(created.uuid), content, attachments))
 
+    async def handle_typing(self, sender_id: int, frame: TypingFrame) -> None:
+        """Relay an ephemeral typing indicator to everyone who can see the
+        thread except the sender's own sockets. Nothing is stored; frames the
+        sender is not allowed to send are dropped without a reply."""
+        if frame.conversation_id is not None:
+            thread = ("direct", frame.conversation_id)
+        else:
+            thread = ("channel", frame.channel_id)
+        if not self._accept_typing(sender_id, thread):
+            return
+
+        if frame.conversation_id is not None:
+            conversation = await Conversation.get_or_none(id=frame.conversation_id)
+            if conversation is None or not conversation.has_participant(sender_id):
+                logger.debug(
+                    "Typing dropped: user %s not in conversation %s",
+                    sender_id, frame.conversation_id)
+                return
+            peer_id = conversation.other_user_id(sender_id)
+            outgoing = {
+                "type": "typing",
+                "user_id": sender_id,
+                "conversation_id": conversation.id,
+            }
+            await self._fan_out(outgoing, [peer_id], exclude_user_id=sender_id)
+            return
+
+        can_send = await permissions.has(
+            sender_id, frame.server_id, Permission.VIEW_CHANNEL | Permission.SEND_MESSAGES)
+        channel_ok = can_send and await Channel.filter(
+            id=frame.channel_id, server_id=frame.server_id).exists()
+        if not channel_ok:
+            logger.debug(
+                "Typing dropped: user %s has no access to server %s / channel %s",
+                sender_id, frame.server_id, frame.channel_id)
+            return
+        outgoing = {
+            "type": "typing",
+            "user_id": sender_id,
+            "server_id": frame.server_id,
+            "channel_id": frame.channel_id,
+        }
+        member_ids = await UserToServer.filter(
+            server_id=frame.server_id).values_list("user_id", flat=True)
+        await self._fan_out(outgoing, member_ids, exclude_user_id=sender_id)
+
+    def _accept_typing(self, sender_id: int, thread: tuple[str, int]) -> bool:
+        """Record and allow a typing frame unless the sender sent one for this
+        thread within TYPING_MIN_INTERVAL."""
+        now = self.clock()
+        key = (sender_id, thread)
+        last = self._typing_accepted.get(key)
+        if last is not None and now - last < TYPING_MIN_INTERVAL:
+            return False
+        if len(self._typing_accepted) > _TYPING_PRUNE_THRESHOLD:
+            self._typing_accepted = {
+                k: t for k, t in self._typing_accepted.items()
+                if now - t < TYPING_MIN_INTERVAL
+            }
+        self._typing_accepted[key] = now
+        return True
+
     async def _push_direct_message(
         self, sender_id: int, peer_id: int, conversation_id: int,
         message_pk: int, message_uuid: str, content, attachments: list[Attachment],
@@ -370,16 +439,24 @@ class ChatService:
         return created
 
     async def _fan_out(
-        self, outgoing: dict, recipient_ids, *, sender_ws: WebSocket | None = None
+        self,
+        outgoing: dict,
+        recipient_ids,
+        *,
+        sender_ws: WebSocket | None = None,
+        exclude_user_id: int | None = None,
     ) -> None:
         """Send *outgoing* to every socket of each recipient, skipping only the
         sending socket itself (not the whole sender) so the author's other
-        tabs still receive their own message.
+        tabs still receive their own message. *exclude_user_id* skips every
+        socket of that user instead.
 
         One dead recipient must not take down the sender's socket or stop
         delivery to everyone after them.
         """
         for uid in recipient_ids:
+            if uid == exclude_user_id:
+                continue
             for websocket in self.connection_manager.get_websockets(uid):
                 if websocket is sender_ws:
                     continue

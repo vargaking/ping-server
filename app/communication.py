@@ -14,6 +14,7 @@ from app.ws_schemas import (
     DirectMessageFrame,
     DisconnectFrame,
     MessageFrame,
+    TypingFrame,
     ValidationError,
     parse_frame,
 )
@@ -100,6 +101,8 @@ class Communication:
             await self.chat_service.handle_message(user_id, frame, websocket)
         elif isinstance(frame, DirectMessageFrame):
             await self.chat_service.handle_direct_message(user_id, frame, websocket)
+        elif isinstance(frame, TypingFrame):
+            await self.chat_service.handle_typing(user_id, frame)
         elif isinstance(frame, ActivityFrame):
             active = frame.state == "active"
             self.connection_manager.set_activity(websocket, active)

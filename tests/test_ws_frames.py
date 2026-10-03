@@ -6,7 +6,7 @@ from unittest.mock import patch
 
 import pytest
 
-from app.ws_schemas import MAX_FRAME_BYTES
+from app.ws_schemas import MAX_FRAME_BYTES, TypingFrame, ValidationError, parse_frame
 from tests.test_websocket import HEADERS, chat_frame, two_members  # noqa: F401
 from tests.conftest import ws_ready
 
@@ -192,3 +192,23 @@ def test_each_bad_frame_logs_one_warning(two_members):
     assert log.warning.call_count == 2
     assert log.exception.call_count == 0
     assert all("exc_info" not in call.kwargs for call in log.warning.call_args_list)
+
+
+@pytest.mark.parametrize("target", [
+    {"server_id": 1, "channel_id": 2},
+    {"conversation_id": 3},
+])
+def test_typing_frame_accepts_exactly_one_target(target):
+    assert isinstance(parse_frame({"type": "typing", **target}), TypingFrame)
+
+
+@pytest.mark.parametrize("target", [
+    {"server_id": 1, "channel_id": 2, "conversation_id": 3},
+    {"server_id": 1, "conversation_id": 3},
+    {},
+    {"channel_id": 2},
+    {"server_id": 1},
+])
+def test_typing_frame_rejects_missing_or_mixed_targets(target):
+    with pytest.raises(ValidationError):
+        parse_frame({"type": "typing", **target})
