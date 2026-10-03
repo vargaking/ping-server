@@ -1,4 +1,3 @@
-import json
 import logging
 import time
 from uuid import UUID
@@ -15,6 +14,7 @@ from app.models.User import User
 from app.models.UserToServer import UserToServer
 from app.permissions import Permission
 from app.services import read_state
+from app.services.message_content import InvalidContent, normalize_content, serialize
 from app.services.connection_manager import ConnectionManager
 from app.services.permissions import permissions
 from app.services.push import (
@@ -75,6 +75,13 @@ class ChatService:
                 sender_ws, sender_id, message.id, channel_id=channel_id):
             return
 
+        try:
+            content = normalize_content(
+                message.content, allow_empty=bool(message.attachment_ids))
+        except InvalidContent:
+            await self._send_error(sender_ws, "invalid_content", message.id)
+            return
+
         attachments = await self._load_attachments(
             sender_id, message.attachment_ids, channel_id=channel_id)
         if attachments is None:
@@ -87,19 +94,12 @@ class ChatService:
             await self._send_error(sender_ws, "invalid_reply", message.id)
             return
 
-        content = message.content
-        if attachments and content is None:
-            content = ""
-        content_payload = content
-        if isinstance(content_payload, dict):
-            content_payload = json.dumps(content_payload)
-
         # Persist first: never show other people a message that was not stored.
         try:
             created = await self._create_message(
                 attachments,
                 uuid=message.id,
-                content=content_payload,
+                content=serialize(content),
                 author_id=sender_id,
                 server_id=server_id,
                 channel_id=channel_id,
@@ -180,6 +180,13 @@ class ChatService:
                 sender_ws, sender_id, message.id, conversation_id=conversation.id):
             return
 
+        try:
+            content = normalize_content(
+                message.content, allow_empty=bool(message.attachment_ids))
+        except InvalidContent:
+            await self._send_error(sender_ws, "invalid_content", message.id)
+            return
+
         attachments = await self._load_attachments(
             sender_id, message.attachment_ids, conversation_id=conversation.id)
         if attachments is None:
@@ -192,19 +199,12 @@ class ChatService:
             await self._send_error(sender_ws, "invalid_reply", message.id)
             return
 
-        content = message.content
-        if attachments and content is None:
-            content = ""
-        content_payload = content
-        if isinstance(content_payload, dict):
-            content_payload = json.dumps(content_payload)
-
         # Persist first: never show the peer a message that was not stored.
         try:
             created = await self._create_message(
                 attachments,
                 uuid=message.id,
-                content=content_payload,
+                content=serialize(content),
                 author_id=sender_id,
                 conversation_id=conversation.id,
                 timestamp=message.timestamp,

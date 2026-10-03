@@ -1,29 +1,18 @@
-import ast
 import json
+
+from app.services.message_content import MAX_CONTENT_DEPTH, MAX_CONTENT_NODES
 
 PREVIEW_MAX_CHARS = 140
 
-# Message content is client-controlled: bound how much of it we read.
-MAX_LITERAL_EVAL_CHARS = 20_000
-MAX_CONTENT_NODES = 10_000
-MAX_CONTENT_DEPTH = 100
-
 
 def _parse_content(raw):
-    """Message content as stored or sent: a tiptap dict, a JSON string, a
-    Python-style stringified dict, or legacy plain text."""
+    """Message content as stored or sent: a tiptap dict or a JSON string."""
     if not isinstance(raw, str):
         return raw
     try:
         return json.loads(raw)
     except Exception:
-        pass
-    if len(raw) <= MAX_LITERAL_EVAL_CHARS:
-        try:
-            return ast.literal_eval(raw)
-        except Exception:
-            pass
-    return raw
+        return raw
 
 
 def _walk(root):

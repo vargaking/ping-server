@@ -1,5 +1,6 @@
 """Image and file attachments: upload, authenticated download, sending them
 with a message over the socket, edit/delete and pruning."""
+import json
 import os
 import time
 import uuid
@@ -546,7 +547,7 @@ def test_send_message_with_attachment_and_empty_content(team, sockets):
 
     (stored,) = history(team["bob"], channel_id)
     assert stored["id"] == frame["id"]
-    assert stored["content"] == ""
+    assert json.loads(stored["content"]) == {"type": "doc", "content": []}
     assert {a["id"] for a in stored["attachments"]} == {first["id"], second["id"]}
 
 
