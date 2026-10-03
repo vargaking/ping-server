@@ -51,6 +51,15 @@ class RegisterRequest(BaseModel):
     profile: dict = {}
 
 
+class MeResponse(UserResponse):
+    """The caller's own profile. Kept off UserResponse, which other users see."""
+    is_platform_admin: bool
+
+    @classmethod
+    def from_user(cls, user: User):
+        return cls(**UserResponse.from_user(user).model_dump(), is_platform_admin=user.is_platform_admin)
+
+
 class TokenResponse(BaseModel):
     access_token: str
     token_type: str = "bearer"
@@ -126,4 +135,4 @@ async def logout(request: Request, response: Response):
 
 @router.get("/me")
 async def get_current_user_info(current_user: User = Depends(get_current_user)):
-    return UserResponse.from_user(current_user)
+    return MeResponse.from_user(current_user)

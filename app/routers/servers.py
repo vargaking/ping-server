@@ -16,14 +16,17 @@ from ..models.UserToServer import UserToServer
 from ..services.permissions import permissions
 from ..services.roles import seed_server_roles
 from ..services.server_icon import clean_icon_text, clean_icon_tone
+from ..services.server_name import clean_server_name
 from ..services.storage import ImageValidationError, storage_service
 from ..services.voice_presence import close_voice_channels, remove_from_voice
+from ..settings import server_creation_mode
 from ..utils import require_owner
 from .users import UserResponse
 
 router = APIRouter(prefix="/servers", tags=["servers"])
 
 SERVER_NAME_MAX = 100
+WELCOME_MESSAGE_MAX = 1000
 
 
 def _clean_name(value: Optional[str]) -> Optional[str]:
@@ -42,7 +45,7 @@ class ServerCreate(BaseModel):
     server_profile: dict = {}
     server_settings: dict = {}
 
-    _name = field_validator("name")(_clean_name)
+    _name = field_validator("name")(clean_server_name)
 
 
 class ServerUpdate(BaseModel):
@@ -52,7 +55,7 @@ class ServerUpdate(BaseModel):
     icon_text: Optional[str] = None
     icon_tone: Optional[int] = None
 
-    _name = field_validator("name")(_clean_name)
+    _name = field_validator("name")(clean_server_name)
     _icon_text = field_validator("icon_text")(clean_icon_text)
     _icon_tone = field_validator("icon_tone")(clean_icon_tone)
 
@@ -142,22 +145,32 @@ class MemberRolesUpdate(BaseModel):
     role_ids: List[int]
 
 
-async def _server_response(server: Server, user: User) -> ServerResponse:
+async def server_response(server: Server, user: User) -> ServerResponse:
     response = ServerResponse.from_server(server)
     mask = await permissions.effective(user.id, server)
     response.permissions = str(int(mask or 0))
     return response
 
 
+async def create_server_for(owner: User, **fields) -> Server:
+    """Create a server owned by *owner*, with the owner as its first member.
+    Call inside a transaction."""
+    server = await Server.create(**fields, owner=owner)
+    await UserToServer.create(user=owner, server=server)
+    await seed_server_roles(server)
+    return server
+
+
 @router.post("/", response_model=ServerResponse, status_code=status.HTTP_201_CREATED)
 async def create_server(server: ServerCreate, current_user: User = Depends(get_current_user)):
+    if server_creation_mode() == "waitlist" and not current_user.is_platform_admin:
+        raise HTTPException(
+            status_code=403,
+            detail="Server creation requires approval. Submit a request instead.")
     async with in_transaction():
-        server_obj = await Server.create(**server.model_dump(), owner=current_user)
-        # Automatically add the creator as a member
-        await UserToServer.create(user=current_user, server=server_obj)
-        await seed_server_roles(server_obj)
+        server_obj = await create_server_for(current_user, **server.model_dump())
     await server_obj.fetch_related('server_users__user')
-    return await _server_response(server_obj, current_user)
+    return await server_response(server_obj, current_user)
 
 
 @router.get("/", response_model=List[ServerPublicResponse])
@@ -174,7 +187,7 @@ async def get_my_servers(current_user: User = Depends(get_current_user)):
     # Return servers the current user belongs to
     user_server_relations = await UserToServer.filter(user=current_user).prefetch_related("server__server_users__user")
     servers = [relation.server for relation in user_server_relations]
-    return [await _server_response(server, current_user) for server in servers]
+    return [await server_response(server, current_user) for server in servers]
 
 
 @router.get("/{server_id}", response_model=ServerResponse)
@@ -183,7 +196,7 @@ async def get_server(
     current_user: User = Depends(get_current_user),
 ):
     await server.fetch_related('server_users__user')
-    return await _server_response(server, current_user)
+    return await server_response(server, current_user)
 
 
 async def _broadcast_server_updated(request: Request, server: Server, actor_id: int) -> None:
@@ -208,6 +221,47 @@ def _is_channel_reorder(update_data: dict) -> bool:
     )
 
 
+def _merge_json(current: Optional[dict], incoming: dict) -> dict:
+    """Incoming keys overwrite, absent keys stay, null removes."""
+    merged = dict(current or {})
+    for key, value in incoming.items():
+        if value is None:
+            merged.pop(key, None)
+        else:
+            merged[key] = value
+    return merged
+
+
+def _clean_profile_update(profile: dict) -> dict:
+    # The icon has its own upload and delete endpoints.
+    profile = {key: value for key, value in profile.items() if key != "icon"}
+    message = profile.get("welcome_message")
+    if message is not None:
+        if not isinstance(message, str):
+            raise HTTPException(status_code=422, detail="Welcome message must be text")
+        message = message.strip()
+        if len(message) > WELCOME_MESSAGE_MAX:
+            raise HTTPException(
+                status_code=422,
+                detail=f"Welcome message must be at most {WELCOME_MESSAGE_MAX} characters",
+            )
+        profile["welcome_message"] = message or None
+    return profile
+
+
+async def _check_default_channel(server: Server, channel_id) -> None:
+    if channel_id is None:
+        return
+    is_text_channel = (
+        isinstance(channel_id, int)
+        and not isinstance(channel_id, bool)
+        and await Channel.filter(id=channel_id, server_id=server.id, type="text").exists()
+    )
+    if not is_text_channel:
+        raise HTTPException(
+            status_code=422, detail="Default channel must be a text channel in this server")
+
+
 @router.put("/{server_id}", response_model=ServerPublicResponse)
 async def update_server(
     server_update: ServerUpdate,
@@ -225,6 +279,14 @@ async def update_server(
 
     if "name" in update_data and update_data["name"] is None:
         raise HTTPException(status_code=422, detail="Server name can't be empty")
+    if update_data.get("server_profile") is not None:
+        update_data["server_profile"] = _merge_json(
+            server.server_profile, _clean_profile_update(update_data["server_profile"]))
+    if update_data.get("server_settings") is not None:
+        incoming = update_data["server_settings"]
+        if "default_channel_id" in incoming:
+            await _check_default_channel(server, incoming["default_channel_id"])
+        update_data["server_settings"] = _merge_json(server.server_settings, incoming)
     await server.update_from_dict(update_data)
     if server.icon_text and server.icon_tone is None:
         server.icon_tone = 1

@@ -6,7 +6,8 @@ sessions, and LiveKit for voice.
 
 - **HTTP API** — auth, users, servers, channels, invites, voice tokens.
 - **WebSocket `/ws`** — chat delivery and presence; identity comes from the
-  session cookie, established at the handshake (never from frame contents).
+  session cookie, established at the handshake (never from frame contents). Clients may send `{"type": "ping", "t": <number>}`
+  and get `{"type": "pong", "t": <same number>}` back.
 - **Storage** — uploads (avatars, server icons) are written to local disk and
   served by the app's StaticFiles mount (or Nginx in production).
 
@@ -60,6 +61,8 @@ The interactive API docs are then at http://localhost:8000/docs.
 | `VAPID_PUBLIC_KEY`, `VAPID_PRIVATE_KEY` | for push | — | Web Push signing keys. Push is off unless both are set. See "Web Push". |
 | `VAPID_SUBJECT` | no | first `https://` origin in `ALLOWED_ORIGINS` | Push contact: `https://host` or `mailto:you@example.com`. See "Web Push". |
 | `PUSH_EXTRA_HOSTS` | no | *(empty)* | Comma-separated extra push-service hosts (suffix match), for tests or self-hosted push. |
+| `UPLINK_MBPS` | no | `1000` | Link speed shown as the capacity of the network bar on the admin dashboard. |
+| `SERVER_CREATION` | no | `open` | `open` lets anyone create servers. `waitlist` limits creation to platform admins; everyone else submits a request. Grant admin with `python -m app.scripts.platform_admin <username> --grant`. |
 
 > Session tokens expire 30 days after login/register; expired tokens are
 > rejected and deleted on next use, and pruned on startup.
