@@ -149,6 +149,10 @@ class VoicePresence:
     def channel_participants(self, channel_id: int) -> tuple[VoiceParticipant, ...]:
         return self._snapshot.get(channel_id, ())
 
+    def occupancy(self) -> dict[int, int]:
+        """How many people are in each occupied voice channel."""
+        return {channel_id: len(people) for channel_id, people in self._snapshot.items()}
+
     def channels_of(self, user_id: int) -> list[int]:
         return sorted(
             channel_id
