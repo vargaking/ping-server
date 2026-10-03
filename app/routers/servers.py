@@ -532,3 +532,5 @@ async def remove_member(
     voice_channel_ids = await Channel.filter(server=server, type="voice").values_list("id", flat=True)
     await remove_from_voice(
         getattr(request.app.state, "voice_presence", None), voice_channel_ids, user_id)
+    if moderation := getattr(request.app.state, "voice_moderation", None):
+        moderation.set_muted(server.id, user_id, False)
