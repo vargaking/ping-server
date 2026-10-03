@@ -8,6 +8,7 @@ from typing import Any
 from fastapi import APIRouter, Depends, Request
 from tortoise.functions import Count
 
+from ..models.Channel import Channel
 from ..models.Message import Message
 from ..models.Server import Server
 from ..models.ServerRequest import ServerRequest
@@ -22,7 +23,6 @@ router = APIRouter(prefix="/admin", tags=["admin"], dependencies=[Depends(requir
 
 logger = logging.getLogger("app.admin")
 
-TOP_SERVERS = 10
 DEFAULT_UPLINK_MBPS = 1000
 
 
@@ -64,37 +64,59 @@ async def _users(request: Request, now: datetime) -> dict:
     }
 
 
-async def _servers(now: datetime) -> dict:
+def _counts(rows) -> dict[int, int]:
+    return {row["server_id"]: row["count"] for row in rows}
+
+
+async def _message_counts(**filters) -> dict[int, int]:
     # Channel messages only: DMs have no server and are never counted.
-    busiest = await (
-        Message.filter(created_at__gte=now - timedelta(days=1), server_id__isnull=False)
+    return _counts(
+        await Message.filter(server_id__isnull=False, **filters)
         .annotate(count=Count("id"))
         .group_by("server_id")
-        .order_by("-count")
-        .limit(TOP_SERVERS)
         .values("server_id", "count")
     )
-    ids = [row["server_id"] for row in busiest]
-    names = dict(await Server.filter(id__in=ids).values_list("id", "name"))
-    members = {
-        row["server_id"]: row["count"]
-        for row in await UserToServer.filter(server_id__in=ids)
-        .annotate(count=Count("id"))
+
+
+async def _voice_counts(presence) -> dict[int, int]:
+    if presence is None:
+        return {}
+    occupied = presence.occupancy()
+    servers = dict(await Channel.filter(id__in=list(occupied)).values_list("id", "server_id"))
+    counts: dict[int, int] = {}
+    for channel_id, people in occupied.items():
+        if (server_id := servers.get(channel_id)) is not None:
+            counts[server_id] = counts.get(server_id, 0) + people
+    return counts
+
+
+async def _servers(request: Request, now: datetime) -> dict:
+    servers = await Server.all().values("id", "name", "created_at")
+    members = _counts(
+        await UserToServer.annotate(count=Count("id"))
         .group_by("server_id")
         .values("server_id", "count")
-    }
+    )
+    messages_24h = await _message_counts(created_at__gte=now - timedelta(days=1))
+    messages_total = await _message_counts()
+    in_voice = await _voice_counts(getattr(request.app.state, "voice_presence", None))
+    rows = [
+        {
+            "id": server["id"],
+            "name": server["name"],
+            "members": members.get(server["id"], 0),
+            "messages_24h": messages_24h.get(server["id"], 0),
+            "messages_total": messages_total.get(server["id"], 0),
+            "in_voice": in_voice.get(server["id"], 0),
+            "created_at": server["created_at"].isoformat(),
+        }
+        for server in servers
+    ]
+    rows.sort(key=lambda row: (-row["messages_24h"], row["name"].lower()))
     return {
-        "total": await Server.all().count(),
+        "total": len(rows),
         "pending_requests": await ServerRequest.filter(status="pending").count(),
-        "top": [
-            {
-                "id": row["server_id"],
-                "name": names.get(row["server_id"], ""),
-                "members": members.get(row["server_id"], 0),
-                "messages_24h": row["count"],
-            }
-            for row in busiest
-        ],
+        "list": rows,
     }
 
 
@@ -115,6 +137,6 @@ async def get_stats(request: Request) -> dict:
         "load": await _section("load", _load),
         "voice": await _section("voice", _voice),
         "users": await _section("users", lambda: _users(request, now)),
-        "servers": await _section("servers", lambda: _servers(now)),
+        "servers": await _section("servers", lambda: _servers(request, now)),
         "errors": await _section("errors", _errors),
     }

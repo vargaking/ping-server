@@ -111,10 +111,47 @@ def test_server_totals_ranking_and_dm_exclusion(client, new_client):
     servers = stats(client)["servers"]
     assert servers["total"] == 2
     assert servers["pending_requests"] == 1
-    assert servers["top"] == [
-        {"id": busy["id"], "name": "Busy", "members": 2, "messages_24h": 3},
-        {"id": quiet["id"], "name": "Quiet", "members": 1, "messages_24h": 1},
+    rows = [
+        {k: row[k] for k in ("id", "name", "members", "messages_24h", "messages_total", "in_voice")}
+        for row in servers["list"]
     ]
+    assert rows == [
+        {"id": busy["id"], "name": "Busy", "members": 2, "messages_24h": 3,
+         "messages_total": 4, "in_voice": 0},
+        {"id": quiet["id"], "name": "Quiet", "members": 1, "messages_24h": 1,
+         "messages_total": 1, "in_voice": 0},
+    ]
+    assert all(row["created_at"] for row in servers["list"])
+
+
+def test_lists_every_server_including_quiet_ones_the_admin_is_not_in(client, new_client):
+    make_admin(client, "list-admin")
+    mine = create_server(client, "Mine")
+    other_client = new_client()
+    register(other_client, "list-other")
+    foreign = create_server(other_client, "Foreign")
+
+    servers = stats(client)["servers"]
+    by_id = {row["id"]: row for row in servers["list"]}
+    assert servers["total"] == len(servers["list"]) == 2
+    assert by_id[mine["id"]]["messages_24h"] == 0
+    assert by_id[foreign["id"]]["members"] == 1
+    assert by_id[foreign["id"]]["messages_total"] == 0
+
+
+def test_in_voice_counts_people_per_server(client, monkeypatch):
+    make_admin(client, "voice-admin")
+    server = create_server(client, "Loud")
+    first = create_channel(client, server["id"], name="v1", channel_type="voice")
+    second = create_channel(client, server["id"], name="v2", channel_type="voice")
+
+    class Presence:
+        def occupancy(self):
+            return {first["id"]: 2, second["id"]: 1, 999_999: 4}
+
+    monkeypatch.setattr(client.app.state, "voice_presence", Presence(), raising=False)
+    [row] = stats(client)["servers"]["list"]
+    assert row["in_voice"] == 3
 
 
 def test_touch_last_active_writes_once_an_hour(client, monkeypatch):
