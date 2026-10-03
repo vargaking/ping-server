@@ -4,6 +4,7 @@ import time
 from uuid import UUID
 
 from fastapi import WebSocket
+from tortoise.exceptions import IntegrityError
 from tortoise.transactions import in_transaction
 
 from app.models.Attachment import Attachment
@@ -70,6 +71,10 @@ class ChatService:
             await self._send_error(sender_ws, "forbidden", message.id)
             return
 
+        if await self._answer_duplicate(
+                sender_ws, sender_id, message.id, channel_id=channel_id):
+            return
+
         attachments = await self._load_attachments(
             sender_id, message.attachment_ids, channel_id=channel_id)
         if attachments is None:
@@ -90,17 +95,24 @@ class ChatService:
             content_payload = json.dumps(content_payload)
 
         # Persist first: never show other people a message that was not stored.
-        created = await self._create_message(
-            attachments,
-            uuid=message.id,
-            content=content_payload,
-            author_id=sender_id,
-            server_id=server_id,
-            channel_id=channel_id,
-            timestamp=message.timestamp,
-            metadata=self._stored_metadata(message),
-            reply_to_uuid=reply_to_uuid,
-        )
+        try:
+            created = await self._create_message(
+                attachments,
+                uuid=message.id,
+                content=content_payload,
+                author_id=sender_id,
+                server_id=server_id,
+                channel_id=channel_id,
+                timestamp=message.timestamp,
+                metadata=self._stored_metadata(message),
+                reply_to_uuid=reply_to_uuid,
+            )
+        except IntegrityError:
+            # A concurrent send of the same id won the unique constraint.
+            if not await self._answer_duplicate(
+                    sender_ws, sender_id, message.id, channel_id=channel_id):
+                raise
+            return
         if created is None:
             await self._send_error(sender_ws, "invalid_attachments", message.id)
             return
@@ -132,6 +144,7 @@ class ChatService:
             server_id=server_id).values_list("user_id", flat=True)
 
         await self._fan_out(outgoing, member_ids, sender_ws=sender_ws)
+        await self._send_ack(sender_ws, message.id)
 
         if push.enabled:
             # Runs in the sender's socket path: a push problem must never
@@ -163,6 +176,10 @@ class ChatService:
             await self._send_error(sender_ws, "forbidden", message.id)
             return
 
+        if await self._answer_duplicate(
+                sender_ws, sender_id, message.id, conversation_id=conversation.id):
+            return
+
         attachments = await self._load_attachments(
             sender_id, message.attachment_ids, conversation_id=conversation.id)
         if attachments is None:
@@ -183,16 +200,22 @@ class ChatService:
             content_payload = json.dumps(content_payload)
 
         # Persist first: never show the peer a message that was not stored.
-        created = await self._create_message(
-            attachments,
-            uuid=message.id,
-            content=content_payload,
-            author_id=sender_id,
-            conversation_id=conversation.id,
-            timestamp=message.timestamp,
-            metadata=self._stored_metadata(message),
-            reply_to_uuid=reply_to_uuid,
-        )
+        try:
+            created = await self._create_message(
+                attachments,
+                uuid=message.id,
+                content=content_payload,
+                author_id=sender_id,
+                conversation_id=conversation.id,
+                timestamp=message.timestamp,
+                metadata=self._stored_metadata(message),
+                reply_to_uuid=reply_to_uuid,
+            )
+        except IntegrityError:
+            if not await self._answer_duplicate(
+                    sender_ws, sender_id, message.id, conversation_id=conversation.id):
+                raise
+            return
         if created is None:
             await self._send_error(sender_ws, "invalid_attachments", message.id)
             return
@@ -222,6 +245,7 @@ class ChatService:
         # the socket that sent it is excluded, via sender_ws below.
         peer_id = conversation.other_user_id(sender_id)
         await self._fan_out(outgoing, [peer_id, sender_id], sender_ws=sender_ws)
+        await self._send_ack(sender_ws, message.id)
 
         if push.enabled and peer_id != sender_id:
             if self.connection_manager.is_active(peer_id):
@@ -465,6 +489,44 @@ class ChatService:
                 except Exception:
                     logger.warning(
                         "Failed to deliver message to user %s", uid, exc_info=True)
+
+    async def _answer_duplicate(
+        self,
+        sender_ws: WebSocket,
+        sender_id: int,
+        message_id: str,
+        *,
+        channel_id: int | None = None,
+        conversation_id: int | None = None,
+    ) -> bool:
+        """If *message_id* is already stored, answer the sender and return True.
+
+        The same author resending into the same thread is a retry whose ack was
+        lost, so it is acked again; anything else is an id clash.
+        """
+        try:
+            existing_uuid = UUID(message_id)
+        except ValueError:
+            return False
+        existing = await Message.get_or_none(uuid=existing_uuid)
+        if existing is None:
+            return False
+        if (
+            existing.author_id == sender_id
+            and existing.channel_id == channel_id
+            and existing.conversation_id == conversation_id
+        ):
+            await self._send_ack(sender_ws, message_id)
+        else:
+            await self._send_error(sender_ws, "duplicate_id", message_id)
+        return True
+
+    @staticmethod
+    async def _send_ack(websocket: WebSocket, message_id: str) -> None:
+        try:
+            await websocket.send_json({"type": "message_ack", "id": message_id})
+        except Exception:
+            logger.warning("Failed to send message ack", exc_info=True)
 
     @staticmethod
     async def _send_error(websocket: WebSocket, code: str, ref: str | None) -> None:

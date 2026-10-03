@@ -67,6 +67,7 @@ def test_channel_typing_skips_all_of_the_senders_sockets(two_members, now):
         alice_ws.send_json(chat)
         assert bob_ws.receive_json()["id"] == chat["id"]
         assert alice_tab.receive_json()["id"] == chat["id"]
+        assert alice_ws.receive_json() == {"type": "message_ack", "id": chat["id"]}
         assert_next_is_pong(alice_ws)
 
 
