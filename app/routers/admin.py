@@ -3,7 +3,7 @@ import os
 from collections.abc import Awaitable, Callable
 from dataclasses import asdict
 from datetime import datetime, timedelta, timezone
-from typing import Any
+from typing import Any, Literal
 
 from fastapi import APIRouter, Depends, Request
 from tortoise.functions import Count
@@ -15,7 +15,7 @@ from ..models.ServerRequest import ServerRequest
 from ..models.User import User
 from ..models.UserToServer import UserToServer
 from ..platform import require_platform_admin
-from ..services import error_counter
+from ..services import error_counter, recent_errors
 from ..services.host_metrics import host_metrics
 from ..services.voice_stats import voice_snapshot
 
@@ -139,4 +139,18 @@ async def get_stats(request: Request) -> dict:
         "users": await _section("users", lambda: _users(request, now)),
         "servers": await _section("servers", lambda: _servers(request, now)),
         "errors": await _section("errors", _errors),
+    }
+
+
+@router.get("/errors")
+async def get_errors(source: Literal["client", "server"] | None = None) -> dict:
+    entries = []
+    if source in (None, "client"):
+        entries += recent_errors.client.entries()
+    if source in (None, "server"):
+        entries += recent_errors.server.entries()
+    return {
+        "since": error_counter.started_at.isoformat(),
+        "limit": recent_errors.MAX_ENTRIES,
+        "groups": recent_errors.grouped(entries),
     }
