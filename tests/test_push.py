@@ -29,8 +29,8 @@ from app.permissions import Permission
 from app.services.connection_manager import IDLE_AFTER_SECONDS, ConnectionManager
 from app.services.permissions import permissions
 from app.services.push import (
-    DeliveryResult, dm_payload, endpoint_host, is_valid_subject, mention_payload,
-    mentioned_user_ids, normalize_subject, plain_text, push, read_payload)
+    DeliveryResult, PushService, dm_payload, endpoint_host, is_valid_subject,
+    mention_payload, mentioned_user_ids, normalize_subject, plain_text, push, read_payload)
 from app.services.push import test_payload as build_test_payload
 from tests.conftest import ORIGIN, create_channel, create_server, register, ws_ready
 from tests.test_realtime_events import invite_and_join
@@ -756,6 +756,22 @@ def test_a_slow_push_service_does_not_hold_up_the_sender(dm_pair, push_on, monke
         release.set()
     drain(dm_pair.alice_client)
     assert not push._tasks
+
+
+def test_drain_returns_when_a_finished_push_is_still_in_the_set():
+    service = PushService()
+
+    async def scenario():
+        async def noop():
+            pass
+
+        service.schedule(noop())
+        await asyncio.sleep(0)  # the task finishes; its done-callback is still queued
+        assert [task.done() for task in service._tasks] == [True]
+        await service.drain()
+
+    asyncio.run(scenario())
+    assert not service._tasks
 
 
 # -- mentions --------------------------------------------------------------
