@@ -130,6 +130,8 @@ ATTACHMENT_URL_KEY=<generated secret, 32+ bytes>
 LIVEKIT_URL=wss://livekit.example.com
 LIVEKIT_API_KEY=<livekit api key>
 LIVEKIT_API_SECRET=<livekit api secret>
+# The server calls LiveKit's API here directly, not through Nginx (7882 production, 7880 staging).
+LIVEKIT_API_URL=http://127.0.0.1:7882
 # Web Push, see "Web Push (VAPID)" below. Push is off unless all three are set.
 VAPID_PUBLIC_KEY=<generated>
 VAPID_PRIVATE_KEY=<generated>
@@ -283,6 +285,7 @@ To be ticked by hand on the real box. Nothing here has been checked yet.
 
 - [ ] Single Gunicorn worker: `GUNICORN_WORKERS` unset or `1`. Check: `ps -ef | grep gunicorn` shows one worker under the master.
 - [ ] `LIVEKIT_URL`, `LIVEKIT_API_KEY`, `LIVEKIT_API_SECRET` set; voice joins work.
+- [ ] The Voice card on /admin shows numbers, not "not configured" or "Can't reach LiveKit".
 - [ ] TURN reachable from a typical home network **and** from a phone on mobile data (not just home Wi-Fi): audio both ways.
 - [ ] HTTPS on API and client, `DEBUG=false`, and the session cookie arrives as `SameSite=None; Secure`. Check in a real browser: devtools, Application, Cookies.
 - [ ] `ALLOWED_ORIGINS` / `ALLOWED_ORIGIN_REGEX` from env cover the prod frontend (and previews if wanted). A WS connect from the prod origin succeeds.

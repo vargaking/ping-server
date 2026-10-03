@@ -1,4 +1,5 @@
 """GET /admin/stats: platform-admin dashboard numbers, aggregates only."""
+import asyncio
 import json
 import uuid
 from datetime import datetime, timedelta, timezone
@@ -13,7 +14,8 @@ from app.routers import admin
 from app.services import activity
 from app.services.error_counter import ErrorCounter
 from app.services.host_metrics import HostMetrics, HostStats
-from app.services.voice_stats import VoiceStats
+from app.services import voice_stats
+from app.services.voice_stats import VoiceReading, VoiceStats
 from tests.conftest import create_channel, create_server, register, ws_ready
 from tests.test_invite_preview import invite_and_join  # noqa: F401
 from tests.test_server_requests import make_admin
@@ -26,9 +28,9 @@ HOST = HostStats(
 
 @pytest.fixture(autouse=True)
 def stub_voice(monkeypatch):
-    async def none():
-        return None
-    monkeypatch.setattr(admin, "voice_snapshot", none)
+    async def unconfigured():
+        return VoiceReading("unconfigured")
+    monkeypatch.setattr(admin, "voice_snapshot", unconfigured)
 
 
 def run(client, func, *args):
@@ -222,15 +224,72 @@ def test_error_counter_drops_events_older_than_a_day():
     assert counter.count() == 1
 
 
-def test_voice_section_is_passed_through_or_null(client, monkeypatch):
-    make_admin(client, "voice-admin")
-    assert stats(client)["voice"] is None
-
+def set_voice_reading(monkeypatch, reading):
     async def snapshot():
-        return VoiceStats(rooms=1, participants=2, screenshares=[{"width": 1920, "height": 1080}])
+        return reading
     monkeypatch.setattr(admin, "voice_snapshot", snapshot)
-    assert stats(client)["voice"] == {
+
+
+def test_voice_section_is_passed_through_when_ok(client, monkeypatch):
+    make_admin(client, "voice-admin")
+    reading = VoiceReading("ok", VoiceStats(
+        rooms=1, participants=2, screenshares=[{"width": 1920, "height": 1080}]))
+    set_voice_reading(monkeypatch, reading)
+    body = stats(client)
+    assert body["voice"] == {
         "rooms": 1, "participants": 2, "screenshares": [{"width": 1920, "height": 1080}]}
+    assert body["voice_status"] == "ok"
+
+
+@pytest.mark.parametrize("status", ["unconfigured", "unreachable"])
+def test_voice_section_is_null_when_not_ok(client, monkeypatch, status):
+    make_admin(client, "voice-admin")
+    set_voice_reading(monkeypatch, VoiceReading(status))
+    body = stats(client)
+    assert body["voice"] is None
+    assert body["voice_status"] == status
+
+
+def test_voice_section_failure_reads_as_unreachable(client, monkeypatch):
+    make_admin(client, "voice-admin")
+
+    async def boom():
+        raise RuntimeError("boom")
+    monkeypatch.setattr(admin, "voice_snapshot", boom)
+    body = stats(client)
+    assert body["voice"] is None
+    assert body["voice_status"] == "unreachable"
+
+
+def test_voice_snapshot_without_livekit_env_is_unconfigured(client, monkeypatch):
+    for name in ("LIVEKIT_URL", "LIVEKIT_API_URL", "LIVEKIT_API_KEY", "LIVEKIT_API_SECRET"):
+        monkeypatch.delenv(name, raising=False)
+    assert run(client, voice_stats.voice_snapshot) == VoiceReading("unconfigured")
+
+
+def test_voice_snapshot_times_out_as_unreachable(client, monkeypatch):
+    monkeypatch.setenv("LIVEKIT_API_URL", "http://127.0.0.1:7882")
+    monkeypatch.setenv("LIVEKIT_API_KEY", "key")
+    monkeypatch.setenv("LIVEKIT_API_SECRET", "secret")
+    monkeypatch.setattr(voice_stats, "VOICE_STATS_TIMEOUT_SECONDS", 0.1)
+    closed = []
+
+    class Room:
+        async def list_rooms(self, _request):
+            await asyncio.Event().wait()
+
+    class HangingClient:
+        room = Room()
+
+        def __init__(self, *args, **kwargs):
+            pass
+
+        async def aclose(self):
+            closed.append(True)
+
+    monkeypatch.setattr(voice_stats.api, "LiveKitAPI", HangingClient)
+    assert run(client, voice_stats.voice_snapshot) == VoiceReading("unreachable")
+    assert closed == [True]
 
 
 def test_load_section_uses_host_sample_and_uplink(client, monkeypatch):
