@@ -46,11 +46,6 @@ async def _load() -> dict:
     return {"uplink_mbps": uplink_mbps(), **asdict(host_metrics.sample())}
 
 
-async def _voice() -> dict | None:
-    stats = await voice_snapshot()
-    return asdict(stats) if stats else None
-
-
 async def _users(request: Request, now: datetime) -> dict:
     comms = request.app.state.comms.connection_manager
     online = comms.online_user_ids()
@@ -132,10 +127,12 @@ async def _errors() -> dict:
 async def get_stats(request: Request) -> dict:
     """Aggregate numbers only: no usernames, message content or DM data."""
     now = datetime.now(timezone.utc)
+    voice = await _section("voice", voice_snapshot)
     return {
         "generated_at": now.isoformat(),
         "load": await _section("load", _load),
-        "voice": await _section("voice", _voice),
+        "voice": asdict(voice.stats) if voice and voice.status == "ok" and voice.stats else None,
+        "voice_status": voice.status if voice else "unreachable",
         "users": await _section("users", lambda: _users(request, now)),
         "servers": await _section("servers", lambda: _servers(request, now)),
         "errors": await _section("errors", _errors),
