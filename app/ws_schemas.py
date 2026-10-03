@@ -97,7 +97,7 @@ class MessageFrame(BaseModel):
     id: str
     server_id: int
     channel_id: int
-    # A ProseMirror doc (dict) or plain string; validated for presence only.
+    # A ProseMirror doc (dict) or plain string; validated by normalize_content.
     content: Any
     timestamp: str
     metadata: dict = Field(default_factory=dict)
@@ -110,7 +110,7 @@ class DirectMessageFrame(BaseModel):
     type: Literal["direct_message"]
     id: str
     conversation_id: int
-    # A ProseMirror doc (dict) or plain string; validated for presence only.
+    # A ProseMirror doc (dict) or plain string; validated by normalize_content.
     content: Any
     timestamp: str
     metadata: dict = Field(default_factory=dict)

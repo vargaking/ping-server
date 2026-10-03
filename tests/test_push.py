@@ -842,11 +842,10 @@ def test_a_mentioned_member_who_cannot_view_the_channel_is_not_pushed(channel_te
     assert [c["endpoint"] for c in push_on.calls] == [team.carol.endpoint]
 
 
-def test_string_content_with_mentions_is_understood(channel_team, push_on):
+def test_json_string_content_is_plain_text_and_mentions_nobody(channel_team, push_on):
     team = channel_team
     send_to_channel(team, json.dumps(doc(text("yo "), mention(str(team.bob.user["id"]), "bob"))))
-    assert [c["endpoint"] for c in push_on.calls] == [team.bob.endpoint]
-    assert push_on.calls[0]["payload"]["body"] == "yo @bob"
+    assert push_on.calls == []
 
 
 # -- read retraction -------------------------------------------------------
@@ -976,7 +975,6 @@ def test_plain_text_flattens_tiptap_documents():
     ]}
     assert plain_text(content) == "Hello @bob there second line"
     assert plain_text(json.dumps(content)) == "Hello @bob there second line"
-    assert plain_text(str(content)) == "Hello @bob there second line"
     assert plain_text("just  a string") == "just a string"
     assert plain_text(None) == ""
     assert plain_text(doc({"type": "mention", "attrs": {"id": 4}})) == "@4"
@@ -1382,19 +1380,25 @@ def test_a_100k_paren_string_message_is_delivered_and_sends_no_push(channel_team
     frame = hostile_message_is_delivered_without_push(
         team, push_on,
         lambda ws: ws.send_json(channel_frame(team.server["id"], team.channel["id"], content)))
-    assert frame["content"] == content
+    assert frame["content"] == {
+        "type": "doc", "content": [{"type": "paragraph", "content": [text(content)]}]}
 
 
-def test_a_deeply_nested_document_is_delivered_and_sends_no_push(channel_team, push_on):
+def test_a_deeply_nested_document_is_rejected_and_sends_no_push(channel_team, push_on):
     team = channel_team
-    body = json.dumps(channel_frame(team.server["id"], team.channel["id"], None))
-    # Deeper than the walkers' cap, but within what json can parse and echo.
+    frame = channel_frame(team.server["id"], team.channel["id"], None)
+    body = json.dumps(frame)
     depth = 300
     nested = '{"type":"blockquote","content":[' * depth + '{"type":"text","text":"deep"}' + "]}" * depth
-    raw = body.replace("null", nested)
-    frame = hostile_message_is_delivered_without_push(
-        team, push_on, lambda ws: ws.send_text(raw))
-    assert frame["channel_id"] == team.channel["id"]
+    with team.alice_client.websocket_connect("/ws", headers=HEADERS) as alice_ws:
+        ws_ready(alice_ws)
+        alice_ws.send_text(body.replace("null", nested))
+        error = alice_ws.receive_json()
+        while error["type"] != "error":
+            error = alice_ws.receive_json()
+    assert error["code"] == "invalid_content"
+    assert error["ref"] == frame["id"]
+    assert push_on.calls == []
 
 
 def test_a_failing_mention_scan_does_not_break_delivery(channel_team, push_on, monkeypatch):
