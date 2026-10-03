@@ -34,6 +34,7 @@ os.environ.setdefault("PUSH_TEST_RATE_LIMIT", "10000/minute")
 os.environ.setdefault("CLIENT_ERROR_GLOBAL_RATE_LIMIT", "10000/hour")
 os.environ.setdefault("UNFURL_RATE_LIMIT", "10000/minute")
 
+import bcrypt  # noqa: E402
 import pytest  # noqa: E402
 from fastapi.testclient import TestClient  # noqa: E402
 from starlette.testclient import WebSocketTestSession  # noqa: E402
@@ -42,7 +43,11 @@ from app.app import app  # noqa: E402
 from app.services import activity  # noqa: E402
 from app.services.permissions import permissions  # noqa: E402
 
-ORIGIN = "http://localhost:5173"
+# Hashing at production cost was most of the suite's runtime.
+_gensalt = bcrypt.gensalt
+bcrypt.gensalt = lambda rounds=4, prefix=b"2b": _gensalt(rounds, prefix)
+
+ORIGIN ="http://localhost:5173"
 # A Vercel branch-preview origin that matches ALLOWED_ORIGIN_REGEX above.
 PREVIEW_ORIGIN = "https://ping-frontend-abc123-vargakings-projects.vercel.app"
 PASSWORD = "correct horse battery staple"
