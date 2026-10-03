@@ -10,7 +10,7 @@ import json
 from typing import Annotated, Any, Literal, Union
 from urllib.parse import urlsplit
 
-from pydantic import AfterValidator, BaseModel, Field, TypeAdapter, ValidationError
+from pydantic import AfterValidator, BaseModel, Field, TypeAdapter, ValidationError, model_validator
 
 from app.services.attachments import MAX_ATTACHMENTS_PER_MESSAGE
 
@@ -24,6 +24,7 @@ __all__ = [
     "DirectMessageFrame",
     "EmbedIn",
     "ActivityFrame",
+    "TypingFrame",
     "PingFrame",
     "WSFrame",
     "parse_frame",
@@ -123,6 +124,30 @@ class ActivityFrame(BaseModel):
     state: Literal["active", "idle"]
 
 
+class TypingFrame(BaseModel):
+    type: Literal["typing"]
+    server_id: int | None = None
+    channel_id: int | None = None
+    conversation_id: int | None = None
+
+    @model_validator(mode="after")
+    def _exactly_one_target(self):
+        in_channel = (
+            self.server_id is not None
+            and self.channel_id is not None
+            and self.conversation_id is None
+        )
+        in_conversation = (
+            self.conversation_id is not None
+            and self.server_id is None
+            and self.channel_id is None
+        )
+        if not (in_channel or in_conversation):
+            raise ValueError(
+                "typing needs either server_id and channel_id, or conversation_id")
+        return self
+
+
 class PingFrame(BaseModel):
     type: Literal["ping"]
     t: float = Field(allow_inf_nan=False)
@@ -131,7 +156,7 @@ class PingFrame(BaseModel):
 WSFrame = Annotated[
     Union[
         ConnectionInitFrame, DisconnectFrame, MessageFrame, DirectMessageFrame,
-        ActivityFrame, PingFrame,
+        ActivityFrame, TypingFrame, PingFrame,
     ],
     Field(discriminator="type"),
 ]
