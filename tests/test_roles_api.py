@@ -415,6 +415,16 @@ def test_a_member_cannot_switch_on_a_bit_they_do_not_hold(crew):
     assert patch_role(b, sid, role["id"], allow=bits(KICK), deny=bits(SEND)).status_code == 200
 
 
+def test_a_member_cannot_rename_a_role_holding_bits_they_lack(crew, client):
+    sid, b = crew["sid"], crew["b_client"]
+    rich = create_role(client, sid, "Rich", allow=bits(MANAGE_SERVER))
+
+    res = patch_role(b, sid, rich["id"], name="Poorer", color="#000000")
+
+    assert (res.status_code, res.json()["detail"]) == (
+        403, "You can't change permissions you don't have")
+
+
 def test_a_member_cannot_inherit_from_admin(crew):
     sid, b = crew["sid"], crew["b_client"]
     admin = roles_by_name(b, sid)["Admin"]

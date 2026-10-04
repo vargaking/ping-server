@@ -95,8 +95,6 @@ def check_can_edit(
     for descendant_id in descendants(role.id, roles):
         if not standing.can_touch(roles[descendant_id]):
             raise HTTPException(status_code=403, detail=INHERITED_ABOVE_YOU)
-    if (allow, deny, parent_id) == (role.allow, role.deny, role.parent_id):
-        return
     changed = (role.allow ^ allow) | (role.deny ^ deny)
     after = {**roles, role.id: _Edited(role, allow, deny, parent_id)}
     if changed & ~standing.mask or resolved(role.id, after)[0] & ~standing.mask:
