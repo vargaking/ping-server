@@ -123,6 +123,11 @@ def test_deafened_attribute():
     assert participant_from_info(_info(attributes={"deafened": "false"})).deafened is False
 
 
+def test_server_muted_attribute_maps_to_server_muted():
+    assert participant_from_info(_info(attributes={"server_muted": "true"})).server_muted is True
+    assert participant_from_info(_info()).server_muted is False
+
+
 def test_non_numeric_identity_is_skipped():
     assert participant_from_info(_info(identity="ingress-bot")) is None
 
@@ -539,7 +544,7 @@ def test_voice_state_reaches_only_server_members(client, new_client, monkeypatch
             "server_id": server["id"],
             "channel_id": voice["id"],
             "participants": [
-                {"user_id": alice_user["id"], "muted": True, "deafened": False},
+                {"user_id": alice_user["id"], "muted": True, "deafened": False, "server_muted": False},
             ],
         }
 
@@ -574,7 +579,7 @@ def test_presence_endpoint_lists_occupied_channels_for_members(client, new_clien
     assert res.json() == [{
         "channel_id": occupied["id"],
         "participants": [
-            {"user_id": alice_user["id"], "muted": False, "deafened": True},
+            {"user_id": alice_user["id"], "muted": False, "deafened": True, "server_muted": False},
         ],
     }]
 
