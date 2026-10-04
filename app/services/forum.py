@@ -112,6 +112,7 @@ async def rows(posts: list[ForumPost], *, with_opening_id: bool = False) -> list
             "channel_id": post.channel_id,
             "title": post.title,
             "author_id": post.author_id,
+            "imported_author": (post.metadata or {}).get("imported_author"),
             "tag_ids": tag_ids.get(post.id, []),
             "pinned": post.pinned,
             "locked": post.locked,

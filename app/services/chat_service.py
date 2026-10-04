@@ -30,6 +30,8 @@ logger = logging.getLogger("app.services.chat_service")
 
 _INVALID_REPLY = object()
 
+_CLIENT_FORBIDDEN_KEYS = {"embeds", "imported_author", "import"}
+
 TYPING_MIN_INTERVAL = 2.0
 _TYPING_PRUNE_THRESHOLD = 1024
 
@@ -188,6 +190,7 @@ class ChatService:
             "reactions": [],
             "embeds": [e.model_dump() for e in fields.embeds],
             "reply_to": reply_json(reply_to_uuid, refs),
+            "imported_author": None,
         }
 
         member_ids = await UserToServer.filter(
@@ -553,8 +556,9 @@ class ChatService:
 
     @staticmethod
     def _stored_metadata(message: MessageFrame | DirectMessageFrame) -> dict:
-        """Client metadata with embeds replaced by the validated ones."""
-        metadata = {k: v for k, v in message.metadata.items() if k != "embeds"}
+        """Client metadata with embeds replaced by the validated ones. The keys
+        only an import may write are dropped."""
+        metadata = {k: v for k, v in message.metadata.items() if k not in _CLIENT_FORBIDDEN_KEYS}
         if message.embeds:
             metadata["embeds"] = [e.model_dump() for e in message.embeds]
         return metadata

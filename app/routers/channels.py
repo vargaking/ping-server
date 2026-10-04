@@ -70,6 +70,7 @@ def _serialize(
         "reactions": reactions,
         "reply_to": reply_json(message["reply_to_uuid"], refs),
         "embeds": (message["metadata"] or {}).get("embeds", []),
+        "imported_author": (message["metadata"] or {}).get("imported_author"),
     }
 
 
