@@ -51,7 +51,7 @@ The interactive API docs are then at http://localhost:8000/docs.
 | `MEDIA_MOUNT_PATH` | no | `/media` | Path the app serves `MEDIA_ROOT` at via StaticFiles. |
 | `MAX_UPLOAD_BYTES` | no | `5242880` | Max accepted image upload size (5 MB). |
 | `ATTACHMENTS_ROOT` | no | `attachments` | Directory message attachments are written to. Must be writable and must NOT be served by nginx or the `/media` mount; files are only served through the `/attachments` routes. |
-| `MAX_ATTACHMENT_BYTES` | no | `10485760` | Max accepted attachment size (10 MB). |
+| `MAX_ATTACHMENT_BYTES` | no | `26214400` | Max accepted attachment size (25 MB). |
 | `ATTACHMENT_URL_KEY` | yes (prod) | random per process | Secret (32+ bytes) that signs the 5-minute attachment download links from `POST /attachments/{id}/link`. If unset, a random key is generated at startup and links stop working on restart. Generate one with `python -c "import secrets; print(secrets.token_urlsafe(32))"`. |
 | `AUTH_RATE_LIMIT` | no | `10/minute` | Per-IP limit on `/auth/login` and `/auth/register`. |
 | `INVITE_USE_RATE_LIMIT` | no | `20/minute` | Per-IP + per-invite limit on `POST /invites/{id}/use`. |

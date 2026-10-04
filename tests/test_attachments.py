@@ -828,3 +828,27 @@ def test_conversation_preview_lists_attachments(team):
     preview = next(c for c in listing if c["id"] == convo["id"])["last_message"]
     assert preview["attachments"] == [att]
     assert open_conversation(alice, team["bob_user"]["id"])["last_message"]["attachments"] == [att]
+
+
+def test_default_cap_is_25_mb_and_exposed_on_me(client, monkeypatch):
+    monkeypatch.delenv("MAX_ATTACHMENT_BYTES", raising=False)
+    me = register(client)
+    assert me["max_attachment_bytes"] == 25 * 1024 * 1024 == 26214400
+
+
+def test_me_reports_env_override(client, monkeypatch):
+    monkeypatch.setenv("MAX_ATTACHMENT_BYTES", "12345")
+    me = register(client)
+    assert me["max_attachment_bytes"] == 12345
+
+
+def test_upload_at_default_cap(team, monkeypatch):
+    monkeypatch.delenv("MAX_ATTACHMENT_BYTES", raising=False)
+    cap = 25 * 1024 * 1024
+    ok = upload(team["alice"], b"x" * cap, name="ok.bin", content_type="application/octet-stream",
+                channel_id=team["channel"]["id"])
+    assert ok.status_code == 201, ok.text
+    too_big = upload(team["alice"], b"x" * (cap + 1), name="big.bin",
+                     content_type="application/octet-stream", channel_id=team["channel"]["id"])
+    assert too_big.status_code == 413
+    assert "25 MB" in too_big.json()["detail"]
