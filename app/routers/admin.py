@@ -17,6 +17,7 @@ from ..models.UserToServer import UserToServer
 from ..platform import require_platform_admin
 from ..services import error_counter, recent_errors
 from ..services.host_metrics import host_metrics
+from ..services.system_user import IMPORTED_USERNAME
 from ..services.voice_stats import voice_snapshot
 
 router = APIRouter(prefix="/admin", tags=["admin"], dependencies=[Depends(require_platform_admin)])
@@ -49,13 +50,14 @@ async def _load() -> dict:
 async def _users(request: Request, now: datetime) -> dict:
     comms = request.app.state.comms.connection_manager
     online = comms.online_user_ids()
+    people = User.exclude(username=IMPORTED_USERNAME)
     return {
-        "total": await User.all().count(),
-        "new_7d": await User.filter(created_at__gte=now - timedelta(days=7)).count(),
+        "total": await people.count(),
+        "new_7d": await people.filter(created_at__gte=now - timedelta(days=7)).count(),
         "active_now": sum(1 for user_id in online if comms.is_active(user_id)),
         "online": len(online),
-        "dau": await User.filter(last_active_at__gte=now - timedelta(days=1)).count(),
-        "wau": await User.filter(last_active_at__gte=now - timedelta(days=7)).count(),
+        "dau": await people.filter(last_active_at__gte=now - timedelta(days=1)).count(),
+        "wau": await people.filter(last_active_at__gte=now - timedelta(days=7)).count(),
     }
 
 

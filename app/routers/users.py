@@ -6,6 +6,7 @@ from pydantic import BaseModel
 
 from ..middleware import get_current_user
 from ..models.User import User
+from ..services.system_user import IMPORTED_USERNAME
 from ..services.storage import ImageValidationError, storage_service
 
 router = APIRouter(prefix="/users", tags=["users"])
@@ -38,7 +39,7 @@ class UserResponse(BaseModel):
 
 @router.get("/", response_model=List[UserResponse])
 async def get_users(current_user: User = Depends(get_current_user)):
-    users = await User.all()
+    users = await User.exclude(username=IMPORTED_USERNAME)
     return [UserResponse.from_user(user) for user in users]
 
 
