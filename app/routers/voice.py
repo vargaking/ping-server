@@ -18,7 +18,7 @@ from ..services.voice_moderation import (
     publish_sources,
     server_muted_attributes,
 )
-from ..services.voice_presence import VoicePresence, remove_from_voice
+from ..services.voice_presence import remove_from_voice, voice_channels_of
 
 router = APIRouter(prefix="/api/voice", tags=["voice"])
 
@@ -202,19 +202,6 @@ async def _check_moderation(
     return server
 
 
-async def _voice_channels_of(
-    presence: VoicePresence | None, server_id: int, user_id: int
-) -> list[int]:
-    if presence is None:
-        return []
-    in_voice = presence.channels_of(user_id)
-    if not in_voice:
-        return []
-    server_channels = await Channel.filter(
-        server_id=server_id, type="voice", id__in=in_voice).values_list("id", flat=True)
-    return list(server_channels)
-
-
 @router.put("/servers/{server_id}/members/{user_id}/server-mute", status_code=204)
 async def server_mute_member(
     server_id: int,
@@ -247,7 +234,7 @@ async def _set_server_mute(request: Request, server: Server, user_id: int, muted
     moderation.set_muted(server.id, user_id, muted)
 
     presence = getattr(request.app.state, "voice_presence", None)
-    channel_ids = await _voice_channels_of(presence, server.id, user_id)
+    channel_ids = await voice_channels_of(presence, server.id, user_id)
     if not channel_ids:
         return
     effective = await permissions.effective(user_id, server) or Permission(0)
@@ -270,5 +257,5 @@ async def disconnect_member(
         own_action="Leave voice instead")
     presence = getattr(request.app.state, "voice_presence", None)
     await remove_from_voice(
-        presence, await _voice_channels_of(presence, server.id, user_id), user_id)
+        presence, await voice_channels_of(presence, server.id, user_id), user_id)
     return Response(status_code=204)

@@ -15,7 +15,7 @@ from ..models.User import User
 from ..models.UserToServer import UserToServer
 from ..services import channel_layout
 from ..services.permissions import permissions
-from ..services.roles import seed_server_roles
+from ..services.roles import announce_mask_changes, check_can_assign, seed_server_roles, standing_of
 from ..services.server_icon import clean_icon_text, clean_icon_tone
 from ..services.server_name import clean_server_name
 from ..services.storage import ImageValidationError, storage_service
@@ -118,26 +118,6 @@ class MemberResponse(BaseModel):
     joined_at: datetime
     is_owner: bool
     role_ids: List[int] = []
-
-
-class RoleResponse(BaseModel):
-    id: int
-    name: str
-    allow: str
-    deny: str
-    parent_id: Optional[int] = None
-    is_default: bool
-
-    @classmethod
-    def from_role(cls, role: Role):
-        return cls(
-            id=role.id,
-            name=role.name,
-            allow=str(role.allow),
-            deny=str(role.deny),
-            parent_id=role.parent_id,
-            is_default=role.is_default,
-        )
 
 
 class MemberRolesUpdate(BaseModel):
@@ -437,14 +417,6 @@ async def list_members(
     return members
 
 
-@router.get("/{server_id}/roles", response_model=List[RoleResponse])
-async def list_roles(
-    server: Server = Depends(check_permission(Permission(0), hide=True)),
-):
-    roles = await Role.filter(server=server).order_by("-is_default", "id")
-    return [RoleResponse.from_role(role) for role in roles]
-
-
 @router.put("/{server_id}/members/{user_id}/roles", response_model=MemberResponse)
 async def set_member_roles(
     user_id: int,
@@ -471,20 +443,17 @@ async def set_member_roles(
 
     current = set(await RoleToUser.filter(
         user_id=user_id, role_id__in=list(roles)).values_list("role_id", flat=True))
-    if current_user.id != server.owner_id:
-        # Handing out a role is handing out its bits, so it can't exceed your own.
-        for role_id in wanted ^ current:
-            if roles[role_id].allow & ~int(actor_mask):
-                raise HTTPException(
-                    status_code=403, detail="You can't grant or remove a role above your own permissions")
+    standing = await standing_of(current_user, server, actor_mask, roles)
+    for role_id in wanted ^ current:
+        check_can_assign(standing, roles, roles[role_id])
 
-    before = await permissions.effective(user_id, server)
+    before = await permissions.effective(user_id, server) or Permission(0)
     async with in_transaction():
         await RoleToUser.filter(user_id=user_id, role_id__in=list(roles)).delete()
         await RoleToUser.bulk_create(
             [RoleToUser(user_id=user_id, role_id=role_id) for role_id in sorted(wanted)])
     permissions.invalidate(server.id, user_id)
-    after = await permissions.effective(user_id, server)
+    after = await permissions.effective(user_id, server) or Permission(0)
 
     role_ids = sorted(wanted)
     comms = getattr(request.app.state, "comms", None)
@@ -495,12 +464,7 @@ async def set_member_roles(
             "user_id": user_id,
             "role_ids": role_ids,
         })
-        if after != before:
-            await comms.send_to_user(user_id, {
-                "type": "permissions_updated",
-                "server_id": server.id,
-                "permissions": str(int(after)),
-            })
+    await announce_mask_changes(request, server, {user_id: before}, {user_id: after})
 
     return await _member_response(server, membership, role_ids)
 

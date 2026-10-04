@@ -72,9 +72,12 @@ def test_new_server_has_exactly_default_and_admin_roles(client):
     server = create_server(client)
 
     roles = client.get(f"/servers/{server['id']}/roles").json()
-    assert [(r["name"], r["is_default"], r["allow"], r["deny"], r["parent_id"]) for r in roles] == [
-        ("@everyone", True, str(int(MEMBER_PERMISSIONS)), "0", None),
-        ("Admin", False, str(int(ADMIN_PERMISSIONS)), "0", None),
+    assert [
+        (r["name"], r["is_default"], r["allow"], r["deny"], r["parent_id"], r["position"], r["color"])
+        for r in roles
+    ] == [
+        ("Admin", False, str(int(ADMIN_PERMISSIONS)), "0", None, 1, None),
+        ("@everyone", True, str(int(MEMBER_PERMISSIONS)), "0", None, 0, None),
     ]
     assert (int(MEMBER_PERMISSIONS), int(ADMIN_PERMISSIONS), int(ALL_PERMISSIONS)) == (123, 13311, 16383)
 
