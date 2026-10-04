@@ -11,6 +11,7 @@ from tortoise.expressions import Q
 from ..middleware import get_current_user
 from ..models.Channel import Channel
 from ..models.ChannelGroup import ChannelGroup
+from ..models.ForumPost import ForumPost
 from ..models.Message import Message
 from ..models.Server import Server
 from ..models.User import User
@@ -38,9 +39,9 @@ HISTORY_PAGE_SIZE = 50
 MAX_HISTORY_PAGE_SIZE = 100
 
 
-def _encode_cursor(created_at: datetime, message_id: int) -> str:
-    """Opaque cursor pointing just before a message, keyed by (created_at, id)."""
-    raw = f"{created_at.isoformat()}|{message_id}"
+def _encode_cursor(at: datetime, row_id: int) -> str:
+    """Opaque cursor pointing just before a row, keyed by (time, id)."""
+    raw = f"{at.isoformat()}|{row_id}"
     return base64.urlsafe_b64encode(raw.encode()).decode()
 
 
@@ -62,6 +63,7 @@ def _serialize(
         "user_id": message["author_id"],
         "channel_id": message["channel_id"],
         "server_id": message["server_id"],
+        "post_id": message["post_id"],
         "timestamp": message["timestamp"],
         "edited_at": message["edited_at"],
         "attachments": attachments,
@@ -108,7 +110,7 @@ def _clean_topic(value: Optional[str]) -> Optional[str]:
 
 class ChannelCreate(BaseModel):
     name: str
-    type: Literal["text", "voice"] = "text"
+    type: Literal["text", "voice", "forum"] = "text"
     topic: Optional[str] = None
     group_id: Optional[StrictInt] = None
 
@@ -197,6 +199,7 @@ async def get_messages(
         "author_id",
         "channel_id",
         "server_id",
+        "post_id",
         "timestamp",
         "edited_at",
         "reply_to_uuid",
@@ -211,30 +214,45 @@ async def get_channel_messages(
     channel_id: int,
     before: Optional[str] = None,
     limit: int = HISTORY_PAGE_SIZE,
+    post_id: Optional[int] = None,
+    channel: Channel = Depends(channel_from_path),
     server: Server = Depends(check_permission(Permission.VIEW_CHANNEL, server_of_channel)),
 ):
-    """Newest-first page of a channel's history.
+    """Newest-first page of a channel's history, or of one post's messages
+    in a forum channel (which needs post_id; no other channel takes it).
 
     Pass the previous page's next_cursor as before to walk further back.
     """
     limit = max(1, min(limit, MAX_HISTORY_PAGE_SIZE))
 
-    query = Message.filter(channel_id=channel_id)
+    in_forum = channel.type == "forum"
+    if in_forum != (post_id is not None):
+        raise HTTPException(
+            status_code=422,
+            detail="post_id is required in a forum channel and not allowed elsewhere")
+    if in_forum and not await ForumPost.filter(id=post_id, channel_id=channel_id).exists():
+        raise HTTPException(status_code=404, detail="Post not found")
+
+    # A post is ordered by the message's own timestamp, which imported
+    # history sets; everything else by arrival.
+    order_field = "timestamp" if in_forum else "created_at"
+    query = Message.filter(channel_id=channel_id, post_id=post_id)
     if before:
-        cursor_created_at, cursor_id = _decode_cursor(before)
+        cursor_at, cursor_id = _decode_cursor(before)
         query = query.filter(
-            Q(created_at__lt=cursor_created_at)
-            | Q(created_at=cursor_created_at, id__lt=cursor_id)
+            Q(**{f"{order_field}__lt": cursor_at})
+            | Q(**{order_field: cursor_at, "id__lt": cursor_id})
         )
 
     # Fetch one extra row to tell whether an older page exists.
-    rows = await query.order_by("-created_at", "-id").limit(limit + 1).values(
+    rows = await query.order_by(f"-{order_field}", "-id").limit(limit + 1).values(
         "id",
         "uuid",
         "content",
         "author_id",
         "channel_id",
         "server_id",
+        "post_id",
         "timestamp",
         "created_at",
         "edited_at",
@@ -248,7 +266,7 @@ async def get_channel_messages(
     next_cursor = None
     if has_more and rows:
         last = rows[-1]
-        next_cursor = _encode_cursor(last["created_at"], last["id"])
+        next_cursor = _encode_cursor(last[order_field], last["id"])
 
     return {
         "messages": await _serialize_all(rows),
