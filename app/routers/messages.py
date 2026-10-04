@@ -1,4 +1,3 @@
-import json
 import logging
 from datetime import datetime, timezone
 from typing import Any
@@ -17,6 +16,7 @@ from ..models.Server import Server
 from ..models.User import User
 from ..permissions import Permission, require_permission
 from ..services.attachments import attachments_by_message, delete_file
+from ..services.message_content import InvalidContent, normalize_content, serialize
 from ..services.permissions import permissions
 from ..services.reactions import (
     MAX_DISTINCT_EMOJIS_PER_MESSAGE,
@@ -31,8 +31,7 @@ router = APIRouter(prefix="/messages", tags=["messages"])
 
 
 class MessageUpdate(BaseModel):
-    # A ProseMirror doc (dict) or a plain string, same shape as an incoming
-    # chat frame's content.
+    # A ProseMirror doc (dict) or a plain string; validated by normalize_content.
     content: Any
 
 
@@ -130,13 +129,15 @@ async def edit_message(
     if message.author_id != current_user.id:
         raise HTTPException(status_code=403, detail="You can only edit your own messages")
 
-    content = body.content
-    # Persist dicts as JSON text, matching how ChatService stores incoming frames.
-    message.content = json.dumps(content) if isinstance(content, dict) else content
+    attachments = (await attachments_by_message([message.id])).get(message.id, [])
+    try:
+        content = normalize_content(body.content, allow_empty=bool(attachments))
+    except InvalidContent:
+        raise HTTPException(status_code=422, detail="Invalid message content")
+    message.content = serialize(content)
     message.edited_at = datetime.now(timezone.utc)
     await message.save()
 
-    attachments = (await attachments_by_message([message.id])).get(message.id, [])
     reactions = (await reactions_by_message([message.id])).get(message.id, [])
     refs = await reply_refs([message.reply_to_uuid])
     payload = _wire_message(
