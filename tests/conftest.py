@@ -34,6 +34,7 @@ os.environ.setdefault("PUSH_TEST_RATE_LIMIT", "10000/minute")
 os.environ.setdefault("CLIENT_ERROR_GLOBAL_RATE_LIMIT", "10000/hour")
 os.environ.setdefault("UNFURL_RATE_LIMIT", "10000/minute")
 
+import anyio  # noqa: E402
 import bcrypt  # noqa: E402
 import pytest  # noqa: E402
 from fastapi.testclient import TestClient  # noqa: E402
@@ -113,6 +114,24 @@ def create_channel(client: TestClient, server_id: int, name: str = "general",
     assert res.status_code == 201, res.text
     return res.json()
 
+
+FRAME_TIMEOUT_SECONDS = 10
+
+
+def _receive_within_timeout(self):
+    async def receive():
+        with anyio.fail_after(FRAME_TIMEOUT_SECONDS):
+            return await self._send_rx.receive()
+
+    try:
+        return self.portal.call(receive)
+    except TimeoutError:
+        raise AssertionError(
+            f"no WebSocket frame arrived within {FRAME_TIMEOUT_SECONDS}s") from None
+
+
+# Starlette's receive() blocks forever; a frame that never comes must fail the test.
+WebSocketTestSession.receive = _receive_within_timeout
 
 _receive_json = WebSocketTestSession.receive_json
 

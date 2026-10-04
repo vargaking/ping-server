@@ -354,6 +354,9 @@ class PushService:
         """Wait for every scheduled push to finish (tests)."""
         while self._tasks:
             await asyncio.gather(*list(self._tasks), return_exceptions=True)
+            # gather() of finished tasks returns without yielding, and a task only
+            # leaves the set in a done-callback, so let queued callbacks run.
+            await asyncio.sleep(0)
 
     def track(self, user_id: int, tag: str, message_pk: int) -> None:
         """Remember that *user_id* was pushed about *message_pk* in *tag*'s thread."""
