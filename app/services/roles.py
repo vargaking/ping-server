@@ -7,6 +7,7 @@ from tortoise.expressions import F
 from ..models.Role import Role
 from ..models.RoleToUser import RoleToUser
 from ..models.Server import Server
+from ..models.User import User
 from ..permissions import (
     ADMIN_PERMISSIONS,
     ADMIN_ROLE_NAME,
@@ -15,7 +16,6 @@ from ..permissions import (
     MEMBER_PERMISSIONS,
     Permission,
 )
-from ..models.User import User
 from . import channel_layout
 from .permissions import permissions, server_masks
 from .role_resolution import RoleLike, descendants, resolved
