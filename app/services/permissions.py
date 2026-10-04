@@ -3,6 +3,7 @@ from ..models.RoleToUser import RoleToUser
 from ..models.Server import Server
 from ..models.UserToServer import UserToServer
 from ..permissions import ALL_PERMISSIONS, Permission
+from .role_resolution import member_mask
 
 
 class PermissionResolver:
@@ -65,21 +66,23 @@ class PermissionResolver:
         roles = {role.id: role for role in await Role.filter(server_id=server_id)}
         assigned = await RoleToUser.filter(
             user_id=user_id, role_id__in=list(roles)).values_list("role_id", flat=True)
-        applied = [r.id for r in roles.values() if r.is_default] + list(assigned)
+        return member_mask(roles, assigned)
 
-        allow = deny = 0
-        seen: set[int] = set()
-        for role_id in applied:
-            # The seen set also stops a parent cycle.
-            while role_id is not None and role_id not in seen:
-                seen.add(role_id)
-                role = roles.get(role_id)
-                if role is None:
-                    break
-                allow |= role.allow
-                deny |= role.deny
-                role_id = role.parent_id
-        return Permission((allow & ~deny) & ALL_PERMISSIONS)
+
+async def server_masks(server: Server) -> dict[int, Permission]:
+    """Every member's server-level mask, from one query each for roles,
+    assignments and members."""
+    roles = {role.id: role for role in await Role.filter(server_id=server.id)}
+    assigned: dict[int, list[int]] = {}
+    for user_id, role_id in await RoleToUser.filter(
+            role_id__in=list(roles)).values_list("user_id", "role_id"):
+        assigned.setdefault(user_id, []).append(role_id)
+    member_ids = await UserToServer.filter(server_id=server.id).values_list("user_id", flat=True)
+    return {
+        user_id: ALL_PERMISSIONS if user_id == server.owner_id
+        else member_mask(roles, assigned.get(user_id, []))
+        for user_id in member_ids
+    }
 
 
 permissions = PermissionResolver()
