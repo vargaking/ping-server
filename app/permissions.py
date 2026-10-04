@@ -28,6 +28,8 @@ class Permission(IntFlag):
     KICK_MEMBERS = 1 << 9
     MANAGE_SERVER = 1 << 10
     MANAGE_ROLES = 1 << 11
+    MUTE_MEMBERS = 1 << 12
+    MOVE_MEMBERS = 1 << 13
 
 
 ALL_PERMISSIONS = reduce(or_, Permission)
@@ -38,6 +40,7 @@ MEMBER_PERMISSIONS = (
 ADMIN_PERMISSIONS = (
     MEMBER_PERMISSIONS | Permission.MANAGE_MESSAGES | Permission.MANAGE_INVITES
     | Permission.MANAGE_CHANNELS | Permission.KICK_MEMBERS
+    | Permission.MUTE_MEMBERS | Permission.MOVE_MEMBERS
 )
 DEFAULT_ROLE_NAME = "@everyone"
 ADMIN_ROLE_NAME = "Admin"

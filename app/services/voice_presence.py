@@ -23,12 +23,14 @@ class VoiceParticipant:
     user_id: int
     muted: bool
     deafened: bool
+    server_muted: bool = False
 
     def to_json(self) -> dict:
         return {
             "user_id": self.user_id,
             "muted": self.muted,
             "deafened": self.deafened,
+            "server_muted": self.server_muted,
         }
 
 
@@ -54,6 +56,7 @@ def participant_from_info(info) -> VoiceParticipant | None:
         user_id=user_id,
         muted=not has_live_mic,
         deafened=info.attributes.get("deafened") == "true",
+        server_muted=info.attributes.get("server_muted") == "true",
     )
 
 
@@ -95,6 +98,21 @@ class LiveKitRoomSource:
     async def remove_participant(self, channel_id: int, user_id: int) -> None:
         await self._api().room.remove_participant(api.RoomParticipantIdentity(
             room=f"{ROOM_PREFIX}{channel_id}", identity=str(user_id)))
+
+    async def update_participant(
+        self, channel_id: int, user_id: int, sources: list[str], attributes: dict[str, str]
+    ) -> None:
+        permission = models.ParticipantPermission(
+            can_subscribe=True,
+            # An empty source list means "any source" to LiveKit.
+            can_publish=bool(sources),
+            can_publish_sources=[models.TrackSource.Value(s.upper()) for s in sources],
+            can_publish_data=True,
+            can_update_metadata=True,
+        )
+        await self._api().room.update_participant(api.UpdateParticipantRequest(
+            room=f"{ROOM_PREFIX}{channel_id}", identity=str(user_id),
+            permission=permission, attributes=attributes))
 
     async def delete_room(self, channel_id: int) -> None:
         await self._api().room.delete_room(
@@ -226,6 +244,20 @@ class VoicePresence:
         except Exception:
             logger.debug(
                 "No voice participant %s to remove from channel %s",
+                user_id, channel_id, exc_info=True)
+            return
+        self.refresh(channel_id)
+
+    async def update_participant(
+        self, channel_id: int, user_id: int, sources: list[str], attributes: dict[str, str]
+    ) -> None:
+        """Change what one user may publish in a voice channel, and their
+        attributes. A missing participant is fine."""
+        try:
+            await self._source.update_participant(channel_id, user_id, sources, attributes)
+        except Exception:
+            logger.debug(
+                "No voice participant %s to update in channel %s",
                 user_id, channel_id, exc_info=True)
             return
         self.refresh(channel_id)

@@ -8,6 +8,7 @@ from fastapi.concurrency import asynccontextmanager
 
 from .models.Token import Token
 from .services.stats_history import StatsSampler, sampling_enabled
+from .services.voice_moderation import VoiceModeration
 from .services.voice_presence import create_voice_presence
 
 logger = logging.getLogger("app.utils")
@@ -63,6 +64,7 @@ async def lifespan(app: FastAPI):
     except Exception:
         logger.warning("Failed to start voice presence", exc_info=True)
     app.state.voice_presence = presence
+    app.state.voice_moderation = VoiceModeration()
 
     stats_task = None
     try:

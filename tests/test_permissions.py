@@ -76,7 +76,7 @@ def test_new_server_has_exactly_default_and_admin_roles(client):
         ("@everyone", True, str(int(MEMBER_PERMISSIONS)), "0", None),
         ("Admin", False, str(int(ADMIN_PERMISSIONS)), "0", None),
     ]
-    assert (int(MEMBER_PERMISSIONS), int(ADMIN_PERMISSIONS), int(ALL_PERMISSIONS)) == (123, 1023, 4095)
+    assert (int(MEMBER_PERMISSIONS), int(ADMIN_PERMISSIONS), int(ALL_PERMISSIONS)) == (123, 13311, 16383)
 
 
 def test_roles_are_hidden_from_non_members(client, new_client):
@@ -92,7 +92,7 @@ def test_roles_are_hidden_from_non_members(client, new_client):
 def test_server_responses_carry_the_callers_permissions(team):
     sid = team["server"]["id"]
     assert team["member_client"].get(f"/servers/{sid}").json()["permissions"] == "123"
-    assert team["admin_client"].get(f"/servers/{sid}").json()["permissions"] == "1023"
+    assert team["admin_client"].get(f"/servers/{sid}").json()["permissions"] == "13311"
 
     mine = team["member_client"].get("/servers/me").json()
     assert [(s["id"], s["permissions"]) for s in mine] == [(sid, "123")]
@@ -100,7 +100,7 @@ def test_server_responses_carry_the_callers_permissions(team):
 
 def test_creating_a_server_returns_owner_permissions(client):
     register(client)
-    assert create_server(client)["permissions"] == "4095"
+    assert create_server(client)["permissions"] == "16383"
 
 
 def test_members_list_shows_assigned_roles_only(team, client):
@@ -563,7 +563,7 @@ def test_permissions_init_lists_every_server_the_user_is_in(team, client):
         ws_ready_frames = [ws.receive_json(), ws.receive_json()]
         assert ws_ready_frames[1] == {
             "type": "permissions_init",
-            "servers": {str(sid): "4095", str(other["id"]): "4095"},
+            "servers": {str(sid): "16383", str(other["id"]): "16383"},
         }
 
 
@@ -598,7 +598,7 @@ def test_promote_and_demote_notify_the_target_and_the_rest(team, client):
         got = {f["type"]: f for f in (member_ws.receive_json(), member_ws.receive_json())}
         assert got["member_roles_updated"] == roles_updated
         assert got["permissions_updated"] == {
-            "type": "permissions_updated", "server_id": sid, "permissions": "1023"}
+            "type": "permissions_updated", "server_id": sid, "permissions": "13311"}
 
         assert set_roles(client, sid, member["id"], []).status_code == 200
         demoted = {**roles_updated, "role_ids": []}
