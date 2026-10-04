@@ -117,6 +117,7 @@ def _wire_message(
         "reactions": reactions,
         "reply_to": reply_to,
         "embeds": (message.metadata or {}).get("embeds", []),
+        "imported_author": (message.metadata or {}).get("imported_author"),
     }
 
 

@@ -15,6 +15,7 @@ from ..services import read_state
 from ..services.attachments import attachments_by_message
 from ..services.reactions import reactions_by_message
 from ..services.replies import reply_json, reply_refs
+from ..services.system_user import IMPORTED_USERNAME
 from .channels import (
     HISTORY_PAGE_SIZE,
     MAX_HISTORY_PAGE_SIZE,
@@ -145,7 +146,7 @@ async def get_or_create_conversation(
         raise HTTPException(status_code=400, detail="Cannot open a conversation with yourself")
 
     other = await User.get_or_none(id=body.user_id)
-    if not other:
+    if not other or other.username == IMPORTED_USERNAME:
         raise HTTPException(status_code=404, detail="User not found")
 
     user_a_id, user_b_id = Conversation.normalize_pair(current_user.id, other.id)
@@ -305,4 +306,5 @@ def _serialize(
         "reactions": reactions,
         "reply_to": reply_json(message["reply_to_uuid"], refs),
         "embeds": (message["metadata"] or {}).get("embeds", []),
+        "imported_author": None,
     }
