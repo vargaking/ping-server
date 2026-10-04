@@ -405,14 +405,15 @@ def test_demoted_admin_loses_access_on_the_next_request(team, client):
     assert admin.post(f"/channels/{sid}/create", json={"name": "after"}).status_code == 403
 
 
-def test_channel_reorder_needs_only_manage_channels(team, client):
+def test_channel_order_update_needs_only_manage_channels(team, client):
     admin, sid = team["admin_client"], team["server"]["id"]
     second = create_channel(client, sid, "second")
     order = [second["id"], team["channel"]["id"]]
 
     res = admin.put(f"/servers/{sid}", json={"server_settings": {"channel_order": order}})
     assert res.status_code == 200, res.text
-    assert client.get(f"/servers/{sid}").json()["server_settings"]["channel_order"] == order
+    assert client.get(f"/servers/{sid}").json()["server_settings"]["channel_order"] == [
+        team["channel"]["id"], second["id"]]
 
     res = admin.put(f"/servers/{sid}", json={
         "name": "Renamed", "server_settings": {"channel_order": order}})
@@ -427,7 +428,7 @@ def test_channel_reorder_needs_only_manage_channels(team, client):
     assert member_res.status_code == 403
 
 
-def test_channel_reorder_still_works_with_a_default_channel_set(team, client):
+def test_channel_order_update_keeps_default_channel(team, client):
     admin, sid = team["admin_client"], team["server"]["id"]
     channel_id = team["channel"]["id"]
     second = create_channel(client, sid, "second")
@@ -438,7 +439,7 @@ def test_channel_reorder_still_works_with_a_default_channel_set(team, client):
     res = admin.put(f"/servers/{sid}", json={"server_settings": {"channel_order": order}})
     assert res.status_code == 200, res.text
     settings = client.get(f"/servers/{sid}").json()["server_settings"]
-    assert settings["channel_order"] == order
+    assert settings["channel_order"] == [channel_id, second["id"]]
     assert settings["default_channel_id"] == channel_id
 
     res = admin.put(f"/servers/{sid}", json={"server_settings": {"default_channel_id": None}})

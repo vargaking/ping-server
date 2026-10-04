@@ -13,6 +13,7 @@ from ..models.RoleToUser import RoleToUser
 from ..models.Server import Server
 from ..models.User import User
 from ..models.UserToServer import UserToServer
+from ..services import channel_layout
 from ..services.permissions import permissions
 from ..services.roles import seed_server_roles
 from ..services.server_icon import clean_icon_text, clean_icon_tone
@@ -143,8 +144,17 @@ class MemberRolesUpdate(BaseModel):
     role_ids: List[int]
 
 
-async def server_response(server: Server, user: User) -> ServerResponse:
+def _with_channel_order(settings: dict, order: list[int]) -> dict:
+    return {**(settings or {}), "channel_order": order}
+
+
+async def server_response(
+    server: Server, user: User, channel_order: Optional[list[int]] = None
+) -> ServerResponse:
+    if channel_order is None:
+        channel_order = (await channel_layout.legacy_channel_orders([server.id]))[server.id]
     response = ServerResponse.from_server(server)
+    response.server_settings = _with_channel_order(response.server_settings, channel_order)
     mask = await permissions.effective(user.id, server)
     response.permissions = str(int(mask or 0))
     return response
@@ -170,6 +180,7 @@ async def create_server_for(owner: User, **fields) -> Server:
     server = await Server.create(**fields, owner=owner)
     await UserToServer.create(user=owner, server=server)
     await seed_server_roles(server)
+    await channel_layout.seed_default_groups(server)
     return server
 
 
@@ -204,7 +215,11 @@ async def get_my_servers(current_user: User = Depends(get_current_user)):
     # Return servers the current user belongs to
     user_server_relations = await UserToServer.filter(user=current_user).prefetch_related("server__server_users__user")
     servers = [relation.server for relation in user_server_relations]
-    return [await server_response(server, current_user) for server in servers]
+    orders = await channel_layout.legacy_channel_orders([server.id for server in servers])
+    return [
+        await server_response(server, current_user, orders[server.id])
+        for server in servers
+    ]
 
 
 @router.get("/{server_id}", response_model=ServerResponse)
@@ -222,7 +237,9 @@ async def _broadcast_server_updated(request: Request, server: Server, actor_id: 
     if comms is None:
         return
     payload = ServerPublicResponse.from_server(server).model_dump(mode="json")
-    payload["server_settings"] = server.server_settings
+    orders = await channel_layout.legacy_channel_orders([server.id])
+    payload["server_settings"] = _with_channel_order(
+        server.server_settings, orders[server.id])
     await comms.broadcast_to_server(server.id, {
         "type": "server_updated",
         "server": payload,
@@ -287,12 +304,18 @@ async def update_server(
     server: Server = Depends(server_from_path),
 ):
     update_data = server_update.model_dump(exclude_unset=True)
-    # Dragging channels into a new order is a channel edit, not a server edit.
-    needed = (
-        Permission.MANAGE_CHANNELS if _is_channel_reorder(update_data)
-        else Permission.MANAGE_SERVER
-    )
-    await require_permission(current_user, server, needed)
+    # Older clients still send channel_order when dragging channels. It is
+    # accepted for one release but the layout is owned by the channel endpoints.
+    channel_reorder = _is_channel_reorder(update_data)
+    await require_permission(
+        current_user, server,
+        Permission.MANAGE_CHANNELS if channel_reorder else Permission.MANAGE_SERVER)
+    if channel_reorder:
+        return ServerPublicResponse.from_server(server)
+    if update_data.get("server_settings") is not None:
+        update_data["server_settings"] = {
+            key: value for key, value in update_data["server_settings"].items()
+            if key != "channel_order"}
 
     if "name" in update_data and update_data["name"] is None:
         raise HTTPException(status_code=422, detail="Server name can't be empty")
