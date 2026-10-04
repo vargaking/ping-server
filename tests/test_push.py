@@ -808,6 +808,40 @@ def test_a_mention_pushes_to_the_offline_member_only(channel_team, push_on):
     }
 
 
+def test_a_mention_in_a_forum_post_carries_post_id(channel_team, push_on):
+    team = channel_team
+    forum = create_channel(team.alice_client, team.server["id"], "ideas", "forum")
+    opening = {
+        "id": str(uuid.uuid4()),
+        "content": doc(mention(team.bob.user["id"], "bob")),
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+    }
+    created = team.alice_client.post(
+        f"/channels/{forum['id']}/posts", json={"title": "Look", "message": opening})
+    assert created.status_code == 201, created.text
+    post_id = created.json()["post"]["id"]
+    drain(team.alice_client)
+
+    assert len(push_on.calls) == 1
+    payload = push_on.calls[0]["payload"]
+    assert push_on.calls[0]["endpoint"] == team.bob.endpoint
+    assert payload["kind"] == "mention"
+    assert payload["post_id"] == post_id
+    assert payload["url"] == f"/app/server/{team.server['id']}/forum/{forum['id']}/{post_id}/"
+    assert payload["tag"] == f"ch-{forum['id']}"
+
+    reply = channel_frame(team.server["id"], forum["id"], doc(mention(team.carol.user["id"])))
+    reply["post_id"] = post_id
+    with team.alice_client.websocket_connect("/ws", headers=HEADERS) as ws:
+        ws_ready(ws)
+        ws.send_json(reply)
+        sync(ws)
+    drain(team.alice_client)
+
+    assert [c["payload"]["post_id"] for c in push_on.calls] == [post_id, post_id]
+    assert push_on.calls[1]["endpoint"] == team.carol.endpoint
+
+
 def test_every_mentioned_member_is_pushed(channel_team, push_on):
     team = channel_team
     send_to_channel(team, doc(mention(team.bob.user["id"]), mention(team.carol.user["id"]),
