@@ -1,19 +1,22 @@
 import logging
 import time
+from dataclasses import dataclass
 from uuid import UUID
 
 from fastapi import WebSocket
 from tortoise.exceptions import IntegrityError
+from tortoise.expressions import F
 from tortoise.transactions import in_transaction
 
 from app.models.Attachment import Attachment
 from app.models.Channel import Channel
 from app.models.Conversation import Conversation
+from app.models.ForumPost import ForumPost
 from app.models.Message import Message
 from app.models.User import User
 from app.models.UserToServer import UserToServer
 from app.permissions import Permission
-from app.services import read_state
+from app.services import forum, read_state
 from app.services.message_content import InvalidContent, normalize_content, serialize
 from app.services.connection_manager import ConnectionManager
 from app.services.permissions import permissions
@@ -36,6 +39,25 @@ class _AttachmentsUnavailable(Exception):
     write; the message must not be stored."""
 
 
+class MessageRejected(Exception):
+    """The message was not stored; *code* is the error code for the sender."""
+
+    def __init__(self, code: str) -> None:
+        super().__init__(code)
+        self.code = code
+
+
+class MessageAlreadyStored(Exception):
+    """The sender already stored a message with this id."""
+
+
+@dataclass
+class CreatedMessage:
+    message: Message
+    frame: dict
+    post_row: dict | None
+
+
 class ChatService:
     """Handles incoming chat messages: persists to DB and broadcasts to server members."""
 
@@ -43,7 +65,7 @@ class ChatService:
 
     def __init__(self, connection_manager: ConnectionManager) -> None:
         self.connection_manager = connection_manager
-        self._typing_accepted: dict[tuple[int, tuple[str, int]], float] = {}
+        self._typing_accepted: dict[tuple[int, tuple], float] = {}
 
     async def handle_message(
         self, sender_id: int, message: MessageFrame, sender_ws: WebSocket
@@ -54,68 +76,95 @@ class ChatService:
         already been validated (see ws_schemas); any ``user_id`` the client put
         in it is discarded.
         """
-        server_id = message.server_id
-        channel_id = message.channel_id
+        try:
+            await self.create_channel_message(
+                sender_id, message, sender_ws=sender_ws)
+        except MessageAlreadyStored:
+            await self._send_ack(sender_ws, message.id)
+        except MessageRejected as rejected:
+            await self._send_error(sender_ws, rejected.code, message.id)
+        else:
+            await self._send_ack(sender_ws, message.id)
+
+    async def create_channel_message(
+        self,
+        sender_id: int,
+        fields: MessageFrame,
+        *,
+        post: forum.NewPost | None = None,
+        sender_ws: WebSocket | None = None,
+        skip_sender: bool = False,
+    ) -> CreatedMessage:
+        """Everything after the frame is parsed: access, the forum post rule,
+        content, attachments, quote, persist, read state, fan-out and mention
+        push. Shared by the socket and the post-create endpoint.
+
+        *post* makes this the opening message of a new post in a forum
+        channel; otherwise ``fields.post_id`` names the post of a reply.
+        Messages go to the channel's members; the sending socket
+        (*sender_ws*), or with *skip_sender* all of the sender's sockets, is
+        left out. Raises MessageRejected, or MessageAlreadyStored when this
+        sender already stored this id.
+        """
+        server_id = fields.server_id
+        channel_id = fields.channel_id
 
         # Being logged in is not enough: the sender has to be allowed to post
         # in the server, and the channel has to actually live in that server.
         can_send = await permissions.has(
             sender_id, server_id, Permission.VIEW_CHANNEL | Permission.SEND_MESSAGES)
-        channel_ok = can_send and await Channel.filter(
-            id=channel_id, server_id=server_id).exists()
-        if not channel_ok:
+        channel = can_send and await Channel.get_or_none(id=channel_id, server_id=server_id)
+        if not channel:
             logger.warning(
                 "User %s tried to post to server %s / channel %s without access",
                 sender_id, server_id, channel_id,
             )
-            await self._send_error(sender_ws, "forbidden", message.id)
-            return
+            raise MessageRejected("forbidden")
 
-        if await self._answer_duplicate(
-                sender_ws, sender_id, message.id, channel_id=channel_id):
-            return
+        await self._reject_stored(sender_id, fields.id, channel_id=channel_id)
+        reply_post = await self._check_post(sender_id, channel, fields.post_id, post)
 
         try:
             content = normalize_content(
-                message.content, allow_empty=bool(message.attachment_ids))
+                fields.content, allow_empty=bool(fields.attachment_ids))
         except InvalidContent:
-            await self._send_error(sender_ws, "invalid_content", message.id)
-            return
+            raise MessageRejected("invalid_content")
 
         attachments = await self._load_attachments(
-            sender_id, message.attachment_ids, channel_id=channel_id)
+            sender_id, fields.attachment_ids, channel_id=channel_id)
         if attachments is None:
-            await self._send_error(sender_ws, "invalid_attachments", message.id)
-            return
+            raise MessageRejected("invalid_attachments")
 
         reply_to_uuid = await self._resolve_reply(
-            message.reply_to, channel_id=channel_id)
+            fields.reply_to, channel_id=channel_id, post_id=fields.post_id)
         if reply_to_uuid is _INVALID_REPLY:
-            await self._send_error(sender_ws, "invalid_reply", message.id)
-            return
+            raise MessageRejected("invalid_reply")
 
         # Persist first: never show other people a message that was not stored.
         try:
             created = await self._create_message(
                 attachments,
-                uuid=message.id,
+                new_post=post,
+                reply_post=reply_post,
+                uuid=fields.id,
                 content=serialize(content),
                 author_id=sender_id,
                 server_id=server_id,
                 channel_id=channel_id,
-                timestamp=message.timestamp,
-                metadata=self._stored_metadata(message),
+                timestamp=fields.timestamp,
+                metadata=self._stored_metadata(fields),
                 reply_to_uuid=reply_to_uuid,
             )
         except IntegrityError:
             # A concurrent send of the same id won the unique constraint.
-            if not await self._answer_duplicate(
-                    sender_ws, sender_id, message.id, channel_id=channel_id):
-                raise
-            return
+            await self._reject_stored(sender_id, fields.id, channel_id=channel_id)
+            raise
         if created is None:
-            await self._send_error(sender_ws, "invalid_attachments", message.id)
-            return
+            raise MessageRejected("invalid_attachments")
+        post_row = None
+        if created.post_id is not None:
+            stored_post = await ForumPost.get(id=created.post_id)
+            post_row = (await forum.rows([stored_post]))[0]
 
         # Your own message can never leave the thread unread for you, even
         # after a reload on another device.
@@ -128,23 +177,32 @@ class ChatService:
         refs = await reply_refs([reply_to_uuid])
         outgoing = {
             "type": "message",
-            "id": message.id,
+            "id": fields.id,
             "server_id": server_id,
             "channel_id": channel_id,
+            "post_id": created.post_id,
             "user_id": sender_id,
             "content": content,
-            "timestamp": message.timestamp,
+            "timestamp": fields.timestamp,
             "attachments": [a.to_json() for a in attachments],
             "reactions": [],
-            "embeds": [e.model_dump() for e in message.embeds],
+            "embeds": [e.model_dump() for e in fields.embeds],
             "reply_to": reply_json(reply_to_uuid, refs),
         }
 
         member_ids = await UserToServer.filter(
             server_id=server_id).values_list("user_id", flat=True)
 
-        await self._fan_out(outgoing, member_ids, sender_ws=sender_ws)
-        await self._send_ack(sender_ws, message.id)
+        exclude_user_id = sender_id if skip_sender else None
+        if post is not None:
+            await self._fan_out(
+                forum.created_frame(server_id, post_row), member_ids,
+                exclude_user_id=exclude_user_id)
+        await self._fan_out(
+            outgoing, member_ids, sender_ws=sender_ws, exclude_user_id=exclude_user_id)
+        if post is None and post_row is not None:
+            # The sender's socket only got an ack, so it needs this too.
+            await self._fan_out(forum.updated_frame(server_id, post_row), member_ids)
 
         if push.enabled:
             # Runs in the sender's socket path: a push problem must never
@@ -153,10 +211,50 @@ class ChatService:
                 mentioned = mentioned_user_ids(content)
                 if mentioned:
                     push.schedule(self._push_mentions(
-                        sender_id, server_id, channel_id, created.id,
+                        sender_id, server_id, channel_id, created.post_id, created.id,
                         str(created.uuid), content, attachments, mentioned, member_ids))
             except Exception:
                 logger.warning("Failed to schedule mention pushes", exc_info=True)
+        return CreatedMessage(created, outgoing, post_row)
+
+    @staticmethod
+    async def _check_post(
+        sender_id: int, channel: Channel, post_id: int | None, new_post: forum.NewPost | None,
+    ) -> ForumPost | None:
+        """The post a reply belongs to. A forum channel takes only post
+        messages and every other channel takes none."""
+        if channel.type != "forum":
+            if post_id is not None or new_post is not None:
+                raise MessageRejected("invalid_post")
+            return None
+        if new_post is not None:
+            if post_id is not None:
+                raise MessageRejected("invalid_post")
+            return None
+        post = post_id is not None and await ForumPost.get_or_none(
+            id=post_id, channel_id=channel.id)
+        if not post:
+            raise MessageRejected("invalid_post")
+        if post.locked and not await permissions.has(
+                sender_id, channel.server_id, Permission.MANAGE_MESSAGES):
+            raise MessageRejected("post_locked")
+        return post
+
+    @staticmethod
+    async def _reject_stored(sender_id: int, message_id: str, *, channel_id: int) -> None:
+        """Raise if *message_id* is already stored: MessageAlreadyStored for the
+        same author resending into the same channel (a retry whose ack was
+        lost), a duplicate_id rejection for anything else."""
+        try:
+            existing_uuid = UUID(message_id)
+        except ValueError:
+            return
+        existing = await Message.get_or_none(uuid=existing_uuid)
+        if existing is None:
+            return
+        if existing.author_id == sender_id and existing.channel_id == channel_id:
+            raise MessageAlreadyStored
+        raise MessageRejected("duplicate_id")
 
     async def handle_direct_message(
         self, sender_id: int, message: DirectMessageFrame, sender_ws: WebSocket
@@ -262,7 +360,7 @@ class ChatService:
         if frame.conversation_id is not None:
             thread = ("direct", frame.conversation_id)
         else:
-            thread = ("channel", frame.channel_id)
+            thread = ("channel", frame.channel_id, frame.post_id)
         if not self._accept_typing(sender_id, thread):
             return
 
@@ -284,12 +382,22 @@ class ChatService:
 
         can_send = await permissions.has(
             sender_id, frame.server_id, Permission.VIEW_CHANNEL | Permission.SEND_MESSAGES)
-        channel_ok = can_send and await Channel.filter(
-            id=frame.channel_id, server_id=frame.server_id).exists()
-        if not channel_ok:
+        channel = can_send and await Channel.get_or_none(
+            id=frame.channel_id, server_id=frame.server_id)
+        if not channel:
             logger.debug(
                 "Typing dropped: user %s has no access to server %s / channel %s",
                 sender_id, frame.server_id, frame.channel_id)
+            return
+        if channel.type == "forum":
+            valid = frame.post_id is not None and await ForumPost.filter(
+                id=frame.post_id, channel_id=channel.id).exists()
+        else:
+            valid = frame.post_id is None
+        if not valid:
+            logger.debug(
+                "Typing dropped: user %s sent post %s for channel %s",
+                sender_id, frame.post_id, frame.channel_id)
             return
         outgoing = {
             "type": "typing",
@@ -297,11 +405,13 @@ class ChatService:
             "server_id": frame.server_id,
             "channel_id": frame.channel_id,
         }
+        if frame.post_id is not None:
+            outgoing["post_id"] = frame.post_id
         member_ids = await UserToServer.filter(
             server_id=frame.server_id).values_list("user_id", flat=True)
         await self._fan_out(outgoing, member_ids, exclude_user_id=sender_id)
 
-    def _accept_typing(self, sender_id: int, thread: tuple[str, int]) -> bool:
+    def _accept_typing(self, sender_id: int, thread: tuple) -> bool:
         """Record and allow a typing frame unless the sender sent one for this
         thread within TYPING_MIN_INTERVAL."""
         now = self.clock()
@@ -344,8 +454,8 @@ class ChatService:
         ), topic=tag, urgency="high")
 
     async def _push_mentions(
-        self, sender_id: int, server_id: int, channel_id: int, message_pk: int,
-        message_uuid: str, content, attachments: list[Attachment],
+        self, sender_id: int, server_id: int, channel_id: int, post_id: int | None,
+        message_pk: int, message_uuid: str, content, attachments: list[Attachment],
         mentioned: set[int], member_ids,
     ) -> None:
         """Web Push to server members with no active session who can see the
@@ -370,6 +480,7 @@ class ChatService:
             server_id=server_id,
             channel_id=channel_id,
             channel_name=channel.name,
+            post_id=post_id,
             sender_name=sender.username,
             body=plain_text(content, attachments),
             message_id=message_pk,
@@ -388,9 +499,11 @@ class ChatService:
         *,
         channel_id: int | None = None,
         conversation_id: int | None = None,
+        post_id: int | None = None,
     ) -> UUID | None | object:
         """The original's uuid, None for a non-reply, or _INVALID_REPLY if it
-        isn't a uuid or isn't a message of this channel or conversation."""
+        isn't a uuid or isn't a message of this channel or conversation (and,
+        in a forum, of the same post)."""
         if raw is None:
             return None
         try:
@@ -399,6 +512,7 @@ class ChatService:
             return _INVALID_REPLY
         exists = await Message.filter(
             uuid=original, channel_id=channel_id, conversation_id=conversation_id,
+            post_id=post_id,
         ).exists()
         return original if exists else _INVALID_REPLY
 
@@ -446,18 +560,36 @@ class ChatService:
         return metadata
 
     @staticmethod
-    async def _create_message(attachments: list[Attachment], **fields) -> Message | None:
-        """Store the message and link its attachments in one transaction.
-        Returns None, storing nothing, if an attachment got taken meanwhile."""
+    async def _create_message(
+        attachments: list[Attachment],
+        *,
+        new_post: forum.NewPost | None = None,
+        reply_post: ForumPost | None = None,
+        **fields,
+    ) -> Message | None:
+        """Store the message, link its attachments and keep its post in step,
+        in one transaction. Returns None, storing nothing, if an attachment
+        got taken meanwhile."""
         try:
             async with in_transaction():
-                created = await Message.create(**fields)
+                post = reply_post
+                if new_post is not None:
+                    post = await forum.create_post(
+                        fields["channel_id"], fields["author_id"], new_post)
+                created = await Message.create(
+                    post_id=post.id if post else None, **fields)
                 if attachments:
                     linked = await Attachment.filter(
                         id__in=[a.id for a in attachments], message_id__isnull=True,
                     ).update(message_id=created.id)
                     if linked != len(attachments):
                         raise _AttachmentsUnavailable
+                if new_post is not None:
+                    post.opening_message_id = created.id
+                    await post.save(update_fields=["opening_message_id"])
+                elif post is not None:
+                    await ForumPost.filter(id=post.id).update(
+                        reply_count=F("reply_count") + 1, last_activity_at=forum.utcnow())
         except _AttachmentsUnavailable:
             return None
         return created

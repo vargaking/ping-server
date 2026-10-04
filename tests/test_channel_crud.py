@@ -195,6 +195,8 @@ def test_update_and_delete_broadcast_to_other_members(client, new_client):
                 "channel_settings": {},
                 "type": "text",
                 "topic": "hey",
+                "group_id": None,
+                "position": 0,
             },
         }
 
