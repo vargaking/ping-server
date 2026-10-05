@@ -11,6 +11,7 @@ from ..models.Token import Token
 from ..models.User import User
 from ..rate_limit import limiter
 from ..services import attachments as attachment_service
+from ..services.system_user import IMPORTED_USERNAME
 from ..settings import auth_rate_limit
 from .users import UserResponse
 
@@ -101,7 +102,8 @@ async def register(user_data: RegisterRequest, request: Request, response: Respo
 @limiter.limit(auth_rate_limit)
 async def login(login_data: LoginRequest, request: Request, response: Response):
     user = await User.get_or_none(username=login_data.username)
-    if not user or not user.check_password(login_data.password):
+    if (not user or user.username == IMPORTED_USERNAME
+            or not user.check_password(login_data.password)):
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Incorrect username or password"

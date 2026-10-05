@@ -61,11 +61,12 @@ async def upgrade(db: BaseDBAsyncClient) -> str:
             if content != row["content"]:
                 await db.execute_query(update, [content, row["id"]])
         last_id = rows[-1]["id"]
-    return ""
+    # aerich runs the returned script, and asyncpg crashes on an empty one.
+    return "SELECT 1;"
 
 
 async def downgrade(db: BaseDBAsyncClient) -> str:
-    return ""
+    return "SELECT 1;"
 
 
 MODELS_STATE = (

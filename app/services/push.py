@@ -118,12 +118,17 @@ def dm_payload(
 
 def mention_payload(
     *, server_id: int, channel_id: int, channel_name: str, sender_name: str,
-    body: str, message_id: int, message_uuid: str,
+    body: str, message_id: int, message_uuid: str, post_id: int | None = None,
 ) -> dict:
-    return _message_payload(
+    where = (
+        f"channel/{channel_id}" if post_id is None else f"forum/{channel_id}/{post_id}")
+    payload = _message_payload(
         "mention", tag=channel_tag(channel_id), title=f"{sender_name} in #{channel_name}",
-        body=body, url=f"/app/server/{server_id}/channel/{channel_id}/", count=1,
+        body=body, url=f"/app/server/{server_id}/{where}/", count=1,
         message_id=message_id, message_uuid=message_uuid)
+    if post_id is not None:
+        payload["post_id"] = post_id
+    return payload
 
 
 def server_request_payload(*, request_id: int, server_id: int, server_name: str) -> dict:

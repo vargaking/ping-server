@@ -97,6 +97,8 @@ class MessageFrame(BaseModel):
     id: str
     server_id: int
     channel_id: int
+    # Required in forum channels and forbidden elsewhere; ChatService enforces it.
+    post_id: int | None = None
     # A ProseMirror doc (dict) or plain string; validated by normalize_content.
     content: Any
     timestamp: str
@@ -129,6 +131,7 @@ class TypingFrame(BaseModel):
     server_id: int | None = None
     channel_id: int | None = None
     conversation_id: int | None = None
+    post_id: int | None = None
 
     @model_validator(mode="after")
     def _exactly_one_target(self):

@@ -99,7 +99,7 @@ def test_channel_reply_carries_quote_live_and_in_history(team):
         live = send_channel(alice_ws, bob_ws, team, text="answer", reply_to=original["id"])
 
     expected = {"id": original["id"], "user_id": team["alice_user"]["id"],
-                "preview": "the original"}
+                "preview": "the original", "imported_author": None}
     assert live["reply_to"] == expected
     stored = history(team["bob"], team["channel"]["id"])
     assert stored[live["id"]]["reply_to"] == expected
@@ -181,7 +181,7 @@ def test_editing_a_reply_keeps_reply_to(team):
         frame = recv(bob_ws, "message_updated")
 
     expected = {"id": original["id"], "user_id": team["alice_user"]["id"],
-                "preview": "the original"}
+                "preview": "the original", "imported_author": None}
     assert res.json()["reply_to"] == expected
     assert frame["reply_to"] == expected
 
@@ -255,7 +255,7 @@ def test_dm_reply_carries_quote_live_and_in_history(dms):
         live = recv(bob_ws, "direct_message")
 
     expected = {"id": original["id"], "user_id": dms["alice_user"]["id"],
-                "preview": "dm original"}
+                "preview": "dm original", "imported_author": None}
     assert live["reply_to"] == expected
     stored = dm_history(dms["bob"], convo)
     assert stored[reply["id"]]["reply_to"] == expected

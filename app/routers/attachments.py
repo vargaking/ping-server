@@ -1,5 +1,4 @@
 import logging
-import re
 import time
 from urllib.parse import quote
 from uuid import UUID
@@ -19,9 +18,6 @@ logger = logging.getLogger("app.routers.attachments")
 
 router = APIRouter(prefix="/attachments", tags=["attachments"])
 
-_MEDIA_TYPE = re.compile(
-    r"^[A-Za-z0-9][A-Za-z0-9!#$&^_.+-]*/[A-Za-z0-9][A-Za-z0-9!#$&^_.+-]*$")
-
 # Uploads are served from the API origin, so the browser must never run or
 # render them: no sniffing, a sandboxed empty CSP, and a forced download for
 # everything that isn't a verified image.
@@ -30,13 +26,6 @@ _SAFE_HEADERS = {
     "Content-Security-Policy": "sandbox; default-src 'none'",
     "Cache-Control": "private, max-age=3600",
 }
-
-
-def _declared_content_type(value: str | None) -> str:
-    media_type = (value or "").split(";")[0].strip().lower()
-    if len(media_type) <= 255 and _MEDIA_TYPE.match(media_type):
-        return media_type
-    return "application/octet-stream"
 
 
 def _format_limit(size: int) -> str:
@@ -71,7 +60,7 @@ async def upload_attachment(
         content_type, width, height = sniffed
     else:
         kind = "file"
-        content_type = _declared_content_type(file.content_type)
+        content_type = attachment_service.declared_content_type(file.content_type)
         width = height = None
 
     subdir = (f"channels/{channel_id}" if channel_id is not None

@@ -59,11 +59,16 @@ def test_rename_and_icon_broadcast_to_other_members(client, new_client):
         assert frame["type"] == "server_updated"
         assert frame["server"]["server_profile"]["icon"] == res.json()["server_profile"]["icon"]
 
-        client.put(f"/servers/{server['id']}",
-                   json={"server_settings": {"channel_order": [3, 1, 2]}})
+        # channel_order is accepted but ignored, so it sends no frame; the
+        # next real update carries the order derived from the layout.
+        res = client.put(f"/servers/{server['id']}",
+                         json={"server_settings": {"channel_order": [3, 1, 2]}})
+        assert res.status_code == 200, res.text
+        client.put(f"/servers/{server['id']}", json={"name": "Newer"})
         frame = bob_ws.receive_json()
         assert frame["type"] == "server_updated"
-        assert frame["server"]["server_settings"]["channel_order"] == [3, 1, 2]
+        assert frame["server"]["name"] == "Newer"
+        assert frame["server"]["server_settings"]["channel_order"] == []
 
         client.delete(f"/servers/{server['id']}")
         assert bob_ws.receive_json() == {"type": "server_deleted", "server_id": server["id"]}
@@ -195,8 +200,10 @@ def test_profile_and_settings_updates_merge(client):
     register(client)
     server = create_server(client)
     sid = server["id"]
+    first = create_channel(client, sid, "first")
+    second = create_channel(client, sid, "second")
     client.post(f"/servers/{sid}/icon", files={"file": ("icon.png", PNG_1PX, "image/png")})
-    client.put(f"/servers/{sid}", json={"server_settings": {"channel_order": [1, 2]}})
+    client.put(f"/servers/{sid}", json={"server_settings": {"channel_order": [second["id"]]}})
 
     res = client.put(f"/servers/{sid}", json={
         "server_profile": {"welcome_message": "  Hello there  "},
@@ -206,7 +213,7 @@ def test_profile_and_settings_updates_merge(client):
     body = client.get(f"/servers/{sid}").json()
     assert body["server_profile"]["welcome_message"] == "Hello there"
     assert body["server_profile"]["icon"]
-    assert body["server_settings"]["channel_order"] == [1, 2]
+    assert body["server_settings"]["channel_order"] == [first["id"], second["id"]]
 
     res = client.put(f"/servers/{sid}", json={"server_profile": {"welcome_message": None}})
     assert "welcome_message" not in res.json()["server_profile"]

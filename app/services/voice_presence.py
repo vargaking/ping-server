@@ -309,6 +309,20 @@ async def remove_from_voice(presence: VoicePresence | None, channel_ids, user_id
         await presence.remove_participant(channel_id, user_id)
 
 
+async def voice_channels_of(
+    presence: VoicePresence | None, server_id: int, user_id: int
+) -> list[int]:
+    """The voice channels of *server_id* the user is currently in."""
+    if presence is None:
+        return []
+    in_voice = presence.channels_of(user_id)
+    if not in_voice:
+        return []
+    server_channels = await Channel.filter(
+        server_id=server_id, type="voice", id__in=in_voice).values_list("id", flat=True)
+    return list(server_channels)
+
+
 async def close_voice_channels(presence: VoicePresence | None, channel_ids) -> None:
     """Shut down the rooms of voice channels that were deleted."""
     if presence is None:
