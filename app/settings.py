@@ -1,6 +1,7 @@
 """Small shared settings that more than one module needs."""
 import os
 import re
+from pathlib import Path
 from typing import Literal
 
 # Browser origins allowed to call the API with credentials. Used by the CORS
@@ -74,3 +75,30 @@ def unfurl_rate_limit() -> str:
 def server_creation_mode() -> Literal["open", "waitlist"]:
     """SERVER_CREATION=open|waitlist. Anything else falls back to open."""
     return "waitlist" if os.getenv("SERVER_CREATION", "").strip().lower() == "waitlist" else "open"
+
+
+def _int_env(name: str, default: int) -> int:
+    try:
+        return int(os.getenv(name, default))
+    except ValueError:
+        return default
+
+
+def imports_root() -> Path:
+    """Where uploaded export zips and their unpacked bundles live. Never served."""
+    root = Path(os.getenv("IMPORTS_ROOT", "imports")).resolve()
+    root.mkdir(parents=True, exist_ok=True)
+    return root
+
+
+def import_max_bytes() -> int:
+    """Largest export zip. 0 turns imports off."""
+    return max(0, _int_env("IMPORT_MAX_BYTES", 5 * 1024**3))
+
+
+def import_max_unpacked_bytes() -> int:
+    return max(0, _int_env("IMPORT_MAX_UNPACKED_BYTES", 2 * import_max_bytes()))
+
+
+def import_chunk_bytes() -> int:
+    return max(1, _int_env("IMPORT_CHUNK_BYTES", 8 * 1024**2))
