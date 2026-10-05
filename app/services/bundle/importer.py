@@ -460,8 +460,8 @@ class _Import:
         info = plan.info
         if info.type == "voice":
             if not self.options.existing_only:
-                self.report.left_out.voice_text_chat += sum(
-                    len(chunk) for chunk in bundle_format.iter_channel_messages(self.path, info.id))
+                self.report.left_out.voice_text_chat += await anyio.to_thread.run_sync(
+                    self._count_messages, info.id)
             return
         created = plan.channel is None or bool(_marker(plan.channel.channel_settings).get("created"))
         async with self._unread_guard(channel, created):
@@ -470,13 +470,17 @@ class _Import:
             else:
                 await self._import_forum(plan, channel)
 
+    def _count_messages(self, channel_id: str) -> int:
+        return sum(len(chunk) for chunk in bundle_format.iter_channel_messages(self.path, channel_id))
+
     async def _import_text(self, plan: _Plan, channel: Channel | None) -> None:
         info = plan.info
         if not self.options.existing_only:
             self.report.left_out.text_channel_threads += len(
-                bundle_format.thread_files(self.path, info.id))
+                await anyio.to_thread.run_sync(bundle_format.thread_files, self.path, info.id))
         buffer: list = []
-        for chunk in bundle_format.iter_channel_messages(self.path, info.id):
+        chunks = bundle_format.iter_channel_messages(self.path, info.id)
+        while (chunk := await anyio.to_thread.run_sync(next, chunks, None)) is not None:
             buffer.extend(chunk)
             while len(buffer) >= BATCH_SIZE:
                 await self._write_batch(plan, channel, buffer[:BATCH_SIZE])
@@ -490,8 +494,9 @@ class _Import:
         existing_only = self.options.existing_only
         tag_ids = {} if existing_only else await self._ensure_tags(plan, channel)
         posts = await self._existing_posts(channel)
-        for path in bundle_format.thread_files(self.path, plan.info.id):
-            thread = bundle_format.load_thread(path)
+        for path in await anyio.to_thread.run_sync(
+                bundle_format.thread_files, self.path, plan.info.id):
+            thread = await anyio.to_thread.run_sync(bundle_format.load_thread, path)
             existing = posts.get(thread.id)
             if existing is None and existing_only:
                 continue
@@ -916,7 +921,7 @@ async def import_bundle(
     ImportAborted for options that can't be followed."""
     if await Server.get_or_none(id=options.server_id) is None:
         raise ImportAborted(f"No server with id {options.server_id}")
-    return await _Import(bundle, options, progress).run()
+    return await (await anyio.to_thread.run_sync(_Import, bundle, options, progress)).run()
 
 
 def _size(value: int) -> str:

@@ -213,7 +213,12 @@ class _Writer:
         self.progress = progress
         self.written = 0
 
+    def _check_not_stopped(self) -> None:
+        if self.stop is not None and self.stop.is_set():
+            raise UnpackError("Unpacking was stopped")
+
     def copy(self, entry: _Entry) -> None:
+        self._check_not_stopped()
         target = self.dest.joinpath(*entry.parts)
         if not target.resolve().is_relative_to(self.dest):
             raise UnpackError("This zip contains a path that isn't allowed")
@@ -222,8 +227,7 @@ class _Writer:
         copied = 0
         with self.archive.open(entry.info) as source, open(target, "xb") as out:
             while block := source.read(BLOCK):
-                if self.stop is not None and self.stop.is_set():
-                    raise UnpackError("Unpacking was stopped")
+                self._check_not_stopped()
                 copied += len(block)
                 self.written += len(block)
                 self._check(entry, copied, declared)
