@@ -20,6 +20,7 @@ from app.models.ChannelGroup import ChannelGroup
 from app.models.ForumPost import ForumPost
 from app.models.ForumTag import ForumTag
 from app.models.Message import Message
+from app.models.Server import Server
 from app.models.ServerImport import ServerImport
 from app.models.User import User
 from app.models.UserToServer import UserToServer
@@ -156,8 +157,10 @@ def counts(client, sid) -> list[int]:
     ]
 
 
-def message(client, source_id) -> Message:
-    return run(client, Message.get(uuid=message_uuid(SOURCE, source_id)))
+def message(client, source_id, sid=None) -> Message:
+    if sid is None:
+        sid = run(client, Server.all().order_by("id").first()).id
+    return run(client, Message.get(uuid=message_uuid(sid, SOURCE, source_id)))
 
 
 def force(client, import_id, **fields):
@@ -262,8 +265,10 @@ def test_a_file_over_the_limit_is_refused(client, world, monkeypatch):
     assert client.get(url(world.sid)).json()["limits"]["max_bytes"] == 1000
 
 
-def test_with_a_limit_of_zero_imports_are_off(client, world, monkeypatch):
+def test_with_a_limit_of_zero_imports_are_off_but_leftovers_can_be_deleted(
+        client, world, monkeypatch, roots):
     imp = create(client, world.sid, 100).json()
+    put_piece(client, world.sid, imp["id"], 0, b"x" * 10)
     monkeypatch.setenv("IMPORT_MAX_BYTES", "0")
     off = "Imports are turned off on this server"
 
@@ -273,9 +278,10 @@ def test_with_a_limit_of_zero_imports_are_off(client, world, monkeypatch):
         put_piece(client, world.sid, imp["id"], 0, b"x"),
         set_authors(client, world.sid, imp["id"], {}),
         start(client, world.sid, imp["id"]),
-        client.delete(url(world.sid, imp["id"])),
     ):
         assert (res.status_code, res.json()["detail"]) == (403, off)
+    assert client.delete(url(world.sid, imp["id"])).status_code == 204
+    assert not folder(roots, imp["id"]).exists()
 
 
 def test_a_new_upload_replaces_unfinished_ones_but_not_a_running_import(client, world, roots):
@@ -551,6 +557,7 @@ def test_the_import_gives_what_a_direct_import_gives(client, world, tmp_path, ro
 
     started = start(client, world.sid, got["id"])
     assert started.status_code == 202
+    assert started.json()["plan"] == got["plan"]
     assert started.json()["status"] == "importing"
     assert started.json()["progress"] == {
         "phase": "importing", "done": 0, "total": 13, "label": None}
@@ -558,7 +565,7 @@ def test_the_import_gives_what_a_direct_import_gives(client, world, tmp_path, ro
 
     assert done["status"] == "done" and done["progress"] is None and done["error"] is None
     assert done["result"]["totals"]["messages"] == 13 and done["result"]["totals"]["posts"] == 2
-    assert done["plan"]["totals"]["messages"] == 13
+    assert done["plan"] == got["plan"]
     assert {a["id"]: a["user_id"] for a in done["authors"]} == {
         "a1": mapping["a1"], "a2": mapping["a2"], "a3": None, "a4": None}
 
@@ -688,7 +695,7 @@ def test_authors_can_be_remapped_after_the_import(client, world, roots):
     after = settle(client, world.sid, done["id"])
 
     assert after["status"] == "done" and after["error"] is None and after["progress"] is None
-    assert after["result"] == done["result"]
+    assert after["result"] == done["result"] and after["plan"] == done["plan"]
     assert counts(client, world.sid) == before
     handed = message(client, "1002")
     assert handed.author_id == world.bob_user["id"] and "imported_author" not in handed.metadata
@@ -707,6 +714,28 @@ def test_authors_can_be_remapped_after_the_import(client, world, roots):
     assert run(client, ForumPost.get(title="Look at this")).metadata["imported_author"] == {
         "id": "a4", "name": "dave"}
     assert counts(client, world.sid) == before
+
+
+def test_unmapping_an_author_after_a_fully_mapped_import_hands_over_to_the_import_account(
+        client, world):
+    everyone = {"a1": world.alice_user["id"], "a2": world.bob_user["id"],
+                "a3": world.alice_user["id"], "a4": world.bob_user["id"]}
+    done = done_import(world, everyone)
+    assert run(client, User.filter(username=IMPORTED_USERNAME).exists()) is False
+
+    res = set_authors(client, world.sid, done["id"], {
+        k: v for k, v in everyone.items() if k not in ("a2", "a4")})
+    assert res.status_code == 200
+    after = settle(client, world.sid, done["id"])
+
+    assert after["status"] == "done" and after["error"] is None
+    system = run(client, User.get(username=IMPORTED_USERNAME))
+    handed = message(client, "1002")
+    assert handed.author_id == system.id
+    assert handed.metadata["imported_author"] == {"id": "a2", "name": "bob"}
+    post = run(client, ForumPost.get(title="Look at this"))
+    assert post.author_id == system.id and post.metadata["imported_author"]["id"] == "a4"
+    assert message(client, "1001").author_id == world.alice_user["id"]
 
 
 def test_an_unchanged_mapping_runs_nothing(client, world, monkeypatch):
@@ -924,6 +953,7 @@ def test_an_import_interrupted_while_importing_finishes_after_a_restart(client, 
     done = settle(client, world.sid, got["id"])
 
     assert done["status"] == "done" and counts(client, world.sid)[2] == 13
+    assert done["plan"] == got["plan"]
 
 
 def test_an_upload_interrupted_while_unpacking_starts_over(client, world, roots):

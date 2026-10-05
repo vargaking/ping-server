@@ -68,7 +68,7 @@ class ImportOptions:
     channel_map: dict[str, int] = field(default_factory=dict)
     include_private: bool = False
     dry_run: bool = False
-    # Only hand existing messages to the mapped authors; create and store nothing.
+    # Only hand existing messages to mapped authors. Creates nothing but the import account.
     existing_only: bool = False
 
 
@@ -170,8 +170,8 @@ def read_authors(path: Path) -> dict[str, str]:
     return {str(k): v for k, v in raw.items()}
 
 
-def message_uuid(source: str, message_id: str) -> UUID:
-    return uuid5(_NAMESPACE, f"{source}:message:{message_id}")
+def message_uuid(server_id: int, source: str, message_id: str) -> UUID:
+    return uuid5(_NAMESPACE, f"{server_id}:{source}:message:{message_id}")
 
 
 def _marker(settings_or_metadata: dict | None) -> dict:
@@ -230,7 +230,6 @@ class _Import:
         self.author_counts: Counter = Counter()
         self.system_id: int | None = None
         self.groups: dict[str, ChannelGroup] = {}
-        self.in_other_servers = 0
 
     async def run(self) -> Report:
         await self._resolve_authors()
@@ -268,7 +267,7 @@ class _Import:
         self.system_id = user.id
 
     async def _system_user_id(self) -> int | None:
-        if self.system_id is None and not self.dry and not self.options.existing_only:
+        if self.system_id is None and not self.dry:
             user = await User.create(
                 username=IMPORTED_USERNAME, password_hash=IMPORTED_PASSWORD_HASH, profile={})
             self.system_id = user.id
@@ -614,16 +613,13 @@ class _Import:
         unique = {}
         for message in messages:
             self.author_counts[message.author_id] += 1
-            unique.setdefault(message_uuid(self.source, message.id), message)
+            unique.setdefault(message_uuid(self.options.server_id, self.source, message.id), message)
         self.report.seen += len(unique)
 
         existing = {
-            row["uuid"]: row for row in await Message.filter(uuid__in=list(unique)).values(
-                "uuid", "id", "author_id", "metadata", "server_id")}
-        for uid in [u for u, row in existing.items() if row["server_id"] != self.options.server_id]:
-            del existing[uid]
-            del unique[uid]
-            self.in_other_servers += 1
+            row["uuid"]: row for row in await Message.filter(
+                uuid__in=list(unique), server_id=self.options.server_id,
+            ).values("uuid", "id", "author_id", "metadata")}
         handovers = []
         fresh = []
         for uid, message in unique.items():
@@ -665,7 +661,7 @@ class _Import:
             await self._create_attachments(prepared, ids, plan, channel)
             await self._hand_over(handovers)
             if post is not None and post.opening_id is None and opening_source is not None:
-                opening = ids.get(message_uuid(self.source, opening_source))
+                opening = ids.get(message_uuid(self.options.server_id, self.source, opening_source))
                 if opening is not None:
                     post.opening_id = opening
                     await ForumPost.filter(id=post.post_id).update(opening_message_id=opening)
@@ -694,7 +690,8 @@ class _Import:
                 self.report.empty_skipped += 1
                 continue
             reply_uuid = (
-                message_uuid(self.source, message.reply_to_id) if message.reply_to_id else None)
+                message_uuid(self.options.server_id, self.source, message.reply_to_id)
+                if message.reply_to_id else None)
             prepared.append(_Prepared(
                 message, uid, owner_id, imported, content, embeds, attachments, reply_uuid))
         return prepared
@@ -895,10 +892,6 @@ class _Import:
     def _finish(self) -> None:
         report = self.report
         report.free_bytes = shutil.disk_usage(attachments_root()).free
-        if self.in_other_servers:
-            report.warnings.append(
-                f"{self.in_other_servers} messages are already imported into another server "
-                "and were skipped")
         if not self.options.existing_only:
             report.left_out.unreadable_channels = len(self.server.unreadable)
             report.left_out.emoji = len(self.server.emoji)

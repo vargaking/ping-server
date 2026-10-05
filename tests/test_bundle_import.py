@@ -16,6 +16,7 @@ from app.models.ForumPost import ForumPost
 from app.models.ForumTag import ForumTag
 from app.models.Message import Message
 from app.models.ReadState import ReadState
+from app.models.Server import Server
 from app.models.User import User
 from app.models.UserToServer import UserToServer
 from app.services.bundle import importer
@@ -50,8 +51,10 @@ def messages_of(client, **filters):
     return run(client, Message.filter(**filters).order_by("timestamp", "id"))
 
 
-def message(client, source_id):
-    return run(client, Message.get(uuid=message_uuid(SOURCE, source_id)))
+def message(client, source_id, sid=None):
+    if sid is None:
+        sid = run(client, Server.all().order_by("id").first()).id
+    return run(client, Message.get(uuid=message_uuid(sid, SOURCE, source_id)))
 
 
 def channel_named(client, sid, name):
@@ -724,19 +727,48 @@ def test_the_plan_is_the_reports_json_form(client, world, bundle):
         "over_attachment_limit", "tags_over_limit", "empty_messages", "invalid_messages"}
 
 
-def test_messages_imported_into_another_server_are_left_alone(client, world, bundle, new_client):
-    do_import(client, bundle, world.sid, authors=authors(world))
+def test_the_same_bundle_imported_into_two_servers_gives_two_independent_imports(
+        client, world, bundle, new_client):
     other_owner = new_client()
     register(other_owner, "second-owner")
     other = create_server(other_owner, "Second")
-    before = [(m.id, m.author_id, m.metadata) for m in messages_of(client, server_id=world.sid)]
+    do_import(client, bundle, world.sid, authors=authors(world))
+    first = [(m.id, m.uuid, m.author_id, m.metadata) for m in messages_of(client, server_id=world.sid)]
 
     report = do_import(client, bundle, other["id"], authors={"a2": "second-owner"})
 
-    assert [(m.id, m.author_id, m.metadata) for m in messages_of(client, server_id=world.sid)] == before
-    assert run(client, Message.filter(server_id=other["id"]).count()) == 0
-    assert sum(c.handed_over + c.existing_messages for c in report.channels) == 0
-    assert report.warnings == ["13 messages are already imported into another server and were skipped"]
+    assert report.messages == 13 and report.warnings == []
+    assert run(client, Message.filter(server_id=other["id"]).count()) == 13
+    assert [(m.id, m.uuid, m.author_id, m.metadata)
+            for m in messages_of(client, server_id=world.sid)] == first
+    assert message(client, "1002", other["id"]).uuid != message(client, "1002", world.sid).uuid
+    assert message(client, "1002", other["id"]).reply_to_uuid == message(
+        client, "1001", other["id"]).uuid
+
+    do_import(client, bundle, other["id"], existing_only=True, authors={
+        "a1": world.alice_user["username"], "a2": "second-owner"})
+
+    assert [(m.id, m.uuid, m.author_id, m.metadata)
+            for m in messages_of(client, server_id=world.sid)] == first
+    assert message(client, "1001", other["id"]).author_id == world.alice_user["id"]
+    assert run(client, Message.filter(server_id=world.sid).count()) == 13
+
+
+def test_existing_only_creates_the_import_account_when_an_author_is_unmapped_later(
+        client, world, bundle):
+    everyone = {"a1": world.alice_user["username"], "a2": world.bob_user["username"],
+                "a3": world.alice_user["username"], "a4": world.bob_user["username"]}
+    do_import(client, bundle, world.sid, authors=everyone)
+    assert run(client, User.filter(username=IMPORTED_USERNAME).exists()) is False
+
+    do_import(client, bundle, world.sid, existing_only=True, authors={
+        k: v for k, v in everyone.items() if k not in ("a2", "a4")})
+
+    system = run(client, User.get(username=IMPORTED_USERNAME))
+    assert message(client, "1002").author_id == system.id
+    assert message(client, "1002").metadata["imported_author"] == {"id": "a2", "name": "bob"}
+    post = run(client, ForumPost.get(title="Look at this"))
+    assert post.author_id == system.id and post.metadata["imported_author"]["id"] == "a4"
 
 
 # Private channels, formats
@@ -849,13 +881,13 @@ def test_history_carries_imported_author(client, world, bundle):
     general = channel_named(client, world.sid, "general")
 
     rows = history(world.alice, general.id)
-    assert rows[str(message_uuid(SOURCE, "1001"))]["imported_author"] is None
-    assert rows[str(message_uuid(SOURCE, "1002"))]["imported_author"] == {"id": "a2", "name": "bob"}
-    quote = rows[str(message_uuid(SOURCE, "1002"))]["reply_to"]
+    assert rows[str(message_uuid(world.sid, SOURCE, "1001"))]["imported_author"] is None
+    assert rows[str(message_uuid(world.sid, SOURCE, "1002"))]["imported_author"] == {"id": "a2", "name": "bob"}
+    quote = rows[str(message_uuid(world.sid, SOURCE, "1002"))]["reply_to"]
     assert quote["imported_author"] is None and quote["user_id"] == world.alice_user["id"]
     system = run(client, User.get(username=IMPORTED_USERNAME))
-    assert rows[str(message_uuid(SOURCE, "1002"))]["user_id"] == system.id
-    assert rows[str(message_uuid(SOURCE, "1002"))]["timestamp"].startswith("2024-03-01T10:05:00")
+    assert rows[str(message_uuid(world.sid, SOURCE, "1002"))]["user_id"] == system.id
+    assert rows[str(message_uuid(world.sid, SOURCE, "1002"))]["timestamp"].startswith("2024-03-01T10:05:00")
 
 
 def test_forum_history_and_quotes_carry_imported_author(client, world, bundle):
@@ -864,8 +896,8 @@ def test_forum_history_and_quotes_carry_imported_author(client, world, bundle):
     dark = run(client, ForumPost.get(title="Dark mode?"))
 
     rows = history(world.alice, ideas.id, post_id=dark.id)
-    assert list(rows) == [str(message_uuid(SOURCE, m)) for m in ("8103", "8102", "8101")]
-    reply = rows[str(message_uuid(SOURCE, "8102"))]
+    assert list(rows) == [str(message_uuid(world.sid, SOURCE, m)) for m in ("8103", "8102", "8101")]
+    reply = rows[str(message_uuid(world.sid, SOURCE, "8102"))]
     assert reply["reply_to"]["imported_author"] == {"id": "a1", "name": "alice"}
     assert reply["imported_author"] is None
 

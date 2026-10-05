@@ -262,7 +262,6 @@ async def start_import(
 
 @router.delete("/{import_id}", status_code=status.HTTP_204_NO_CONTENT)
 async def delete_import(import_id: str, server: Server = Depends(owned_server)):
-    _require_enabled()
     row = await _load(server, import_id)
     if not await ServerImport.filter(id=row.id).exclude(status__in=RUNNING).delete():
         raise HTTPException(status_code=409, detail="The import is running")

@@ -21,7 +21,7 @@ from .storage import human_size
 
 logger = logging.getLogger("app.services.imports")
 
-MAX_ENTRIES = 500_000
+MAX_ENTRIES = 200_000
 MAX_JSON_BYTES = 64 * 1024 * 1024
 FREE_SPACE_MARGIN = 256 * 1024 * 1024
 BLOCK = 1024 * 1024
