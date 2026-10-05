@@ -230,6 +230,7 @@ class _Import:
         self.author_counts: Counter = Counter()
         self.system_id: int | None = None
         self.groups: dict[str, ChannelGroup] = {}
+        self.in_other_servers = 0
 
     async def run(self) -> Report:
         await self._resolve_authors()
@@ -613,7 +614,11 @@ class _Import:
 
         existing = {
             row["uuid"]: row for row in await Message.filter(uuid__in=list(unique)).values(
-                "uuid", "id", "author_id", "metadata")}
+                "uuid", "id", "author_id", "metadata", "server_id")}
+        for uid in [u for u, row in existing.items() if row["server_id"] != self.options.server_id]:
+            del existing[uid]
+            del unique[uid]
+            self.in_other_servers += 1
         handovers = []
         fresh = []
         for uid, message in unique.items():
@@ -885,6 +890,10 @@ class _Import:
     def _finish(self) -> None:
         report = self.report
         report.free_bytes = shutil.disk_usage(attachments_root()).free
+        if self.in_other_servers:
+            report.warnings.append(
+                f"{self.in_other_servers} messages are already imported into another server "
+                "and were skipped")
         if not self.options.existing_only:
             report.left_out.unreadable_channels = len(self.server.unreadable)
             report.left_out.emoji = len(self.server.emoji)

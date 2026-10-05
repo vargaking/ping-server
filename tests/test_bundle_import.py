@@ -724,6 +724,21 @@ def test_the_plan_is_the_reports_json_form(client, world, bundle):
         "over_attachment_limit", "tags_over_limit", "empty_messages", "invalid_messages"}
 
 
+def test_messages_imported_into_another_server_are_left_alone(client, world, bundle, new_client):
+    do_import(client, bundle, world.sid, authors=authors(world))
+    other_owner = new_client()
+    register(other_owner, "second-owner")
+    other = create_server(other_owner, "Second")
+    before = [(m.id, m.author_id, m.metadata) for m in messages_of(client, server_id=world.sid)]
+
+    report = do_import(client, bundle, other["id"], authors={"a2": "second-owner"})
+
+    assert [(m.id, m.author_id, m.metadata) for m in messages_of(client, server_id=world.sid)] == before
+    assert run(client, Message.filter(server_id=other["id"]).count()) == 0
+    assert sum(c.handed_over + c.existing_messages for c in report.channels) == 0
+    assert report.warnings == ["13 messages are already imported into another server and were skipped"]
+
+
 # Private channels, formats
 
 def test_private_channel_skipped_and_included(client, world, bundle):
