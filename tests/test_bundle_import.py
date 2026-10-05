@@ -1,6 +1,7 @@
 """Importing a server bundle, against the sample bundle in tests/fixtures."""
 import json
 import shutil
+import threading
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
@@ -19,6 +20,7 @@ from app.models.User import User
 from app.models.UserToServer import UserToServer
 from app.services.bundle import importer
 from app.services.bundle.format import BundleError, iter_channel_messages, load_server
+from app.services.bundle.plan import plan_json
 from app.services.bundle.importer import (
     ImportAborted,
     ImportOptions,
@@ -443,12 +445,21 @@ def test_oversized_file_is_skipped_and_counted(client, world, bundle, monkeypatc
     monkeypatch.setenv("MAX_ATTACHMENT_BYTES", "1000")
 
     report = do_import(client, bundle, world.sid)
-    assert report.over_cap == 1
-    assert report.over_cap_examples == ["notes.txt (message 1006)"]
+    assert report.over_cap == 2
+    assert sorted(report.over_cap_examples) == [
+        "notes.txt (message 1006)", "report.pdf (message 1003)"]
     assert run(client, Attachment.filter(message_id=message(client, "1006").id).count()) == 0
     assert run(client, Attachment.filter(message_id=message(client, "1002").id).count()) == 1
     assert message(client, "1006")
     assert "Over the size limit" in format_report(report)
+
+
+def test_an_absent_file_declared_over_the_limit_counts_as_over_it(client, world, bundle, monkeypatch):
+    monkeypatch.setenv("MAX_ATTACHMENT_BYTES", "100000")
+
+    report = do_import(client, bundle, world.sid)
+    assert report.over_cap == 1 and report.over_cap_examples == ["report.pdf (message 1003)"]
+    assert report.missing == 0
 
 
 def test_missing_file_is_skipped_and_counted(client, world, bundle):
@@ -592,6 +603,125 @@ def test_rerun_hands_messages_to_newly_mapped_users(client, world, bundle):
     assert back.metadata["imported_author"] == {"id": "a2", "name": "bob"}
     assert run(client, ForumPost.get(title="Look at this")).metadata["imported_author"] == {
         "id": "a4", "name": "dave"}
+
+
+def model_counts(client):
+    return [run(client, model.all().count()) for model in (
+        Channel, ChannelGroup, Message, Attachment, ForumPost, ForumTag, User, ReadState)]
+
+
+def test_existing_only_hands_over_without_creating_or_reading_files(client, world, bundle):
+    do_import(client, bundle, world.sid, authors=authors(world))
+    shutil.rmtree(bundle / "files")
+    before = model_counts(client)
+    owner_id = user_id(client, "owner-bundle")
+
+    report = do_import(client, bundle, world.sid, existing_only=True, authors=authors(
+        world, a2=world.bob_user["username"], a4="owner-bundle"))
+
+    assert model_counts(client) == before
+    assert sum(c.handed_over for c in report.channels) == 6
+    assert message(client, "1002").author_id == world.bob_user["id"]
+    assert run(client, ForumPost.get(title="Look at this")).author_id == owner_id
+    assert report.missing == 0 and report.over_cap == 0
+    assert all(count == 0 for count in vars(report.left_out).values())
+    assert (report.empty_skipped, report.invalid_skipped, report.tags_over_limit) == (0, 0, 0)
+    assert (report.messages, report.posts, report.attachments) == (0, 0, 0)
+
+
+def test_existing_only_on_a_server_without_the_import_does_nothing(client, world, bundle):
+    create_channel(client, world.sid, "general")
+    before = model_counts(client)
+
+    report = do_import(client, bundle, world.sid, existing_only=True, authors=authors(world))
+
+    assert model_counts(client) == before
+    assert {c.name: (c.action, c.reason) for c in report.channels}["ideas"] == (
+        "skipped", "not imported")
+    assert sum(c.handed_over + c.existing_messages for c in report.channels) == 0
+
+
+def test_progress_is_reported_after_every_batch_and_matches_a_dry_run(
+        client, world, bundle, monkeypatch):
+    monkeypatch.setattr(importer, "BATCH_SIZE", 2)
+    seen = []
+
+    async def progress(count, channel):
+        seen.append((count, channel))
+
+    dry = run(client, import_bundle(
+        bundle, ImportOptions(server_id=world.sid, dry_run=True), progress))
+    assert seen and seen == sorted(seen)
+    assert seen[-1][0] == dry.seen > 0
+    assert {name for _, name in seen} <= {"general", "ideas", "off-topic"}
+
+    seen.clear()
+    real = run(client, import_bundle(bundle, ImportOptions(server_id=world.sid), progress))
+    assert real.seen == dry.seen and seen[-1][0] == real.seen
+    assert len(seen) > 3
+
+
+def test_attachments_are_sniffed_off_the_event_loop(client, world, bundle, monkeypatch):
+    threads = []
+    real = importer.sniff_image
+
+    def spy(data):
+        threads.append(threading.current_thread())
+        return real(data)
+
+    monkeypatch.setattr(importer, "sniff_image", spy)
+    do_import(client, bundle, world.sid)
+    assert threads and all(t is not threading.main_thread() for t in threads)
+
+
+def test_the_report_lists_every_author_seen(client, world, bundle):
+    report = do_import(client, bundle, world.sid, authors=authors(world))
+
+    assert [(a.id, a.name, a.messages) for a in report.authors] == sorted(
+        [(a.id, a.name, a.messages) for a in report.authors], key=lambda a: (-a[2], a[1]))
+    assert {a.id for a in report.authors} == {"a1", "a2", "a3", "a4"}
+    assert [a.id for a in report.unmapped_authors] == [
+        a.id for a in report.authors if a.id != "a1"]
+
+
+def test_channels_say_what_will_happen_and_why_not(client, world, bundle):
+    create_channel(client, world.sid, "general")
+    edit_server_json(bundle, lambda data: data["channels"][3].update(type="stage"))
+
+    report = do_import(client, bundle, world.sid, dry_run=True)
+    by_name = {c.name: c for c in report.channels}
+    assert (by_name["general"].action, by_name["general"].target_name) == ("existing", "general")
+    assert (by_name["ideas"].action, by_name["ideas"].target_name) == ("create", None)
+    assert (by_name["staff"].action, by_name["staff"].reason) == ("skipped", "private")
+    assert (by_name["archive"].action, by_name["archive"].reason) == ("skipped", "unreadable")
+    assert by_name["Lounge"].reason == "unsupported type stage"
+    assert plans(report)["staff"] == "skipped: private"
+
+    only = do_import(client, bundle, world.sid, dry_run=True, only={"101"})
+    assert {c.name: c.reason for c in only.channels}["ideas"] == "not selected"
+    assert plans(only)["ideas"] == "skipped: not in --only"
+
+
+def test_the_plan_is_the_reports_json_form(client, world, bundle):
+    report = do_import(client, bundle, world.sid, authors=authors(world), dry_run=True)
+    plan = plan_json(report)
+
+    assert json.loads(json.dumps(plan)) == plan
+    assert set(plan) == {
+        "channels", "totals", "free_bytes", "over_cap", "missing", "left_out", "warnings"}
+    assert plan["totals"] == {
+        "messages": 13, "existing_messages": 0, "posts": 2,
+        "attachments": report.attachments, "attachment_bytes": report.attachment_bytes}
+    assert set(plan["channels"][0]) == {
+        "source_id", "name", "type", "action", "target_name", "reason", "category", "messages",
+        "existing_messages", "posts", "existing_posts", "attachments", "attachment_bytes",
+        "handed_over"}
+    assert plan["left_out"]["avatars"] == 2 and plan["left_out"]["private_channels"] == 1
+    assert plan["missing"] == 1
+    assert set(plan["left_out"]) == {
+        "private_channels", "unreadable_channels", "text_channel_threads",
+        "messages_with_reactions", "pinned_messages", "voice_text_chat", "emoji", "avatars",
+        "over_attachment_limit", "tags_over_limit", "empty_messages", "invalid_messages"}
 
 
 # Private channels, formats
