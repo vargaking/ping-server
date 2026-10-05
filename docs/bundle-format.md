@@ -58,6 +58,12 @@ python -m app.scripts.import_bundle <bundle> --server <server id> --authors auth
 
 `authors.json` maps source author ids to usernames: `{"123": "alice"}`. Authors without an entry are owned by the `[imported]` account, which can't log in.
 
-Run with `--dry-run` first: it prints what each channel would do and writes nothing. Channels match in this order: a `--map` entry, a channel an earlier run of the same bundle created or filled, a channel with the same name and type, otherwise a new one. Running again skips what exists, continues where a failed run stopped, and hands messages to authors mapped since.
+Run with `--dry-run` first: it prints what each channel would do and writes nothing. Channels match in this order: a `--map` entry, a channel an earlier run of the same bundle created or filled, a channel with the same name and type, otherwise a new one. Running again skips what exists, continues where a failed run stopped, and hands messages to authors mapped since. A message that was imported into another server is skipped, with a warning.
 
 Not imported yet, and counted in the report: private channels (without `--include-private`), threads inside text channels, reactions, pins on channel messages, custom emoji, avatars, and the text chat of voice channels.
+
+## Importing from Server settings
+
+The server owner can upload the bundle as a zip instead of running the script. Zip the bundle folder; `server.json` can be at the root of the zip or in one folder inside it.
+
+Only `server.json`, `channels/<id>/messages/*.json`, `channels/<id>/threads/*.json` and `files/<id>/<name>` are unpacked. Everything else in the zip is ignored, and so are attachment files over `MAX_ATTACHMENT_BYTES`, which the plan counts as over the limit. The upload is checked with the same dry run as `--dry-run`, then imported by the same importer, without private channels. Once imported, the files are removed and the data stays, so authors can be mapped to members later.
