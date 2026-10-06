@@ -17,7 +17,8 @@ from .Invite import Invite
 from .ReadState import ReadState
 from .PushSubscription import PushSubscription
 from .ServerRequest import ServerRequest
+from .ServerImport import ServerImport
 
 __all__ = ["Role", "User", "Server", "RoleToUser", "UserToServer",
            "Channel", "ChannelGroup", "ForumPost", "ForumTag", "ForumPostTag", "Conversation", "Message", "Token", "Invite", "ReadState",
-           "Attachment", "Reaction", "PushSubscription", "ServerRequest"]
+           "Attachment", "Reaction", "PushSubscription", "ServerRequest", "ServerImport"]

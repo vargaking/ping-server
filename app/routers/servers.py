@@ -11,9 +11,11 @@ from ..models.Channel import Channel
 from ..models.Role import Role
 from ..models.RoleToUser import RoleToUser
 from ..models.Server import Server
+from ..models.ServerImport import ServerImport
 from ..models.User import User
 from ..models.UserToServer import UserToServer
 from ..services import channel_layout
+from ..services.imports import storage as import_storage
 from ..services.permissions import permissions
 from ..services.roles import announce_mask_changes, check_can_assign, seed_server_roles, standing_of
 from ..services.server_icon import clean_icon_text, clean_icon_tone
@@ -331,8 +333,12 @@ async def delete_server(
     # Memberships go with the server, so collect who to tell first.
     member_ids = await UserToServer.filter(server_id=server.id).values_list("user_id", flat=True)
     voice_channel_ids = await Channel.filter(server_id=server.id, type="voice").values_list("id", flat=True)
+    import_ids = await ServerImport.filter(server_id=server.id).values_list("id", flat=True)
     await server.delete()
     permissions.invalidate(server_id)
+    if import_ids:
+        await request.app.state.import_runner.stop(import_ids)
+        await import_storage.remove_import_dirs(import_ids)
 
     comms = getattr(request.app.state, "comms", None)
     if comms is not None:
