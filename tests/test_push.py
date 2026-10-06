@@ -29,8 +29,9 @@ from app.permissions import Permission
 from app.services.connection_manager import IDLE_AFTER_SECONDS, ConnectionManager
 from app.services.permissions import permissions
 from app.services.push import (
-    DeliveryResult, PushService, dm_payload, endpoint_host, is_valid_subject,
-    mention_payload, mentioned_user_ids, normalize_subject, plain_text, push, read_payload)
+    DeliveryResult, PushService, dm_payload, endpoint_host, is_apple_endpoint,
+    is_valid_subject, mention_payload, mentioned_user_ids, normalize_subject, plain_text, push,
+    read_payload, server_request_payload)
 from app.services.push import test_payload as build_test_payload
 from tests.conftest import ORIGIN, create_channel, create_server, register, ws_ready
 from tests.test_realtime_events import invite_and_join
@@ -38,6 +39,7 @@ from tests.test_realtime_events import invite_and_join
 HEADERS = {"origin": ORIGIN}
 DRAIN_TIMEOUT_SECONDS = 15
 FCM = "https://fcm.googleapis.com/fcm/send/"
+APPLE = "https://web.push.apple.com/"
 
 
 def b64url(raw: bytes) -> str:
@@ -992,6 +994,92 @@ def test_reading_a_thread_we_never_pushed_sends_nothing(channel_team, push_on):
     team.bob.client.put(f"/channels/{team.channel['id']}/read", json={"message_id": newest})
     drain(team.alice_client)
     assert push_on.calls == []
+
+
+@pytest.mark.parametrize("endpoint", [
+    "https://web.push.apple.com/abc", "https://push.apple.com/abc", "https://api.push.apple.com/abc",
+])
+def test_apple_endpoints_are_recognised(endpoint):
+    assert is_apple_endpoint(endpoint)
+
+
+@pytest.mark.parametrize("endpoint", [
+    FCM + "abc", "https://updates.push.services.mozilla.com/wpush/abc",
+    "https://wns2-par02p.notify.windows.com/abc",
+    "https://evilpush.apple.com/abc", "https://push.apple.com.evil.com/abc", "",
+])
+def test_other_endpoints_are_not_apple(endpoint):
+    assert not is_apple_endpoint(endpoint)
+
+
+def read_newest_dm(pair):
+    convo_id = pair.convo["id"]
+    newest = pair.bob_client.get(f"/conversations/{convo_id}/messages").json()["messages"][0]["id"]
+    res = pair.bob_client.put(f"/conversations/{convo_id}/read", json={"message_id": newest})
+    assert res.status_code == 200
+    drain(pair.alice_client)
+
+
+def test_a_read_push_skips_apple_subscriptions(dm_pair, push_on):
+    others = [
+        subscribe(dm_pair.bob_client, endpoint)[1] for endpoint in (
+            "https://updates.push.services.mozilla.com/wpush/v2/abc",
+            "https://wns2-par02p.notify.windows.com/w/abc")]
+    apple = subscribe(dm_pair.bob_client, APPLE + uuid.uuid4().hex)[1]
+    with dm_pair.alice_client.websocket_connect("/ws", headers=HEADERS) as ws:
+        ws_ready(ws)
+        ws.send_json(dm_frame(dm_pair.convo["id"], doc(text("hi"))))
+        sync(ws)
+    drain(dm_pair.alice_client)
+    assert apple in {c["endpoint"] for c in push_on.calls}
+    push_on.calls.clear()
+
+    read_newest_dm(dm_pair)
+
+    assert {c["endpoint"] for c in push_on.calls} == {dm_pair.bob_endpoint, *others}
+    assert {c["payload"]["kind"] for c in push_on.calls} == {"read"}
+
+
+def test_a_read_push_with_only_apple_subscriptions_sends_nothing(dm_pair, push_on, caplog):
+    run(dm_pair.alice_client, PushSubscription.all().delete())
+    assert subscribe(dm_pair.bob_client, APPLE + uuid.uuid4().hex)[0].status_code == 201
+    with dm_pair.alice_client.websocket_connect("/ws", headers=HEADERS) as ws:
+        ws_ready(ws)
+        ws.send_json(dm_frame(dm_pair.convo["id"], doc(text("hi"))))
+        sync(ws)
+    drain(dm_pair.alice_client)
+    assert len(push_on.calls) == 1
+    push_on.calls.clear()
+
+    caplog.set_level(logging.INFO, logger="app.services.push")
+    read_newest_dm(dm_pair)
+
+    assert push_on.calls == []
+    assert not [r for r in caplog.records if r.levelno >= logging.WARNING]
+    assert run(dm_pair.alice_client, PushSubscription.filter(user_id=dm_pair.bob["id"]).count()) == 1
+
+
+def test_a_mention_push_and_its_read_reach_apple_only_for_the_mention(channel_team, push_on):
+    team = channel_team
+    apple = subscribe(team.bob.client, APPLE + uuid.uuid4().hex)[1]
+    send_to_channel(team, doc(mention(team.bob.user["id"])))
+    assert [c["payload"]["kind"] for c in push_on.calls if c["endpoint"] == apple] == ["mention"]
+    push_on.calls.clear()
+
+    newest = team.bob.client.get(f"/channels/{team.channel['id']}/messages").json()["messages"][0]["id"]
+    team.bob.client.put(f"/channels/{team.channel['id']}/read", json={"message_id": newest})
+    drain(team.alice_client)
+
+    assert [c["endpoint"] for c in push_on.calls] == [team.bob.endpoint]
+
+
+def test_a_server_request_push_reaches_apple_subscriptions(client, push_on):
+    user = register(client, "alice-apple")
+    apple = subscribe(client, APPLE + uuid.uuid4().hex)[1]
+    payload = server_request_payload(request_id=1, server_id=2, server_name="Home")
+    run(client, push.send_to_user(user["id"], payload, topic="server-request-1", urgency="normal"))
+    assert [(c["endpoint"], c["payload"]["kind"]) for c in push_on.calls] == [
+        (apple, "server_request")]
 
 
 # -- push disabled ---------------------------------------------------------
