@@ -7,6 +7,7 @@ so a rerun skips what exists and a refreshed bundle only adds what is new.
 import json
 import shutil
 from collections import Counter
+from collections.abc import Awaitable, Callable
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
 from datetime import timedelta
@@ -67,6 +68,11 @@ class ImportOptions:
     channel_map: dict[str, int] = field(default_factory=dict)
     include_private: bool = False
     dry_run: bool = False
+    # Only hand existing messages to mapped authors. Creates nothing but the import account.
+    existing_only: bool = False
+
+
+Progress = Callable[[int, str | None], Awaitable[None]]
 
 
 @dataclass
@@ -75,6 +81,9 @@ class ChannelReport:
     name: str
     type: str
     plan: str
+    action: str = "create"
+    reason: str | None = None
+    target_name: str | None = None
     matched_by: str | None = None
     channel_id: int | None = None
     category: str | None = None
@@ -107,10 +116,18 @@ class UnmappedAuthor:
 
 
 @dataclass
+class SeenAuthor:
+    id: str
+    name: str
+    messages: int
+
+
+@dataclass
 class Report:
     source: str
     dry_run: bool
     free_bytes: int = 0
+    seen: int = 0
     channels: list[ChannelReport] = field(default_factory=list)
     over_cap: int = 0
     over_cap_examples: list[str] = field(default_factory=list)
@@ -121,6 +138,7 @@ class Report:
     invalid_skipped: int = 0
     tags_over_limit: int = 0
     left_out: LeftOut = field(default_factory=LeftOut)
+    authors: list[SeenAuthor] = field(default_factory=list)
     unmapped_authors: list[UnmappedAuthor] = field(default_factory=list)
     warnings: list[str] = field(default_factory=list)
 
@@ -152,8 +170,8 @@ def read_authors(path: Path) -> dict[str, str]:
     return {str(k): v for k, v in raw.items()}
 
 
-def message_uuid(source: str, message_id: str) -> UUID:
-    return uuid5(_NAMESPACE, f"{source}:message:{message_id}")
+def message_uuid(server_id: int, source: str, message_id: str) -> UUID:
+    return uuid5(_NAMESPACE, f"{server_id}:{source}:message:{message_id}")
 
 
 def _marker(settings_or_metadata: dict | None) -> dict:
@@ -199,9 +217,10 @@ def _chunks(items, size: int = _ID_CHUNK):
 
 
 class _Import:
-    def __init__(self, bundle: Path, options: ImportOptions):
+    def __init__(self, bundle: Path, options: ImportOptions, progress: Progress | None = None):
         self.path = bundle
         self.options = options
+        self.progress = progress
         self.dry = options.dry_run
         self.server = bundle_format.load_server(bundle)
         self.source = f"{self.server.source.platform}:{self.server.source.server_id}"
@@ -325,6 +344,14 @@ class _Import:
                 plan.channel, plan.report.matched_by = found
                 plan.report.plan = f"into existing #{plan.channel.name}"
                 plan.report.channel_id = plan.channel.id
+                plan.report.action = "existing"
+                plan.report.target_name = plan.channel.name
+            elif self.options.existing_only:
+                plan.skipped = True
+                plan.report.plan = "skipped: not imported"
+                plan.report.action = "skipped"
+                plan.report.reason = "not imported"
+                continue
             else:
                 plan.report.plan = "create"
             category = categories.get(plan.info.category_id)
@@ -365,19 +392,22 @@ class _Import:
             source_id=info.id, name=info.name, type=info.type, plan="")
         plan = _Plan(info=info, report=report)
         unreadable = {u.id for u in self.server.unreadable}
-        reason = None
+        reason = shown = None
         if self.options.only and info.id not in self.options.only:
-            reason = "not in --only"
+            reason, shown = "not in --only", "not selected"
         elif info.id in unreadable:
-            reason = "unreadable"
+            reason = shown = "unreadable"
         elif info.private and not self.options.include_private:
-            reason = "private"
-            self.report.left_out.private_channels += 1
+            reason = shown = "private"
+            if not self.options.existing_only:
+                self.report.left_out.private_channels += 1
         elif info.type not in ("text", "voice", "forum"):
-            reason = f"unsupported type {info.type}"
+            reason = shown = f"unsupported type {info.type}"
         if reason:
             plan.skipped = True
             report.plan = f"skipped: {reason}"
+            report.action = "skipped"
+            report.reason = shown
         return plan
 
     @staticmethod
@@ -389,7 +419,8 @@ class _Import:
     async def _ensure_channel(self, plan: _Plan) -> Channel | None:
         marker = {"source": self.source, "id": plan.info.id}
         if plan.channel is not None:
-            if not self.dry and not _marker(plan.channel.channel_settings):
+            if not self.dry and not self.options.existing_only and not _marker(
+                    plan.channel.channel_settings):
                 plan.channel.channel_settings = {
                     **plan.channel.channel_settings, "import": marker}
                 await plan.channel.save(update_fields=["channel_settings"])
@@ -427,8 +458,9 @@ class _Import:
         channel = await self._ensure_channel(plan)
         info = plan.info
         if info.type == "voice":
-            self.report.left_out.voice_text_chat += sum(
-                len(chunk) for chunk in bundle_format.iter_channel_messages(self.path, info.id))
+            if not self.options.existing_only:
+                self.report.left_out.voice_text_chat += await anyio.to_thread.run_sync(
+                    self._count_messages, info.id)
             return
         created = plan.channel is None or bool(_marker(plan.channel.channel_settings).get("created"))
         async with self._unread_guard(channel, created):
@@ -437,12 +469,17 @@ class _Import:
             else:
                 await self._import_forum(plan, channel)
 
+    def _count_messages(self, channel_id: str) -> int:
+        return sum(len(chunk) for chunk in bundle_format.iter_channel_messages(self.path, channel_id))
+
     async def _import_text(self, plan: _Plan, channel: Channel | None) -> None:
         info = plan.info
-        self.report.left_out.text_channel_threads += len(
-            bundle_format.thread_files(self.path, info.id))
+        if not self.options.existing_only:
+            self.report.left_out.text_channel_threads += len(
+                await anyio.to_thread.run_sync(bundle_format.thread_files, self.path, info.id))
         buffer: list = []
-        for chunk in bundle_format.iter_channel_messages(self.path, info.id):
+        chunks = bundle_format.iter_channel_messages(self.path, info.id)
+        while (chunk := await anyio.to_thread.run_sync(next, chunks, None)) is not None:
             buffer.extend(chunk)
             while len(buffer) >= BATCH_SIZE:
                 await self._write_batch(plan, channel, buffer[:BATCH_SIZE])
@@ -453,11 +490,16 @@ class _Import:
     # Forums
 
     async def _import_forum(self, plan: _Plan, channel: Channel | None) -> None:
-        tag_ids = await self._ensure_tags(plan, channel)
+        existing_only = self.options.existing_only
+        tag_ids = {} if existing_only else await self._ensure_tags(plan, channel)
         posts = await self._existing_posts(channel)
-        for path in bundle_format.thread_files(self.path, plan.info.id):
-            thread = bundle_format.load_thread(path)
-            await self._import_thread(plan, channel, thread, posts.get(thread.id), tag_ids)
+        for path in await anyio.to_thread.run_sync(
+                bundle_format.thread_files, self.path, plan.info.id):
+            thread = await anyio.to_thread.run_sync(bundle_format.load_thread, path)
+            existing = posts.get(thread.id)
+            if existing is None and existing_only:
+                continue
+            await self._import_thread(plan, channel, thread, existing, tag_ids)
 
     async def _ensure_tags(self, plan: _Plan, channel: Channel | None) -> dict[str, int]:
         existing = {}
@@ -516,7 +558,7 @@ class _Import:
         for start in range(0, len(thread.messages), BATCH_SIZE):
             await self._write_batch(
                 plan, channel, thread.messages[start:start + BATCH_SIZE], post)
-        if self.dry:
+        if self.dry or self.options.existing_only:
             return
         if post.post_id is None:
             async with in_transaction():
@@ -556,16 +598,28 @@ class _Import:
         self, plan: _Plan, channel: Channel | None, messages: list,
         post: _PostState | None = None,
     ) -> None:
+        await self._apply_batch(plan, channel, messages, post)
+        if self.progress is not None:
+            await self.progress(self.report.seen, plan.report.name)
+        await anyio.sleep(0)
+
+    async def _apply_batch(
+        self, plan: _Plan, channel: Channel | None, messages: list,
+        post: _PostState | None = None,
+    ) -> None:
         report = plan.report
-        self._count_left_out(messages)
+        if not self.options.existing_only:
+            self._count_left_out(messages)
         unique = {}
         for message in messages:
             self.author_counts[message.author_id] += 1
-            unique.setdefault(message_uuid(self.source, message.id), message)
+            unique.setdefault(message_uuid(self.options.server_id, self.source, message.id), message)
+        self.report.seen += len(unique)
 
         existing = {
-            row["uuid"]: row for row in await Message.filter(uuid__in=list(unique)).values(
-                "uuid", "id", "author_id", "metadata")}
+            row["uuid"]: row for row in await Message.filter(
+                uuid__in=list(unique), server_id=self.options.server_id,
+            ).values("uuid", "id", "author_id", "metadata")}
         handovers = []
         fresh = []
         for uid, message in unique.items():
@@ -578,6 +632,11 @@ class _Import:
             if row["author_id"] != owner_id:
                 handovers.append((row, owner_id, imported))
         report.handed_over += len(handovers)
+        if self.options.existing_only:
+            if handovers and not self.dry:
+                async with in_transaction():
+                    await self._hand_over(handovers)
+            return
 
         opening_source = post.thread.messages[0].id if post and post.thread.messages else None
         prepared = await self._prepare_all(fresh, channel, opening_source)
@@ -602,7 +661,7 @@ class _Import:
             await self._create_attachments(prepared, ids, plan, channel)
             await self._hand_over(handovers)
             if post is not None and post.opening_id is None and opening_source is not None:
-                opening = ids.get(message_uuid(self.source, opening_source))
+                opening = ids.get(message_uuid(self.options.server_id, self.source, opening_source))
                 if opening is not None:
                     post.opening_id = opening
                     await ForumPost.filter(id=post.post_id).update(opening_message_id=opening)
@@ -631,7 +690,8 @@ class _Import:
                 self.report.empty_skipped += 1
                 continue
             reply_uuid = (
-                message_uuid(self.source, message.reply_to_id) if message.reply_to_id else None)
+                message_uuid(self.options.server_id, self.source, message.reply_to_id)
+                if message.reply_to_id else None)
             prepared.append(_Prepared(
                 message, uid, owner_id, imported, content, embeds, attachments, reply_uuid))
         return prepared
@@ -672,7 +732,8 @@ class _Import:
             path = bundle_format.resolve_file(self.path, attachment.path)
             size = path.stat().st_size if path else 0
             if size == 0:
-                self._note("missing", label)
+                declared_over_cap = path is None and attachment.size > max_attachment_bytes()
+                self._note("over_cap" if declared_over_cap else "missing", label)
                 continue
             if size > max_attachment_bytes():
                 self._note("over_cap", label)
@@ -681,7 +742,7 @@ class _Import:
                 prepared.append({"size": size})
                 continue
             data = await anyio.to_thread.run_sync(path.read_bytes)
-            sniffed = sniff_image(data)
+            sniffed = await anyio.to_thread.run_sync(sniff_image, data)
             kind, width, height = "file", None, None
             content_type = declared_content_type(attachment.content_type)
             if sniffed:
@@ -784,7 +845,7 @@ class _Import:
     async def _unread_guard(self, channel: Channel | None, created: bool):
         """Members who had read everything before the import still have after
         it, even if it stops half way."""
-        if self.dry or channel is None:
+        if self.dry or self.options.existing_only or channel is None:
             yield
             return
         before = await self._top_message(channel.id)
@@ -831,22 +892,29 @@ class _Import:
     def _finish(self) -> None:
         report = self.report
         report.free_bytes = shutil.disk_usage(attachments_root()).free
-        report.left_out.unreadable_channels = len(self.server.unreadable)
-        report.left_out.emoji = len(self.server.emoji)
-        report.left_out.avatars = sum(1 for a in self.server.authors if a.avatar)
-        report.unmapped_authors = sorted(
-            (UnmappedAuthor(author_id, self.names.get(author_id, author_id), count)
-             for author_id, count in self.author_counts.items() if author_id not in self.users),
+        if not self.options.existing_only:
+            report.left_out.unreadable_channels = len(self.server.unreadable)
+            report.left_out.emoji = len(self.server.emoji)
+            report.left_out.avatars = sum(1 for a in self.server.authors if a.avatar)
+        report.authors = sorted(
+            (SeenAuthor(author_id, self.names.get(author_id, author_id), count)
+             for author_id, count in self.author_counts.items()),
             key=lambda a: (-a.messages, a.name))
+        report.unmapped_authors = [
+            UnmappedAuthor(a.id, a.name, a.messages)
+            for a in report.authors if a.id not in self.users]
 
 
-async def import_bundle(bundle: Path, options: ImportOptions) -> Report:
-    """Plan and, unless options.dry_run, perform the import. Raises
-    BundleError for an unreadable bundle and ImportAborted for options that
-    can't be followed."""
+async def import_bundle(
+    bundle: Path, options: ImportOptions, progress: Progress | None = None,
+) -> Report:
+    """Plan and, unless options.dry_run, perform the import. *progress* is
+    awaited after every batch of messages with the number seen so far and the
+    channel's name. Raises BundleError for an unreadable bundle and
+    ImportAborted for options that can't be followed."""
     if await Server.get_or_none(id=options.server_id) is None:
         raise ImportAborted(f"No server with id {options.server_id}")
-    return await _Import(bundle, options).run()
+    return await (await anyio.to_thread.run_sync(_Import, bundle, options, progress)).run()
 
 
 def _size(value: int) -> str:
