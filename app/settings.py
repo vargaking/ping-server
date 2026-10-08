@@ -41,6 +41,11 @@ def is_origin_allowed(origin: str) -> bool:
     return _origin_regex is not None and _origin_regex.fullmatch(origin) is not None
 
 
+def trusted_proxy_key() -> str:
+    """Shared secret the API's Cloudflare Worker sends with the real client address. Empty: off."""
+    return os.getenv("TRUSTED_PROXY_KEY", "")
+
+
 # Rate limits. Read per request so a test can override via env without
 # re-importing the app. Values use slowapi's "<count>/<period>" syntax.
 def auth_rate_limit() -> str:
