@@ -75,12 +75,31 @@ async def lifespan(app: FastAPI):
         logger.warning("Failed to start stats sampling", exc_info=True)
     app.state.stats_task = stats_task
 
+    # Imported here because the attachments service imports this module.
+    from .services.imports.runner import ImportRunner
+    imports = ImportRunner(getattr(app.state, "comms", None))
+    app.state.import_runner = imports
+    try:
+        await imports.prune()
+    except Exception:
+        logger.warning("Failed to prune imports on startup", exc_info=True)
+    try:
+        await imports.resume()
+    except Exception:
+        logger.warning("Failed to resume imports on startup", exc_info=True)
+
     yield
+
+    try:
+        await imports.shutdown()
+    except Exception:
+        logger.warning("Failed to stop imports", exc_info=True)
 
     if stats_task is not None:
         stats_task.cancel()
         with suppress(asyncio.CancelledError):
             await stats_task
+
     if presence_task is not None:
         presence_task.cancel()
         with suppress(asyncio.CancelledError):

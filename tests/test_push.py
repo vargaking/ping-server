@@ -29,8 +29,9 @@ from app.permissions import Permission
 from app.services.connection_manager import IDLE_AFTER_SECONDS, ConnectionManager
 from app.services.permissions import permissions
 from app.services.push import (
-    DeliveryResult, PushService, dm_payload, endpoint_host, is_valid_subject,
-    mention_payload, mentioned_user_ids, normalize_subject, plain_text, push, read_payload)
+    DeliveryResult, PushService, dm_payload, endpoint_host, is_apple_endpoint,
+    is_valid_subject, mention_payload, mentioned_user_ids, normalize_subject, plain_text, push,
+    read_payload, server_request_payload)
 from app.services.push import test_payload as build_test_payload
 from tests.conftest import ORIGIN, create_channel, create_server, register, ws_ready
 from tests.test_realtime_events import invite_and_join
@@ -38,6 +39,7 @@ from tests.test_realtime_events import invite_and_join
 HEADERS = {"origin": ORIGIN}
 DRAIN_TIMEOUT_SECONDS = 15
 FCM = "https://fcm.googleapis.com/fcm/send/"
+APPLE = "https://web.push.apple.com/"
 
 
 def b64url(raw: bytes) -> str:
@@ -808,6 +810,40 @@ def test_a_mention_pushes_to_the_offline_member_only(channel_team, push_on):
     }
 
 
+def test_a_mention_in_a_forum_post_carries_post_id(channel_team, push_on):
+    team = channel_team
+    forum = create_channel(team.alice_client, team.server["id"], "ideas", "forum")
+    opening = {
+        "id": str(uuid.uuid4()),
+        "content": doc(mention(team.bob.user["id"], "bob")),
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+    }
+    created = team.alice_client.post(
+        f"/channels/{forum['id']}/posts", json={"title": "Look", "message": opening})
+    assert created.status_code == 201, created.text
+    post_id = created.json()["post"]["id"]
+    drain(team.alice_client)
+
+    assert len(push_on.calls) == 1
+    payload = push_on.calls[0]["payload"]
+    assert push_on.calls[0]["endpoint"] == team.bob.endpoint
+    assert payload["kind"] == "mention"
+    assert payload["post_id"] == post_id
+    assert payload["url"] == f"/app/server/{team.server['id']}/forum/{forum['id']}/{post_id}/"
+    assert payload["tag"] == f"ch-{forum['id']}"
+
+    reply = channel_frame(team.server["id"], forum["id"], doc(mention(team.carol.user["id"])))
+    reply["post_id"] = post_id
+    with team.alice_client.websocket_connect("/ws", headers=HEADERS) as ws:
+        ws_ready(ws)
+        ws.send_json(reply)
+        sync(ws)
+    drain(team.alice_client)
+
+    assert [c["payload"]["post_id"] for c in push_on.calls] == [post_id, post_id]
+    assert push_on.calls[1]["endpoint"] == team.carol.endpoint
+
+
 def test_every_mentioned_member_is_pushed(channel_team, push_on):
     team = channel_team
     send_to_channel(team, doc(mention(team.bob.user["id"]), mention(team.carol.user["id"]),
@@ -864,11 +900,10 @@ def test_a_mentioned_member_who_cannot_view_the_channel_is_not_pushed(channel_te
     assert [c["endpoint"] for c in push_on.calls] == [team.carol.endpoint]
 
 
-def test_string_content_with_mentions_is_understood(channel_team, push_on):
+def test_json_string_content_is_plain_text_and_mentions_nobody(channel_team, push_on):
     team = channel_team
     send_to_channel(team, json.dumps(doc(text("yo "), mention(str(team.bob.user["id"]), "bob"))))
-    assert [c["endpoint"] for c in push_on.calls] == [team.bob.endpoint]
-    assert push_on.calls[0]["payload"]["body"] == "yo @bob"
+    assert push_on.calls == []
 
 
 # -- read retraction -------------------------------------------------------
@@ -961,6 +996,92 @@ def test_reading_a_thread_we_never_pushed_sends_nothing(channel_team, push_on):
     assert push_on.calls == []
 
 
+@pytest.mark.parametrize("endpoint", [
+    "https://web.push.apple.com/abc", "https://push.apple.com/abc", "https://api.push.apple.com/abc",
+])
+def test_apple_endpoints_are_recognised(endpoint):
+    assert is_apple_endpoint(endpoint)
+
+
+@pytest.mark.parametrize("endpoint", [
+    FCM + "abc", "https://updates.push.services.mozilla.com/wpush/abc",
+    "https://wns2-par02p.notify.windows.com/abc",
+    "https://evilpush.apple.com/abc", "https://push.apple.com.evil.com/abc", "",
+])
+def test_other_endpoints_are_not_apple(endpoint):
+    assert not is_apple_endpoint(endpoint)
+
+
+def read_newest_dm(pair):
+    convo_id = pair.convo["id"]
+    newest = pair.bob_client.get(f"/conversations/{convo_id}/messages").json()["messages"][0]["id"]
+    res = pair.bob_client.put(f"/conversations/{convo_id}/read", json={"message_id": newest})
+    assert res.status_code == 200
+    drain(pair.alice_client)
+
+
+def test_a_read_push_skips_apple_subscriptions(dm_pair, push_on):
+    others = [
+        subscribe(dm_pair.bob_client, endpoint)[1] for endpoint in (
+            "https://updates.push.services.mozilla.com/wpush/v2/abc",
+            "https://wns2-par02p.notify.windows.com/w/abc")]
+    apple = subscribe(dm_pair.bob_client, APPLE + uuid.uuid4().hex)[1]
+    with dm_pair.alice_client.websocket_connect("/ws", headers=HEADERS) as ws:
+        ws_ready(ws)
+        ws.send_json(dm_frame(dm_pair.convo["id"], doc(text("hi"))))
+        sync(ws)
+    drain(dm_pair.alice_client)
+    assert apple in {c["endpoint"] for c in push_on.calls}
+    push_on.calls.clear()
+
+    read_newest_dm(dm_pair)
+
+    assert {c["endpoint"] for c in push_on.calls} == {dm_pair.bob_endpoint, *others}
+    assert {c["payload"]["kind"] for c in push_on.calls} == {"read"}
+
+
+def test_a_read_push_with_only_apple_subscriptions_sends_nothing(dm_pair, push_on, caplog):
+    run(dm_pair.alice_client, PushSubscription.all().delete())
+    assert subscribe(dm_pair.bob_client, APPLE + uuid.uuid4().hex)[0].status_code == 201
+    with dm_pair.alice_client.websocket_connect("/ws", headers=HEADERS) as ws:
+        ws_ready(ws)
+        ws.send_json(dm_frame(dm_pair.convo["id"], doc(text("hi"))))
+        sync(ws)
+    drain(dm_pair.alice_client)
+    assert len(push_on.calls) == 1
+    push_on.calls.clear()
+
+    caplog.set_level(logging.INFO, logger="app.services.push")
+    read_newest_dm(dm_pair)
+
+    assert push_on.calls == []
+    assert not [r for r in caplog.records if r.levelno >= logging.WARNING]
+    assert run(dm_pair.alice_client, PushSubscription.filter(user_id=dm_pair.bob["id"]).count()) == 1
+
+
+def test_a_mention_push_and_its_read_reach_apple_only_for_the_mention(channel_team, push_on):
+    team = channel_team
+    apple = subscribe(team.bob.client, APPLE + uuid.uuid4().hex)[1]
+    send_to_channel(team, doc(mention(team.bob.user["id"])))
+    assert [c["payload"]["kind"] for c in push_on.calls if c["endpoint"] == apple] == ["mention"]
+    push_on.calls.clear()
+
+    newest = team.bob.client.get(f"/channels/{team.channel['id']}/messages").json()["messages"][0]["id"]
+    team.bob.client.put(f"/channels/{team.channel['id']}/read", json={"message_id": newest})
+    drain(team.alice_client)
+
+    assert [c["endpoint"] for c in push_on.calls] == [team.bob.endpoint]
+
+
+def test_a_server_request_push_reaches_apple_subscriptions(client, push_on):
+    user = register(client, "alice-apple")
+    apple = subscribe(client, APPLE + uuid.uuid4().hex)[1]
+    payload = server_request_payload(request_id=1, server_id=2, server_name="Home")
+    run(client, push.send_to_user(user["id"], payload, topic="server-request-1", urgency="normal"))
+    assert [(c["endpoint"], c["payload"]["kind"]) for c in push_on.calls] == [
+        (apple, "server_request")]
+
+
 # -- push disabled ---------------------------------------------------------
 
 def test_nothing_is_sent_when_push_is_disabled(client, new_client, push_off):
@@ -998,7 +1119,6 @@ def test_plain_text_flattens_tiptap_documents():
     ]}
     assert plain_text(content) == "Hello @bob there second line"
     assert plain_text(json.dumps(content)) == "Hello @bob there second line"
-    assert plain_text(str(content)) == "Hello @bob there second line"
     assert plain_text("just  a string") == "just a string"
     assert plain_text(None) == ""
     assert plain_text(doc({"type": "mention", "attrs": {"id": 4}})) == "@4"
@@ -1404,19 +1524,25 @@ def test_a_100k_paren_string_message_is_delivered_and_sends_no_push(channel_team
     frame = hostile_message_is_delivered_without_push(
         team, push_on,
         lambda ws: ws.send_json(channel_frame(team.server["id"], team.channel["id"], content)))
-    assert frame["content"] == content
+    assert frame["content"] == {
+        "type": "doc", "content": [{"type": "paragraph", "content": [text(content)]}]}
 
 
-def test_a_deeply_nested_document_is_delivered_and_sends_no_push(channel_team, push_on):
+def test_a_deeply_nested_document_is_rejected_and_sends_no_push(channel_team, push_on):
     team = channel_team
-    body = json.dumps(channel_frame(team.server["id"], team.channel["id"], None))
-    # Deeper than the walkers' cap, but within what json can parse and echo.
+    frame = channel_frame(team.server["id"], team.channel["id"], None)
+    body = json.dumps(frame)
     depth = 300
     nested = '{"type":"blockquote","content":[' * depth + '{"type":"text","text":"deep"}' + "]}" * depth
-    raw = body.replace("null", nested)
-    frame = hostile_message_is_delivered_without_push(
-        team, push_on, lambda ws: ws.send_text(raw))
-    assert frame["channel_id"] == team.channel["id"]
+    with team.alice_client.websocket_connect("/ws", headers=HEADERS) as alice_ws:
+        ws_ready(alice_ws)
+        alice_ws.send_text(body.replace("null", nested))
+        error = alice_ws.receive_json()
+        while error["type"] != "error":
+            error = alice_ws.receive_json()
+    assert error["code"] == "invalid_content"
+    assert error["ref"] == frame["id"]
+    assert push_on.calls == []
 
 
 def test_a_failing_mention_scan_does_not_break_delivery(channel_team, push_on, monkeypatch):

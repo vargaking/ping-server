@@ -1,4 +1,3 @@
-import json
 import logging
 from datetime import datetime, timezone
 from typing import Any
@@ -7,16 +6,21 @@ from uuid import UUID
 from fastapi import APIRouter, Depends, HTTPException, Request, status
 from pydantic import BaseModel
 from tortoise.exceptions import IntegrityError
+from tortoise.expressions import F
+from tortoise.transactions import in_transaction
 
 from ..middleware import get_current_user
 from ..models.Attachment import Attachment
 from ..models.Conversation import Conversation
+from ..models.ForumPost import ForumPost
 from ..models.Message import Message
 from ..models.Reaction import Reaction
 from ..models.Server import Server
 from ..models.User import User
 from ..permissions import Permission, require_permission
+from ..services import forum
 from ..services.attachments import attachments_by_message, delete_file
+from ..services.message_content import InvalidContent, normalize_content, serialize
 from ..services.permissions import permissions
 from ..services.reactions import (
     MAX_DISTINCT_EMOJIS_PER_MESSAGE,
@@ -31,8 +35,7 @@ router = APIRouter(prefix="/messages", tags=["messages"])
 
 
 class MessageUpdate(BaseModel):
-    # A ProseMirror doc (dict) or a plain string, same shape as an incoming
-    # chat frame's content.
+    # A ProseMirror doc (dict) or a plain string; validated by normalize_content.
     content: Any
 
 
@@ -104,6 +107,7 @@ def _wire_message(
         "id": str(message.uuid),
         "server_id": message.server_id,
         "channel_id": message.channel_id,
+        "post_id": message.post_id,
         "conversation_id": message.conversation_id,
         "user_id": message.author_id,
         "content": content,
@@ -113,6 +117,7 @@ def _wire_message(
         "reactions": reactions,
         "reply_to": reply_to,
         "embeds": (message.metadata or {}).get("embeds", []),
+        "imported_author": (message.metadata or {}).get("imported_author"),
     }
 
 
@@ -130,13 +135,15 @@ async def edit_message(
     if message.author_id != current_user.id:
         raise HTTPException(status_code=403, detail="You can only edit your own messages")
 
-    content = body.content
-    # Persist dicts as JSON text, matching how ChatService stores incoming frames.
-    message.content = json.dumps(content) if isinstance(content, dict) else content
+    attachments = (await attachments_by_message([message.id])).get(message.id, [])
+    try:
+        content = normalize_content(body.content, allow_empty=bool(attachments))
+    except InvalidContent:
+        raise HTTPException(status_code=422, detail="Invalid message content")
+    message.content = serialize(content)
     message.edited_at = datetime.now(timezone.utc)
     await message.save()
 
-    attachments = (await attachments_by_message([message.id])).get(message.id, [])
     reactions = (await reactions_by_message([message.id])).get(message.id, [])
     refs = await reply_refs([message.reply_to_uuid])
     payload = _wire_message(
@@ -173,15 +180,30 @@ async def delete_message(
         "id": str(message.uuid),
         "server_id": message.server_id,
         "channel_id": message.channel_id,
+        "post_id": message.post_id,
         "conversation_id": message.conversation_id,
     }
+    post = None
+    if message.post_id is not None:
+        post = await ForumPost.get(id=message.post_id)
+        if post.opening_message_id == message.id:
+            raise HTTPException(status_code=409, detail="Delete the post instead")
     storage_paths = await Attachment.filter(
         message_id=message.id).values_list("storage_path", flat=True)
-    await message.delete()
+    async with in_transaction():
+        await message.delete()
+        if post is not None:
+            await ForumPost.filter(id=post.id, reply_count__gt=0).update(
+                reply_count=F("reply_count") - 1)
     for storage_path in storage_paths:
         delete_file(storage_path)
 
     await _notify(request, server, conversation, frame, current_user.id)
+    if post is not None:
+        await post.refresh_from_db()
+        await _notify(
+            request, server, None,
+            forum.updated_frame(server.id, (await forum.rows([post]))[0]), None)
 
 
 async def _load_reactable_message(

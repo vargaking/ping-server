@@ -35,6 +35,9 @@ _IMAGE_CONTENT_TYPES = {
     "WEBP": "image/webp",
 }
 
+_MEDIA_TYPE = re.compile(
+    r"^[A-Za-z0-9][A-Za-z0-9!#$&^_.+-]*/[A-Za-z0-9][A-Za-z0-9!#$&^_.+-]*$")
+
 SIGNED_URL_TTL = timedelta(minutes=5)
 _SIGNED_URL_SKEW_SECONDS = 60
 _MIN_URL_KEY_BYTES = 32
@@ -108,6 +111,15 @@ def sanitize_filename(name: str) -> str:
     if name in ("", ".", ".."):
         return "file"
     return name
+
+
+def declared_content_type(value: str | None) -> str:
+    """The media type a client declared for a non-image file, or
+    application/octet-stream if it isn't a well-formed one."""
+    media_type = (value or "").split(";")[0].strip().lower()
+    if len(media_type) <= 255 and _MEDIA_TYPE.match(media_type):
+        return media_type
+    return "application/octet-stream"
 
 
 def sniff_image(data: bytes) -> tuple[str, int, int] | None:

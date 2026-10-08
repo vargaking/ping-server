@@ -14,6 +14,9 @@ class Role(models.Model):
         "models.Role", related_name="children",
         null=True, on_delete=fields.SET_NULL)
     is_default = fields.BooleanField(default=False)
+    # Rank: higher outranks lower. @everyone is 0, the others are 1..n.
+    position = fields.IntField(default=0)
+    color = fields.CharField(max_length=7, null=True)
     created_at = fields.DatetimeField(auto_now_add=True)
     settings = fields.JSONField(default=dict)
 

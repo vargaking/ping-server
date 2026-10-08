@@ -53,6 +53,11 @@ def is_allowed_endpoint(endpoint: str) -> bool:
     return any(host == s or host.endswith(f".{s}") for s in PUSH_HOST_SUFFIXES + extra)
 
 
+def is_apple_endpoint(endpoint: str) -> bool:
+    host = endpoint_host(endpoint)
+    return host == "push.apple.com" or host.endswith(".push.apple.com")
+
+
 def endpoint_origin(endpoint: str) -> str:
     """scheme://host[:port] of a push endpoint: the VAPID audience."""
     parsed = urlparse(endpoint)
@@ -118,12 +123,17 @@ def dm_payload(
 
 def mention_payload(
     *, server_id: int, channel_id: int, channel_name: str, sender_name: str,
-    body: str, message_id: int, message_uuid: str,
+    body: str, message_id: int, message_uuid: str, post_id: int | None = None,
 ) -> dict:
-    return _message_payload(
+    where = (
+        f"channel/{channel_id}" if post_id is None else f"forum/{channel_id}/{post_id}")
+    payload = _message_payload(
         "mention", tag=channel_tag(channel_id), title=f"{sender_name} in #{channel_name}",
-        body=body, url=f"/app/server/{server_id}/channel/{channel_id}/", count=1,
+        body=body, url=f"/app/server/{server_id}/{where}/", count=1,
         message_id=message_id, message_uuid=message_uuid)
+    if post_id is not None:
+        payload["post_id"] = post_id
+    return payload
 
 
 def server_request_payload(*, request_id: int, server_id: int, server_name: str) -> dict:
@@ -295,13 +305,19 @@ class PushService:
         finally:
             session.close()
 
-    async def send_to_user(self, user_id: int, payload: dict, *, topic: str, urgency: str) -> None:
-        """Push *payload* to every subscription of *user_id*. Gone
-        subscriptions (404/410) are deleted; other failures are only logged."""
+    async def send_to_user(
+        self, user_id: int, payload: dict, *, topic: str, urgency: str,
+        skip_apple: bool = False,
+    ) -> None:
+        """Push *payload* to every subscription of *user_id*, except Apple's
+        when *skip_apple*. Gone subscriptions (404/410) are deleted; other
+        failures are only logged."""
         subs = await PushSubscription.filter(user_id=user_id)
         if not subs:
             logger.info("Push skipped for user %s: no subscription", user_id)
             return
+        if skip_apple:
+            subs = [sub for sub in subs if not is_apple_endpoint(sub.endpoint)]
         await asyncio.gather(*(
             self._send_one(sub, payload, topic, urgency) for sub in subs))
 
@@ -375,8 +391,9 @@ class PushService:
         del self._pushed[(user_id, tag)]
         if not self.enabled:
             return
+        # Safari revokes a subscription after a few pushes that show nothing.
         self.schedule(self.send_to_user(
-            user_id, read_payload(tag), topic=tag, urgency="normal"))
+            user_id, read_payload(tag), topic=tag, urgency="normal", skip_apple=True))
 
 
 push = PushService()

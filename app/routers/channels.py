@@ -5,12 +5,13 @@ from typing import List, Literal, Optional
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException, Request, status
-from pydantic import BaseModel, field_validator
+from pydantic import BaseModel, StrictInt, field_validator
 from tortoise.expressions import Q
-from tortoise.transactions import in_transaction
 
 from ..middleware import get_current_user
 from ..models.Channel import Channel
+from ..models.ChannelGroup import ChannelGroup
+from ..models.ForumPost import ForumPost
 from ..models.Message import Message
 from ..models.Server import Server
 from ..models.User import User
@@ -21,7 +22,7 @@ from ..permissions import (
     check_permission,
     server_of_channel,
 )
-from ..services import read_state
+from ..services import channel_layout, read_state
 from ..services.attachments import attachments_by_message
 from ..services.reactions import reactions_by_message
 from ..services.replies import reply_json, reply_refs
@@ -38,9 +39,9 @@ HISTORY_PAGE_SIZE = 50
 MAX_HISTORY_PAGE_SIZE = 100
 
 
-def _encode_cursor(created_at: datetime, message_id: int) -> str:
-    """Opaque cursor pointing just before a message, keyed by (created_at, id)."""
-    raw = f"{created_at.isoformat()}|{message_id}"
+def _encode_cursor(at: datetime, row_id: int) -> str:
+    """Opaque cursor pointing just before a row, keyed by (time, id)."""
+    raw = f"{at.isoformat()}|{row_id}"
     return base64.urlsafe_b64encode(raw.encode()).decode()
 
 
@@ -62,12 +63,14 @@ def _serialize(
         "user_id": message["author_id"],
         "channel_id": message["channel_id"],
         "server_id": message["server_id"],
+        "post_id": message["post_id"],
         "timestamp": message["timestamp"],
         "edited_at": message["edited_at"],
         "attachments": attachments,
         "reactions": reactions,
         "reply_to": reply_json(message["reply_to_uuid"], refs),
         "embeds": (message["metadata"] or {}).get("embeds", []),
+        "imported_author": (message["metadata"] or {}).get("imported_author"),
     }
 
 
@@ -108,8 +111,9 @@ def _clean_topic(value: Optional[str]) -> Optional[str]:
 
 class ChannelCreate(BaseModel):
     name: str
-    type: Literal["text", "voice"] = "text"
+    type: Literal["text", "voice", "forum"] = "text"
     topic: Optional[str] = None
+    group_id: Optional[StrictInt] = None
 
     _name = field_validator("name")(_clean_name)
     _topic = field_validator("topic")(_clean_topic)
@@ -121,6 +125,7 @@ class ChannelUpdate(BaseModel):
     # Accepted only so a client echoing the channel back gets a clear error
     # instead of a silent ignore: a channel's type is fixed at creation.
     type: Optional[str] = None
+    group_id: Optional[StrictInt] = None
 
     @field_validator("name")
     @classmethod
@@ -136,6 +141,8 @@ class ChannelResponse(BaseModel):
     channel_settings: dict
     type: str
     topic: Optional[str] = None
+    group_id: Optional[int] = None
+    position: int = 0
     last_read_message_id: Optional[str] = None
     last_message_id: Optional[str] = None
 
@@ -153,6 +160,8 @@ class ChannelResponse(BaseModel):
             channel_settings=channel.channel_settings,
             type=channel.type,
             topic=channel.topic,
+            group_id=channel.group_id,
+            position=channel.position,
             last_read_message_id=last_read_message_id,
             last_message_id=last_message_id,
         )
@@ -191,6 +200,7 @@ async def get_messages(
         "author_id",
         "channel_id",
         "server_id",
+        "post_id",
         "timestamp",
         "edited_at",
         "reply_to_uuid",
@@ -205,30 +215,45 @@ async def get_channel_messages(
     channel_id: int,
     before: Optional[str] = None,
     limit: int = HISTORY_PAGE_SIZE,
+    post_id: Optional[int] = None,
+    channel: Channel = Depends(channel_from_path),
     server: Server = Depends(check_permission(Permission.VIEW_CHANNEL, server_of_channel)),
 ):
-    """Newest-first page of a channel's history.
+    """Newest-first page of a channel's history, or of one post's messages
+    in a forum channel (which needs post_id; no other channel takes it).
 
     Pass the previous page's next_cursor as before to walk further back.
     """
     limit = max(1, min(limit, MAX_HISTORY_PAGE_SIZE))
 
-    query = Message.filter(channel_id=channel_id)
+    in_forum = channel.type == "forum"
+    if in_forum != (post_id is not None):
+        raise HTTPException(
+            status_code=422,
+            detail="post_id is required in a forum channel and not allowed elsewhere")
+    if in_forum and not await ForumPost.filter(id=post_id, channel_id=channel_id).exists():
+        raise HTTPException(status_code=404, detail="Post not found")
+
+    # A post is ordered by the message's own timestamp, which imported
+    # history sets; everything else by arrival.
+    order_field = "timestamp" if in_forum else "created_at"
+    query = Message.filter(channel_id=channel_id, post_id=post_id)
     if before:
-        cursor_created_at, cursor_id = _decode_cursor(before)
+        cursor_at, cursor_id = _decode_cursor(before)
         query = query.filter(
-            Q(created_at__lt=cursor_created_at)
-            | Q(created_at=cursor_created_at, id__lt=cursor_id)
+            Q(**{f"{order_field}__lt": cursor_at})
+            | Q(**{order_field: cursor_at, "id__lt": cursor_id})
         )
 
     # Fetch one extra row to tell whether an older page exists.
-    rows = await query.order_by("-created_at", "-id").limit(limit + 1).values(
+    rows = await query.order_by(f"-{order_field}", "-id").limit(limit + 1).values(
         "id",
         "uuid",
         "content",
         "author_id",
         "channel_id",
         "server_id",
+        "post_id",
         "timestamp",
         "created_at",
         "edited_at",
@@ -242,7 +267,7 @@ async def get_channel_messages(
     next_cursor = None
     if has_more and rows:
         last = rows[-1]
-        next_cursor = _encode_cursor(last["created_at"], last["id"])
+        next_cursor = _encode_cursor(last[order_field], last["id"])
 
     return {
         "messages": await _serialize_all(rows),
@@ -316,6 +341,12 @@ async def get_channels(
     ]
 
 
+async def _check_group(server_id: int, group_id: Optional[int]) -> None:
+    if group_id is not None and not await ChannelGroup.filter(
+            id=group_id, server_id=server_id).exists():
+        raise HTTPException(status_code=422, detail="Category not found in this server")
+
+
 async def _broadcast(request: Request, server_id: int, frame: dict, exclude_user_id: int) -> None:
     comms = getattr(request.app.state, "comms", None)
     if comms is not None:
@@ -330,21 +361,21 @@ async def create_channel(
     current_user: User = Depends(get_current_user),
     server: Server = Depends(check_permission(Permission.MANAGE_CHANNELS)),
 ):
-    channel = await Channel.create(
-        name=body.name,
-        channel_settings={},
-        type=body.type,
-        topic=body.topic,
-        server=server,
-    )
-
-    # Add the channel to the channel_order in server settings
-    server_settings = server.server_settings or {}
-    channel_order = server_settings.get("channel_order", [])
-    channel_order.append(channel.id)
-    server_settings["channel_order"] = channel_order
-    server.server_settings = server_settings
-    await server.save()
+    async with channel_layout.locked_server(server_id):
+        if await Channel.filter(server_id=server_id).count() >= channel_layout.MAX_CHANNELS:
+            raise HTTPException(
+                status_code=422,
+                detail=f"A server can have at most {channel_layout.MAX_CHANNELS} channels")
+        await _check_group(server_id, body.group_id)
+        channel = await Channel.create(
+            name=body.name,
+            channel_settings={},
+            type=body.type,
+            topic=body.topic,
+            server=server,
+            group_id=body.group_id,
+            position=await channel_layout.next_channel_position(server_id, body.group_id),
+        )
 
     channel_response = ChannelResponse.from_channel(channel)
 
@@ -367,7 +398,8 @@ async def update_channel(
     channel: Channel = Depends(channel_from_path),
     server: Server = Depends(check_permission(Permission.MANAGE_CHANNELS, server_of_channel)),
 ):
-    """Rename a channel or change its topic. The type is fixed."""
+    """Rename a channel, change its topic or move it to another category.
+    The type is fixed."""
 
     changes = body.model_dump(exclude_unset=True)
     if "type" in changes and changes.pop("type") != channel.type:
@@ -375,9 +407,18 @@ async def update_channel(
     if "name" in changes and changes["name"] is None:
         raise HTTPException(status_code=422, detail="Channel name can't be empty")
 
-    if changes:
-        await channel.update_from_dict(changes)
-        await channel.save(update_fields=list(changes))
+    async with channel_layout.locked_server(server.id):
+        await channel.refresh_from_db()
+        if "group_id" in changes:
+            await _check_group(server.id, changes["group_id"])
+            if changes["group_id"] == channel.group_id:
+                del changes["group_id"]
+            else:
+                changes["position"] = await channel_layout.next_channel_position(
+                    server.id, changes["group_id"])
+        if changes:
+            await channel.update_from_dict(changes)
+            await channel.save(update_fields=list(changes))
 
     channel_response = ChannelResponse.from_channel(channel)
     if changes:
@@ -404,7 +445,7 @@ async def delete_channel(
     """Delete a channel and all of its messages."""
 
     was_voice = channel.type == "voice"
-    async with in_transaction():
+    async with channel_layout.locked_server(server.id):
         # Messages cascade at the DB level too, but deleting them explicitly
         # keeps this independent of how the FK was migrated.
         await Message.filter(channel_id=channel.id).delete()
@@ -412,15 +453,8 @@ async def delete_channel(
 
         server = await Server.get(id=server.id)
         server_settings = server.server_settings or {}
-        order = server_settings.get("channel_order")
-        changed = False
-        if order and channel_id in order:
-            server_settings["channel_order"] = [cid for cid in order if cid != channel_id]
-            changed = True
         if server_settings.get("default_channel_id") == channel_id:
             del server_settings["default_channel_id"]
-            changed = True
-        if changed:
             server.server_settings = server_settings
             await server.save(update_fields=["server_settings"])
 
