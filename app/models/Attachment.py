@@ -46,3 +46,4 @@ class Attachment(models.Model):
 
     class Meta:
         table = "attachments"
+        indexes = (("message",),)
