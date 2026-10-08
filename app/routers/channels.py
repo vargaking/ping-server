@@ -15,7 +15,6 @@ from ..models.ForumPost import ForumPost
 from ..models.Message import Message
 from ..models.Server import Server
 from ..models.User import User
-from ..models.UserToServer import UserToServer
 from ..permissions import (
     Permission,
     channel_from_path,
@@ -33,8 +32,6 @@ logger = logging.getLogger("app.routers.channels")
 router = APIRouter(prefix="/channels", tags=["channels"])
 
 # Bounds on how many messages a single request may return.
-DELTA_SYNC_LIMIT = 500
-MAX_DELTA_SYNC_LIMIT = 1000
 HISTORY_PAGE_SIZE = 50
 MAX_HISTORY_PAGE_SIZE = 100
 
@@ -170,44 +167,6 @@ class ChannelResponse(BaseModel):
 class ReadMarkerUpdate(BaseModel):
     message_id: str
 
-
-
-@router.get("/messages")
-async def get_messages(
-    last_updated: datetime,
-    limit: int = DELTA_SYNC_LIMIT,
-    current_user: User = Depends(get_current_user),
-):
-    """Fetch messages from servers the user belongs to, updated after last_updated.
-
-    Used for reconnect catch-up. The limit is capped so a long absence can't
-    pull down unbounded history in one request; older gaps are backfilled
-    through the per-channel history endpoint instead.
-    """
-    limit = max(1, min(limit, MAX_DELTA_SYNC_LIMIT))
-    user_servers = await UserToServer.filter(user=current_user).values_list(
-        "server_id",
-        flat=True,
-    )
-
-    messages = await Message.filter(
-        server_id__in=user_servers,
-        created_at__gt=last_updated,
-    ).order_by("created_at").limit(limit).values(
-        "id",
-        "uuid",
-        "content",
-        "author_id",
-        "channel_id",
-        "server_id",
-        "post_id",
-        "timestamp",
-        "edited_at",
-        "reply_to_uuid",
-        "metadata",
-    )
-
-    return await _serialize_all(messages)
 
 
 @router.get("/{channel_id}/messages")

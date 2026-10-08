@@ -119,7 +119,7 @@ def test_reply_to_a_reply_quotes_the_direct_parent(team):
     assert third["reply_to"]["preview"] == "second"
 
 
-def test_delta_sync_carries_reply_to(team):
+def test_channel_history_carries_reply_to(team):
     with team["alice"].websocket_connect("/ws", headers=HEADERS) as alice_ws, \
             team["bob"].websocket_connect("/ws", headers=HEADERS) as bob_ws:
         ws_ready(alice_ws)
@@ -127,9 +127,9 @@ def test_delta_sync_carries_reply_to(team):
         original = send_channel(alice_ws, bob_ws, team, text="the original")
         reply = send_channel(alice_ws, bob_ws, team, text="answer", reply_to=original["id"])
 
-    res = team["bob"].get("/channels/messages", params={"last_updated": "2000-01-01T00:00:00Z"})
+    res = team["bob"].get(f"/channels/{team['channel']['id']}/messages")
     assert res.status_code == 200, res.text
-    by_id = {m["id"]: m for m in res.json()}
+    by_id = {m["id"]: m for m in res.json()["messages"]}
     assert by_id[reply["id"]]["reply_to"]["preview"] == "the original"
     assert by_id[original["id"]]["reply_to"] is None
 
