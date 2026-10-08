@@ -34,4 +34,8 @@ class Message(models.Model):
     class Meta:
         table = "messages"
         ordering = ["-created_at"]
-        indexes = (("post", "timestamp"),)
+        indexes = (
+            ("post", "timestamp"),
+            ("channel", "created_at", "id"),
+            ("conversation", "created_at", "id"),
+        )
