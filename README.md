@@ -54,6 +54,7 @@ The interactive API docs are then at http://localhost:8000/docs.
 | `MAX_ATTACHMENT_BYTES` | no | `10485760` | Max accepted attachment size (10 MB). |
 | `ATTACHMENT_URL_KEY` | yes (prod) | random per process | Secret (32+ bytes) that signs the 5-minute attachment download links from `POST /attachments/{id}/link`. If unset, a random key is generated at startup and links stop working on restart. Generate one with `python -c "import secrets; print(secrets.token_urlsafe(32))"`. |
 | `AUTH_RATE_LIMIT` | no | `10/minute` | Per-IP limit on `/auth/login` and `/auth/register`. |
+| `TRUSTED_PROXY_KEY` | behind the Worker | *(empty)* | Secret shared with the Cloudflare Worker (`deploy/cloudflare/`). With it, rate limits use the client address the Worker sends; unset, the connecting address. |
 | `INVITE_USE_RATE_LIMIT` | no | `20/minute` | Per-IP + per-invite limit on `POST /invites/{id}/use`. |
 | `UNFURL_RATE_LIMIT` | no | `30/minute` | Per-user limit on `GET /unfurl`. |
 | `LIVEKIT_*` | for voice | — | LiveKit API host/key/secret used to mint voice tokens. |
