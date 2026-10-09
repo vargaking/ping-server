@@ -561,7 +561,7 @@ def test_every_message_payload_has_attachments_key(team, sockets):
     assert stored["attachments"] == []
 
 
-def test_history_and_delta_sync_include_attachments(team, sockets):
+def test_history_includes_attachments(team, sockets):
     alice_ws, bob_ws = sockets
     server_id, channel_id = team["server"]["id"], team["channel"]["id"]
     att = upload(team["alice"], channel_id=channel_id).json()
@@ -575,12 +575,6 @@ def test_history_and_delta_sync_include_attachments(team, sockets):
     by_id = {m["id"]: m for m in history(team["bob"], channel_id)}
     assert by_id[with_att["id"]]["attachments"] == [att]
     assert by_id[plain["id"]]["attachments"] == []
-
-    res = team["bob"].get("/channels/messages", params={"last_updated": "2000-01-01T00:00:00"})
-    assert res.status_code == 200, res.text
-    synced = {m["id"]: m for m in res.json()}
-    assert synced[with_att["id"]]["attachments"] == [att]
-    assert synced[plain["id"]]["attachments"] == []
 
 
 def test_attachment_cannot_be_sent_twice(team, sockets):

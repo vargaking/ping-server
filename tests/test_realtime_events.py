@@ -62,6 +62,7 @@ def test_channel_created_broadcasts_and_excludes_creator(client, new_client):
                 "position": 1,
                 "last_read_message_id": None,
                 "last_message_id": None,
+                "private": False,
             },
         }
 

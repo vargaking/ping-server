@@ -21,7 +21,7 @@ from ..models.Attachment import Attachment
 from ..models.Channel import Channel
 from ..models.Conversation import Conversation
 from ..models.Server import Server
-from ..permissions import Permission, require_permission
+from ..permissions import require_channel
 
 logger = logging.getLogger("app.services.attachments")
 
@@ -245,7 +245,7 @@ async def resolve_target_access(
         server = await Server.get_or_none(id=channel.server_id)
         if not server:
             raise HTTPException(status_code=404, detail="Server not found")
-        await require_permission(user, server, Permission.VIEW_CHANNEL)
+        await require_channel(user, channel)
         return server.id, channel.id, None
 
     conversation = await Conversation.get_or_none(id=conversation_id)

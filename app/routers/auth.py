@@ -12,6 +12,7 @@ from ..models.User import User
 from ..rate_limit import limiter
 from ..services import attachments as attachment_service
 from ..services.system_user import IMPORTED_USERNAME
+from ..services.usernames import Username
 from ..settings import auth_rate_limit
 from .users import UserResponse
 
@@ -24,7 +25,6 @@ TOKEN_TTL = timedelta(days=30)
 # Usernames are 3–32 chars of letters, digits, and . _ - — narrow enough that
 # the register form can mirror the rule for live validation. Keep this pattern
 # and the frontend's in sync.
-USERNAME_PATTERN = r"^[A-Za-z0-9._-]+$"
 PASSWORD_MIN_LENGTH = 8
 
 
@@ -47,7 +47,7 @@ class LoginRequest(BaseModel):
 
 
 class RegisterRequest(BaseModel):
-    username: str = Field(min_length=3, max_length=32, pattern=USERNAME_PATTERN)
+    username: Username
     password: str = Field(min_length=PASSWORD_MIN_LENGTH)
     public_key: Optional[str] = None
     profile: dict = {}

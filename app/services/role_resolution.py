@@ -2,6 +2,14 @@ from typing import Iterable, Mapping, Protocol
 
 from ..permissions import ALL_PERMISSIONS, Permission
 
+# The bits a channel or category overwrite may change.
+CHANNEL_BITS = int(
+    Permission.VIEW_CHANNEL | Permission.SEND_MESSAGES | Permission.MANAGE_MESSAGES
+    | Permission.CONNECT | Permission.SPEAK | Permission.STREAM)
+
+# (allow, deny) of one overwrite row.
+Bits = tuple[int, int]
+
 
 class RoleLike(Protocol):
     id: int
@@ -38,13 +46,13 @@ def resolved(role_id: int, roles: Mapping[int, RoleLike]) -> tuple[int, int]:
     return allow, deny
 
 
-def member_mask(roles: Mapping[int, RoleLike], assigned_ids: Iterable[int]) -> Permission:
-    """@everyone's allow, then the assigned roles from lowest to highest
-    position: the highest role that says anything about a bit decides it."""
-    mask = 0
+def apply_layer(mask: int, roles: Mapping[int, RoleLike], assigned_ids: Iterable[int]) -> int:
+    """@everyone, then the assigned roles from lowest to highest position:
+    the highest role that says anything about a bit decides it."""
     for role in roles.values():
         if role.is_default:
-            mask |= resolved(role.id, roles)[0]
+            allow, deny = resolved(role.id, roles)
+            mask = (mask & ~deny) | allow
     assigned = [
         roles[role_id] for role_id in set(assigned_ids)
         if role_id in roles and not roles[role_id].is_default
@@ -52,6 +60,59 @@ def member_mask(roles: Mapping[int, RoleLike], assigned_ids: Iterable[int]) -> P
     for role in sorted(assigned, key=lambda r: (r.position, r.id)):
         allow, deny = resolved(role.id, roles)
         mask = (mask | allow) & ~deny
+    return mask
+
+
+def member_mask(roles: Mapping[int, RoleLike], assigned_ids: Iterable[int]) -> Permission:
+    return Permission(apply_layer(0, roles, assigned_ids) & ALL_PERMISSIONS)
+
+
+class _Overwritten:
+    """A role as one channel or category sees it: its own place in the
+    hierarchy, with that target's overwrite in place of its permissions."""
+
+    def __init__(self, role: RoleLike, bits: Bits) -> None:
+        self.id = role.id
+        self.parent_id = role.parent_id
+        self.position = role.position
+        self.is_default = role.is_default
+        self.allow, self.deny = bits
+
+
+def overwrite_layer(
+    mask: int,
+    roles: Mapping[int, RoleLike],
+    assigned_ids: Iterable[int],
+    role_rows: Mapping[int, Bits],
+    member_row: Bits | None,
+) -> int:
+    """One target's overwrites on top of *mask*: its role rows by the role rule
+    (a role without a row inherits its parent's row), then the member's own row."""
+    if role_rows:
+        views = {rid: _Overwritten(role, role_rows.get(rid, (0, 0))) for rid, role in roles.items()}
+        mask = apply_layer(mask, views, assigned_ids)
+    if member_row is not None:
+        allow, deny = member_row
+        mask = (mask & ~deny) | allow
+    return mask
+
+
+def channel_mask(
+    server_mask: int,
+    roles: Mapping[int, RoleLike],
+    assigned_ids: Iterable[int],
+    layers: Iterable[tuple[Mapping[int, Bits], Bits | None]],
+) -> Permission:
+    """A member's mask in a channel: the server mask, then the category's and
+    the channel's overwrites in that order. Only channel bits move, and without
+    View none of them is left."""
+    assigned_ids = list(assigned_ids)
+    mask = int(server_mask)
+    for role_rows, member_row in layers:
+        mask = overwrite_layer(mask, roles, assigned_ids, role_rows, member_row)
+    mask = (int(server_mask) & ~CHANNEL_BITS) | (mask & CHANNEL_BITS)
+    if not mask & Permission.VIEW_CHANNEL:
+        mask &= ~CHANNEL_BITS
     return Permission(mask & ALL_PERMISSIONS)
 
 

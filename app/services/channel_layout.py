@@ -117,12 +117,19 @@ def _mismatch(kind: str, expected: set[int], given: list[int]) -> Optional[str]:
     return "; ".join(parts) or None
 
 
-async def apply_layout(server_id: int, body: LayoutBody) -> dict:
+async def apply_layout(
+    server_id: int, body: LayoutBody, visible: Optional[set[int]] = None
+) -> dict:
     """Validate *body* against the server's channels and groups and renumber
-    positions to match. Raises 422 unless it names each exactly once."""
+    positions to match. Raises 422 unless it names each exactly once.
+
+    With *visible*, the body names only those channels; the others keep
+    their category and come after the named ones, in their old order."""
     async with locked_server(server_id):
-        channels = {
-            channel.id: channel for channel in await Channel.filter(server_id=server_id)}
+        every_channel = await Channel.filter(server_id=server_id).order_by("position", "id")
+        hidden = [c for c in every_channel if visible is not None and c.id not in visible]
+        hidden_ids = {c.id for c in hidden}
+        channels = {c.id: c for c in every_channel if c.id not in hidden_ids}
         groups = {
             group.id: group for group in await ChannelGroup.filter(server_id=server_id)}
 
@@ -141,7 +148,12 @@ async def apply_layout(server_id: int, body: LayoutBody) -> dict:
             if groups[group.id].position != position:
                 await ChannelGroup.filter(id=group.id).update(position=position)
 
-        targets = [(None, body.ungrouped)] + [(g.id, g.channel_ids) for g in body.groups]
+        targets = [(None, list(body.ungrouped))] + [(g.id, list(g.channel_ids)) for g in body.groups]
+        for channel in hidden:
+            channels[channel.id] = channel
+            for group_id, ids in targets:
+                if group_id == channel.group_id:
+                    ids.append(channel.id)
         for group_id, ids in targets:
             for position, channel_id in enumerate(ids):
                 channel = channels[channel_id]

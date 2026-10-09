@@ -155,6 +155,9 @@ chmod 600 /opt/ping-server-$ENV/.env
 > bare `.vercel.app` pattern would let anyone's deployment reach the API with
 > credentials. The regex covers both CORS and the `/ws` handshake.
 
+> **Behind the Cloudflare Worker:** set `TRUSTED_PROXY_KEY` in production's `.env` to the
+> same value as the Worker's `PROXY_KEY` secret (`deploy/cloudflare/worker.js`), or every login shares one rate limit.
+
 ### Web Push (VAPID)
 
 Generate the keys once, from the env directory:

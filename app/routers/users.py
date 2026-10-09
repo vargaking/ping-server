@@ -3,20 +3,28 @@ from typing import List, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Request, UploadFile, File, status
 from pydantic import BaseModel
+from tortoise.exceptions import IntegrityError
 
 from ..middleware import get_current_user
 from ..models.User import User
 from ..services.system_user import IMPORTED_USERNAME
 from ..services.storage import ImageValidationError, storage_service
+from ..services.usernames import Username
 
 router = APIRouter(prefix="/users", tags=["users"])
 
 
 class UserUpdate(BaseModel):
-    username: Optional[str] = None
-    password: Optional[str] = None
+    """Other fields are ignored: older clients send the whole user back. The password has
+    no endpoint yet, and the profile's avatar is only written by the avatar upload."""
+    username: Optional[Username] = None
     public_key: Optional[str] = None
-    profile: Optional[dict] = None
+
+
+USERNAME_TAKEN = HTTPException(
+    status_code=status.HTTP_409_CONFLICT,
+    detail=[{"loc": ["body", "username"], "msg": "That username is taken.", "type": "username_taken"}],
+)
 
 
 class UserResponse(BaseModel):
@@ -61,11 +69,18 @@ async def update_user(user_id: int, user_update: UserUpdate, request: Request, c
         raise HTTPException(status_code=404, detail="User not found")
 
     update_data = user_update.model_dump(exclude_unset=True)
-    if 'password' in update_data:
-        user.set_password(update_data.pop('password'))
+    if update_data.get("username") is None:
+        update_data.pop("username", None)
+    username = update_data.get("username")
+    if username is not None and username != user.username:
+        if await User.filter(username=username).exists():
+            raise USERNAME_TAKEN
 
-    await user.update_from_dict(update_data)
-    await user.save()
+    user.update_from_dict(update_data)
+    try:
+        await user.save()
+    except IntegrityError:
+        raise USERNAME_TAKEN
 
     # Notify related users that this profile changed
     if hasattr(request.app.state, "comms"):
