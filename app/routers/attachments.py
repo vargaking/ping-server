@@ -85,7 +85,8 @@ async def upload_attachment(
 async def _can_access(user: User, attachment: Attachment) -> bool:
     if attachment.channel_id is not None:
         return await permissions.has(
-            user.id, attachment.server_id, Permission.VIEW_CHANNEL)
+            user.id, attachment.server_id, Permission.VIEW_CHANNEL,
+            channel_id=attachment.channel_id)
     if attachment.conversation_id is not None:
         conversation = await Conversation.get_or_none(id=attachment.conversation_id)
         return conversation is not None and conversation.has_participant(user.id)
