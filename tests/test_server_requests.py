@@ -2,6 +2,7 @@
 a request that a platform admin approves or declines."""
 import pytest
 
+from app.models.ServerRequest import ServerRequest
 from app.models.User import User
 from app.scripts.platform_admin import set_platform_admin
 from tests.conftest import ORIGIN, create_server, register, ws_ready
@@ -216,6 +217,73 @@ def test_decline_reason_is_optional_and_bounded(client, new_client, waitlist):
     res = admin_client.post(f"/server-requests/{request_id}/decline")
     assert res.status_code == 200
     assert res.json()["decline_reason"] is None
+
+
+def test_history_lists_own_requests_newest_first_including_withdrawn(
+        client, new_client, waitlist):
+    register(client, "history-user")
+    admin_client = new_client()
+    make_admin(admin_client, "history-admin")
+
+    declined_id = submit(client, name="First").json()["id"]
+    admin_client.post(f"/server-requests/{declined_id}/decline", json={"reason": "Too vague"})
+    withdrawn_id = submit(client, name="Second").json()["id"]
+    client.delete("/server-requests/me")
+    pending_id = submit(client, name="Third").json()["id"]
+
+    res = client.get("/server-requests/me/history")
+    assert res.status_code == 200
+    rows = res.json()
+    assert [r["id"] for r in rows] == [pending_id, withdrawn_id, declined_id]
+    assert [r["status"] for r in rows] == ["pending", "withdrawn", "declined"]
+    assert rows[2]["decline_reason"] == "Too vague"
+    assert rows[2]["decided_at"] is not None
+    assert set(rows[0]) == {
+        "id", "name", "description", "expected_size", "status",
+        "decline_reason", "created_at", "decided_at", "server_id"}
+
+
+def test_history_works_in_open_mode(client):
+    register(client, "history-open-user")
+    assert client.get("/server-requests/me/history").json() == []
+
+
+def test_history_only_has_the_callers_requests(client, new_client, waitlist):
+    register(client, "history-mine")
+    mine = submit(client, name="Mine").json()["id"]
+    other_client = new_client()
+    register(other_client, "history-other")
+    theirs = submit(other_client, name="Theirs").json()["id"]
+
+    assert [r["id"] for r in client.get("/server-requests/me/history").json()] == [mine]
+    assert [r["id"] for r in other_client.get("/server-requests/me/history").json()] == [theirs]
+
+
+def test_history_is_empty_for_a_user_without_requests(client, waitlist):
+    register(client, "history-empty")
+    assert client.get("/server-requests/me/history").json() == []
+
+
+def test_history_is_capped_at_50_and_drops_the_oldest(client, waitlist):
+    me = register(client, "history-capped")
+
+    async def seed():
+        return [
+            (await ServerRequest.create(
+                user_id=me["id"], name=f"Club {i}", description="d",
+                expected_size="lt10", status="withdrawn")).id
+            for i in range(51)
+        ]
+    ids = client.portal.call(seed)
+
+    rows = client.get("/server-requests/me/history").json()
+    assert len(rows) == 50
+    assert [r["id"] for r in rows] == ids[:0:-1]
+    assert ids[0] not in {r["id"] for r in rows}
+
+
+def test_history_needs_authentication(new_client):
+    assert new_client().get("/server-requests/me/history").status_code == 401
 
 
 def test_me_includes_platform_admin_flag_only_for_the_caller(client, new_client):

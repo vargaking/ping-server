@@ -20,6 +20,7 @@ router = APIRouter(prefix="/server-requests", tags=["server-requests"])
 
 DESCRIPTION_MAX = 500
 DECLINE_REASON_MAX = 500
+HISTORY_LIMIT = 50
 
 
 class RequestStatus(StrEnum):
@@ -126,6 +127,13 @@ async def get_my_request_state(current_user: User = Depends(get_current_user)):
         can_create=mode == "open" or current_user.is_platform_admin,
         request=ServerRequestOut.from_request(latest) if latest else None,
     )
+
+
+@router.get("/me/history", response_model=list[ServerRequestOut])
+async def get_my_request_history(current_user: User = Depends(get_current_user)):
+    requests = await ServerRequest.filter(user=current_user).order_by(
+        "-created_at", "-id").limit(HISTORY_LIMIT)
+    return [ServerRequestOut.from_request(req) for req in requests]
 
 
 @router.post("", response_model=ServerRequestOut, status_code=status.HTTP_201_CREATED)
