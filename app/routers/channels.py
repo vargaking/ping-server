@@ -18,10 +18,12 @@ from ..models.User import User
 from ..permissions import (
     Permission,
     channel_from_path,
+    check_channel,
     check_permission,
-    server_of_channel,
 )
 from ..services import channel_layout, read_state
+from ..services.channel_visibility import private_flags, visibility_change
+from ..services.permissions import permissions
 from ..services.attachments import attachments_by_message
 from ..services.reactions import reactions_by_message
 from ..services.replies import reply_json, reply_refs
@@ -142,6 +144,8 @@ class ChannelResponse(BaseModel):
     position: int = 0
     last_read_message_id: Optional[str] = None
     last_message_id: Optional[str] = None
+    # @everyone can't view it.
+    private: bool = False
 
     @classmethod
     def from_channel(
@@ -150,6 +154,7 @@ class ChannelResponse(BaseModel):
         *,
         last_read_message_id: Optional[str] = None,
         last_message_id: Optional[str] = None,
+        private: bool = False,
     ):
         return cls(
             id=channel.id,
@@ -161,6 +166,7 @@ class ChannelResponse(BaseModel):
             position=channel.position,
             last_read_message_id=last_read_message_id,
             last_message_id=last_message_id,
+            private=private,
         )
 
 
@@ -176,7 +182,7 @@ async def get_channel_messages(
     limit: int = HISTORY_PAGE_SIZE,
     post_id: Optional[int] = None,
     channel: Channel = Depends(channel_from_path),
-    server: Server = Depends(check_permission(Permission.VIEW_CHANNEL, server_of_channel)),
+    server: Server = Depends(check_channel()),
 ):
     """Newest-first page of a channel's history, or of one post's messages
     in a forum channel (which needs post_id; no other channel takes it).
@@ -241,7 +247,7 @@ async def mark_channel_read(
     body: ReadMarkerUpdate,
     request: Request,
     current_user: User = Depends(get_current_user),
-    server: Server = Depends(check_permission(Permission.VIEW_CHANNEL, server_of_channel)),
+    server: Server = Depends(check_channel()),
 ):
     """Advance the caller's read marker for this channel to *message_id*.
 
@@ -287,14 +293,19 @@ async def get_channels(
     current_user: User = Depends(get_current_user),
     server: Server = Depends(check_permission(Permission.VIEW_CHANNEL)),
 ):
-    channels = await Channel.filter(server_id=server.id).all()
+    view = await permissions.view(current_user.id, server)
+    channels = [
+        channel for channel in await Channel.filter(server_id=server.id).all()
+        if view.can_view(channel.id)]
     state = await read_state.batch_channel_state(
         current_user.id, [c.id for c in channels])
+    private_channels, _ = await private_flags(server.id)
     return [
         ChannelResponse.from_channel(
             channel,
             last_read_message_id=state.get(channel.id, {}).get("last_read_message_id"),
             last_message_id=state.get(channel.id, {}).get("last_message_id"),
+            private=channel.id in private_channels,
         )
         for channel in channels
     ]
@@ -312,6 +323,20 @@ async def _broadcast(request: Request, server_id: int, frame: dict, exclude_user
         await comms.broadcast_to_server(server_id, frame, exclude_user_id=exclude_user_id)
 
 
+async def _broadcast_to_channel(
+    request: Request, channel: Channel, frame: dict, exclude_user_id: int | None
+) -> None:
+    comms = getattr(request.app.state, "comms", None)
+    if comms is not None:
+        await comms.broadcast_to_channel(
+            channel.server_id, channel.id, frame, exclude_user_id=exclude_user_id)
+
+
+async def channel_response(channel: Channel) -> ChannelResponse:
+    private_channels, _ = await private_flags(channel.server_id)
+    return ChannelResponse.from_channel(channel, private=channel.id in private_channels)
+
+
 @router.post("/{server_id}/create", response_model=ChannelResponse, status_code=status.HTTP_201_CREATED)
 async def create_channel(
     server_id: int,
@@ -320,33 +345,27 @@ async def create_channel(
     current_user: User = Depends(get_current_user),
     server: Server = Depends(check_permission(Permission.MANAGE_CHANNELS)),
 ):
-    async with channel_layout.locked_server(server_id):
-        if await Channel.filter(server_id=server_id).count() >= channel_layout.MAX_CHANNELS:
-            raise HTTPException(
-                status_code=422,
-                detail=f"A server can have at most {channel_layout.MAX_CHANNELS} channels")
-        await _check_group(server_id, body.group_id)
-        channel = await Channel.create(
-            name=body.name,
-            channel_settings={},
-            type=body.type,
-            topic=body.topic,
-            server=server,
-            group_id=body.group_id,
-            position=await channel_layout.next_channel_position(server_id, body.group_id),
-        )
+    # Members who can view the new channel get channel_created from the
+    # visibility change, so one created in a private category stays private.
+    async with visibility_change(
+            request.app.state, server, exclude_user_id=current_user.id):
+        async with channel_layout.locked_server(server_id):
+            if await Channel.filter(server_id=server_id).count() >= channel_layout.MAX_CHANNELS:
+                raise HTTPException(
+                    status_code=422,
+                    detail=f"A server can have at most {channel_layout.MAX_CHANNELS} channels")
+            await _check_group(server_id, body.group_id)
+            channel = await Channel.create(
+                name=body.name,
+                channel_settings={},
+                type=body.type,
+                topic=body.topic,
+                server=server,
+                group_id=body.group_id,
+                position=await channel_layout.next_channel_position(server_id, body.group_id),
+            )
 
-    channel_response = ChannelResponse.from_channel(channel)
-
-    # Tell everyone else in the server so their channel list patches in place.
-    # The creator already has it from this response, so skip them.
-    await _broadcast(request, server_id, {
-        "type": "channel_created",
-        "server_id": server_id,
-        "channel": channel_response.model_dump(mode="json"),
-    }, exclude_user_id=current_user.id)
-
-    return channel_response
+    return await channel_response(channel)
 
 
 @router.patch("/{channel_id}", response_model=ChannelResponse)
@@ -355,7 +374,7 @@ async def update_channel(
     request: Request,
     current_user: User = Depends(get_current_user),
     channel: Channel = Depends(channel_from_path),
-    server: Server = Depends(check_permission(Permission.MANAGE_CHANNELS, server_of_channel)),
+    server: Server = Depends(check_channel(Permission.MANAGE_CHANNELS)),
 ):
     """Rename a channel, change its topic or move it to another category.
     The type is fixed."""
@@ -366,31 +385,33 @@ async def update_channel(
     if "name" in changes and changes["name"] is None:
         raise HTTPException(status_code=422, detail="Channel name can't be empty")
 
-    async with channel_layout.locked_server(server.id):
-        await channel.refresh_from_db()
-        if "group_id" in changes:
-            await _check_group(server.id, changes["group_id"])
-            if changes["group_id"] == channel.group_id:
-                del changes["group_id"]
-            else:
-                changes["position"] = await channel_layout.next_channel_position(
-                    server.id, changes["group_id"])
-        if changes:
-            await channel.update_from_dict(changes)
-            await channel.save(update_fields=list(changes))
+    async with visibility_change(
+            request.app.state, server, exclude_user_id=current_user.id):
+        async with channel_layout.locked_server(server.id):
+            await channel.refresh_from_db()
+            if "group_id" in changes:
+                await _check_group(server.id, changes["group_id"])
+                if changes["group_id"] == channel.group_id:
+                    del changes["group_id"]
+                else:
+                    changes["position"] = await channel_layout.next_channel_position(
+                        server.id, changes["group_id"])
+            if changes:
+                await channel.update_from_dict(changes)
+                await channel.save(update_fields=list(changes))
 
-    channel_response = ChannelResponse.from_channel(channel)
+    channel_response_ = await channel_response(channel)
     if changes:
         # Read-state fields are per user, so they are left out of the frame;
         # clients keep their own values and patch the rest.
-        await _broadcast(request, server.id, {
+        await _broadcast_to_channel(request, channel, {
             "type": "channel_updated",
             "server_id": server.id,
-            "channel": channel_response.model_dump(
+            "channel": channel_response_.model_dump(
                 mode="json", exclude={"last_read_message_id", "last_message_id"}),
         }, exclude_user_id=current_user.id)
 
-    return channel_response
+    return channel_response_
 
 
 @router.delete("/{channel_id}", status_code=status.HTTP_204_NO_CONTENT)
@@ -399,10 +420,11 @@ async def delete_channel(
     request: Request,
     current_user: User = Depends(get_current_user),
     channel: Channel = Depends(channel_from_path),
-    server: Server = Depends(check_permission(Permission.MANAGE_CHANNELS, server_of_channel)),
+    server: Server = Depends(check_channel(Permission.MANAGE_CHANNELS)),
 ):
     """Delete a channel and all of its messages."""
 
+    viewers = await permissions.viewers(server.id, channel.id)
     was_voice = channel.type == "voice"
     async with channel_layout.locked_server(server.id):
         # Messages cascade at the DB level too, but deleting them explicitly
@@ -417,11 +439,14 @@ async def delete_channel(
             server.server_settings = server_settings
             await server.save(update_fields=["server_settings"])
 
-    await _broadcast(request, server.id, {
-        "type": "channel_deleted",
-        "server_id": server.id,
-        "channel_id": channel_id,
-    }, exclude_user_id=current_user.id)
+    permissions.invalidate(server.id)
+    comms = getattr(request.app.state, "comms", None)
+    if comms is not None:
+        await comms.send_to_users(viewers, {
+            "type": "channel_deleted",
+            "server_id": server.id,
+            "channel_id": channel_id,
+        }, exclude_user_id=current_user.id)
 
     if was_voice:
         await close_voice_channels(

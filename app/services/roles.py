@@ -17,10 +17,8 @@ from ..permissions import (
     Permission,
 )
 from . import channel_layout
-from .permissions import permissions, server_masks
+from .channel_visibility import visibility_change
 from .role_resolution import RoleLike, descendants, resolved
-from .voice_moderation import publish_sources, server_muted_attributes
-from .voice_presence import remove_from_voice, voice_channels_of
 
 MAX_ROLES = 100
 
@@ -127,51 +125,16 @@ async def renumber_roles(server_id: int) -> None:
             await Role.filter(id=role.id).update(position=position)
 
 
-async def announce_mask_changes(
-    request: Request, server: Server,
-    before: Mapping[int, Permission], after: Mapping[int, Permission],
-) -> None:
-    """Tell every member whose mask changed, and apply lost voice permissions
-    to the LiveKit rooms they are in."""
-    comms = getattr(request.app.state, "comms", None)
-    presence = getattr(request.app.state, "voice_presence", None)
-    moderation = getattr(request.app.state, "voice_moderation", None)
-    for user_id, mask in after.items():
-        old = before.get(user_id)
-        if old == mask:
-            continue
-        if comms is not None:
-            await comms.send_to_user(user_id, {
-                "type": "permissions_updated",
-                "server_id": server.id,
-                "permissions": str(int(mask)),
-            })
-        old = old or Permission(0)
-        channel_ids = await voice_channels_of(presence, server.id, user_id)
-        if not channel_ids:
-            continue
-        if old & Permission.CONNECT and not mask & Permission.CONNECT:
-            await remove_from_voice(presence, channel_ids, user_id)
-        elif (old ^ mask) & (Permission.SPEAK | Permission.STREAM):
-            server_muted = moderation is not None and moderation.is_muted(server.id, user_id)
-            for channel_id in channel_ids:
-                await presence.update_participant(
-                    channel_id, user_id, publish_sources(mask, server_muted),
-                    server_muted_attributes(server_muted))
-
-
 async def apply_role_change(
     request: Request, server: Server,
     mutate: Callable[[], Awaitable[T]],
     event_builder: Callable[[T], Awaitable[dict]],
 ) -> T:
     """Run a role change under the server lock, then refresh permissions,
-    notify the members it affected and broadcast the role event."""
-    before = await server_masks(server)
-    async with channel_layout.locked_server(server.id):
-        result = await mutate()
-    permissions.invalidate(server.id)
-    await announce_mask_changes(request, server, before, await server_masks(server))
+    tell the members what it changed for them and broadcast the role event."""
+    async with visibility_change(request.app.state, server):
+        async with channel_layout.locked_server(server.id):
+            result = await mutate()
     comms = getattr(request.app.state, "comms", None)
     if comms is not None:
         await comms.broadcast_to_server(server.id, await event_builder(result))

@@ -197,6 +197,7 @@ def test_update_and_delete_broadcast_to_other_members(client, new_client):
                 "topic": "hey",
                 "group_id": None,
                 "position": 0,
+                "private": False,
             },
         }
 

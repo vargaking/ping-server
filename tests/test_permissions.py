@@ -561,13 +561,15 @@ def test_permissions_init_lists_every_server_the_user_is_in(team, client):
     with team["member_client"].websocket_connect("/ws", headers=HEADERS) as ws:
         presence = ws.receive_json()
         assert presence["type"] == "presence_init"
-        assert ws.receive_json() == {"type": "permissions_init", "servers": {str(sid): "123"}}
+        assert ws.receive_json() == {
+            "type": "permissions_init", "servers": {str(sid): "123"}, "channels": {str(sid): {}}}
 
     with client.websocket_connect("/ws", headers=HEADERS) as ws:
         ws_ready_frames = [ws.receive_json(), ws.receive_json()]
         assert ws_ready_frames[1] == {
             "type": "permissions_init",
             "servers": {str(sid): "16383", str(other["id"]): "16383"},
+            "channels": {str(sid): {}, str(other["id"]): {}},
         }
 
 
@@ -575,7 +577,7 @@ def test_permissions_init_is_sent_even_when_empty(client):
     register(client)
     with client.websocket_connect("/ws", headers=HEADERS) as ws:
         assert ws.receive_json()["type"] == "presence_init"
-        assert ws.receive_json() == {"type": "permissions_init", "servers": {}}
+        assert ws.receive_json() == {"type": "permissions_init", "servers": {}, "channels": {}}
 
 
 def test_promote_and_demote_notify_the_target_and_the_rest(team, client):
@@ -602,7 +604,8 @@ def test_promote_and_demote_notify_the_target_and_the_rest(team, client):
         got = {f["type"]: f for f in (member_ws.receive_json(), member_ws.receive_json())}
         assert got["member_roles_updated"] == roles_updated
         assert got["permissions_updated"] == {
-            "type": "permissions_updated", "server_id": sid, "permissions": "13311"}
+            "type": "permissions_updated", "server_id": sid, "permissions": "13311",
+            "channels": {}}
 
         assert set_roles(client, sid, member["id"], []).status_code == 200
         demoted = {**roles_updated, "role_ids": []}
