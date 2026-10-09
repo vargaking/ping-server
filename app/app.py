@@ -13,7 +13,7 @@ from app.communication import WS_CLOSE_UNAUTHENTICATED, Communication
 from app.db import TORTOISE_CONFIG
 from app.db_timing import ServerTimingMiddleware, instrument_db_clients
 from app.rate_limit import limiter
-from app.routers import admin, attachments, auth, channel_groups, channels, client_errors, conversations, forum, invites, messages, push, roles, server_imports, server_requests, servers, unfurl, users, voice
+from app.routers import admin, attachments, auth, channel_groups, channels, client_errors, conversations, forum, invites, messages, overwrites, push, roles, server_imports, server_requests, servers, unfurl, users, voice
 from app.settings import ALLOWED_ORIGINS, ALLOWED_ORIGIN_REGEX, is_origin_allowed
 from app.utils import lifespan
 from app.ws_schemas import FrameDecodeError, decode_frame
@@ -63,6 +63,7 @@ app.include_router(servers.router)
 app.include_router(roles.router)
 app.include_router(server_requests.router)
 app.include_router(server_imports.router)
+app.include_router(overwrites.router)
 app.include_router(channels.router)
 app.include_router(channel_groups.router)
 app.include_router(forum.router)

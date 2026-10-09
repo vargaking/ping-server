@@ -18,7 +18,8 @@ from .ReadState import ReadState
 from .PushSubscription import PushSubscription
 from .ServerRequest import ServerRequest
 from .ServerImport import ServerImport
+from .PermissionOverwrite import PermissionOverwrite
 
 __all__ = ["Role", "User", "Server", "RoleToUser", "UserToServer",
            "Channel", "ChannelGroup", "ForumPost", "ForumTag", "ForumPostTag", "Conversation", "Message", "Token", "Invite", "ReadState",
-           "Attachment", "Reaction", "PushSubscription", "ServerRequest", "ServerImport"]
+           "Attachment", "Reaction", "PushSubscription", "ServerRequest", "ServerImport", "PermissionOverwrite"]

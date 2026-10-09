@@ -866,6 +866,20 @@ def test_mentions_of_the_sender_or_non_members_do_not_push(channel_team, new_cli
     assert push_on.calls == []
 
 
+def test_a_mention_in_a_private_channel_pushes_only_its_viewers(channel_team, push_on):
+    team = channel_team
+    sid, cid = team.server["id"], team.channel["id"]
+    roles = {r["name"]: r for r in team.alice_client.get(f"/servers/{sid}/roles").json()}
+    base = f"/channels/{cid}/permissions"
+    assert team.alice_client.put(f"{base}/members/{team.carol.user['id']}", json={
+        "allow": "1", "deny": "0"}).status_code == 200
+    assert team.alice_client.put(f"{base}/roles/{roles['@everyone']['id']}", json={
+        "allow": "0", "deny": "1"}).status_code == 200
+
+    send_to_channel(team, doc(mention(team.bob.user["id"]), mention(team.carol.user["id"])))
+    assert [c["endpoint"] for c in push_on.calls] == [team.carol.endpoint]
+
+
 def test_an_active_mentioned_member_is_not_pushed(channel_team, push_on):
     team = channel_team
     with team.bob.client.websocket_connect("/ws", headers=HEADERS) as bob_ws:

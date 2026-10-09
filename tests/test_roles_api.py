@@ -547,7 +547,8 @@ def test_only_members_whose_mask_changed_get_permissions_updated(crew, client):
 
         expected_mask = str(int(MEMBER_PERMISSIONS | KICK | MANAGE_MESSAGES))
         assert member_ws.receive_json() == {
-            "type": "permissions_updated", "server_id": sid, "permissions": expected_mask}
+            "type": "permissions_updated", "server_id": sid, "permissions": expected_mask,
+            "channels": {}}
         role_updated = {"type": "role_updated", "server_id": sid, "role": res.json()}
         assert member_ws.receive_json() == role_updated
         assert other_ws.receive_json() == role_updated
@@ -593,7 +594,7 @@ def test_deleting_a_role_tells_the_members_who_lost_bits(crew, client):
 
         assert ws.receive_json() == {
             "type": "permissions_updated", "server_id": sid,
-            "permissions": str(int(MEMBER_PERMISSIONS))}
+            "permissions": str(int(MEMBER_PERMISSIONS)), "channels": {}}
         assert ws.receive_json()["type"] == "role_deleted"
 
 

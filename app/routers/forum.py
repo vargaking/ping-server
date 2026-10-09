@@ -20,14 +20,12 @@ from ..models.User import User
 from ..permissions import (
     Permission,
     channel_from_path,
-    check_permission,
-    require_permission,
-    server_of_channel,
+    check_channel,
+    require_channel,
 )
 from ..services import channel_layout, forum
 from ..services.attachments import MAX_ATTACHMENTS_PER_MESSAGE, delete_file
 from ..services.chat_service import MessageAlreadyStored, MessageRejected
-from ..services.permissions import permissions
 from ..ws_schemas import MAX_EMBEDS_PER_MESSAGE, EmbedIn, MessageFrame
 from .channels import _decode_cursor, _encode_cursor
 
@@ -127,21 +125,22 @@ async def _forum_channel(channel: Channel = Depends(channel_from_path)) -> Chann
     return channel
 
 
-async def _broadcast(request: Request, server_id: int, frame: dict) -> None:
+async def _broadcast(request: Request, server_id: int, channel_id: int, frame: dict) -> None:
     comms = getattr(request.app.state, "comms", None)
     if comms is not None:
-        await comms.broadcast_to_server(server_id, frame)
+        await comms.broadcast_to_channel(server_id, channel_id, frame)
 
 
-async def _post_with_server(post_id: int, user: User) -> tuple[ForumPost, Server]:
-    """A post of a server the caller can view; 404 for an unknown post."""
+async def _post_with_server(post_id: int, user: User) -> tuple[ForumPost, Server, Permission]:
+    """A post in a channel the caller can view, and the caller's mask there;
+    404 for an unknown post."""
     post = await ForumPost.get_or_none(id=post_id)
     if not post:
         raise HTTPException(status_code=404, detail="Post not found")
     channel = await Channel.get(id=post.channel_id)
     server = await Server.get(id=channel.server_id)
-    await require_permission(user, server, Permission.VIEW_CHANNEL)
-    return post, server
+    mask = await require_channel(user, channel, not_found="Post not found")
+    return post, server, mask
 
 
 async def _channel_post(channel_id: int, post_id: int) -> ForumPost:
@@ -155,7 +154,7 @@ async def _channel_post(channel_id: int, post_id: int) -> ForumPost:
 async def list_posts(
     cursor: Optional[str] = None,
     tag_ids: List[int] = Query(default_factory=list),
-    server: Server = Depends(check_permission(Permission.VIEW_CHANNEL, server_of_channel)),
+    server: Server = Depends(check_channel(Permission.VIEW_CHANNEL)),
     channel: Channel = Depends(_forum_channel),
 ):
     """Pinned posts (first page only), then the rest by latest activity.
@@ -172,7 +171,7 @@ async def list_posts(
 @router.get("/channels/{channel_id}/posts/{post_id}")
 async def get_post(
     post_id: int,
-    server: Server = Depends(check_permission(Permission.VIEW_CHANNEL, server_of_channel)),
+    server: Server = Depends(check_channel(Permission.VIEW_CHANNEL)),
     channel: Channel = Depends(_forum_channel),
 ):
     post = await _channel_post(channel.id, post_id)
@@ -187,8 +186,7 @@ async def create_post(
     body: PostCreate,
     request: Request,
     current_user: User = Depends(get_current_user),
-    server: Server = Depends(check_permission(
-        Permission.VIEW_CHANNEL | Permission.SEND_MESSAGES, server_of_channel)),
+    server: Server = Depends(check_channel(Permission.VIEW_CHANNEL | Permission.SEND_MESSAGES)),
     channel: Channel = Depends(_forum_channel),
 ):
     """A post and its opening message, created together through the same
@@ -221,12 +219,12 @@ async def update_post(
 ):
     """Title and tags: the author or MANAGE_MESSAGES. Pin and lock:
     MANAGE_MESSAGES."""
-    post, server = await _post_with_server(post_id, current_user)
+    post, server, mask = await _post_with_server(post_id, current_user)
     changes = body.model_dump(exclude_unset=True)
     if any(value is None for value in changes.values()):
         raise HTTPException(status_code=422, detail="Fields can't be null")
 
-    moderator = await permissions.has(current_user.id, server, Permission.MANAGE_MESSAGES)
+    moderator = bool(mask & Permission.MANAGE_MESSAGES)
     if not moderator and (
             "pinned" in changes or "locked" in changes
             or post.author_id != current_user.id):
@@ -246,7 +244,7 @@ async def update_post(
 
     row = (await forum.rows([post]))[0]
     if changes or tag_ids is not None:
-        await _broadcast(request, server.id, forum.updated_frame(server.id, row))
+        await _broadcast(request, server.id, post.channel_id, forum.updated_frame(server.id, row))
     return row
 
 
@@ -258,9 +256,8 @@ async def delete_post(
 ):
     """Delete a post with its messages and their files. The author or
     MANAGE_MESSAGES."""
-    post, server = await _post_with_server(post_id, current_user)
-    if post.author_id != current_user.id and not await permissions.has(
-            current_user.id, server, Permission.MANAGE_MESSAGES):
+    post, server, mask = await _post_with_server(post_id, current_user)
+    if post.author_id != current_user.id and not mask & Permission.MANAGE_MESSAGES:
         raise HTTPException(status_code=403, detail="Not allowed to delete this post")
 
     message_ids = await Message.filter(post_id=post.id).values_list("id", flat=True)
@@ -273,12 +270,13 @@ async def delete_post(
         delete_file(storage_path)
 
     await _broadcast(
-        request, server.id, forum.deleted_frame(server.id, post.channel_id, post.id))
+        request, server.id, post.channel_id,
+        forum.deleted_frame(server.id, post.channel_id, post.id))
 
 
 @router.get("/channels/{channel_id}/tags")
 async def list_tags(
-    server: Server = Depends(check_permission(Permission.VIEW_CHANNEL, server_of_channel)),
+    server: Server = Depends(check_channel(Permission.VIEW_CHANNEL)),
     channel: Channel = Depends(_forum_channel),
 ):
     return await forum.channel_tags(channel.id)
@@ -286,7 +284,7 @@ async def list_tags(
 
 async def _tags_changed(request: Request, server: Server, channel: Channel) -> list[dict]:
     tags = await forum.channel_tags(channel.id)
-    await _broadcast(request, server.id, forum.tags_frame(server.id, channel.id, tags))
+    await _broadcast(request, server.id, channel.id, forum.tags_frame(server.id, channel.id, tags))
     return tags
 
 
@@ -312,7 +310,7 @@ _NAME_TAKEN = "A tag with this name already exists"
 async def create_tag(
     body: TagCreate,
     request: Request,
-    server: Server = Depends(check_permission(Permission.MANAGE_CHANNELS, server_of_channel)),
+    server: Server = Depends(check_channel(Permission.MANAGE_CHANNELS)),
     channel: Channel = Depends(_forum_channel),
 ):
     try:
@@ -338,7 +336,7 @@ async def create_tag(
 async def reorder_tags(
     body: TagOrder,
     request: Request,
-    server: Server = Depends(check_permission(Permission.MANAGE_CHANNELS, server_of_channel)),
+    server: Server = Depends(check_channel(Permission.MANAGE_CHANNELS)),
     channel: Channel = Depends(_forum_channel),
 ):
     """Set the tag order. *tag_ids* must be exactly the channel's tags."""
@@ -357,7 +355,7 @@ async def update_tag(
     tag_id: int,
     body: TagUpdate,
     request: Request,
-    server: Server = Depends(check_permission(Permission.MANAGE_CHANNELS, server_of_channel)),
+    server: Server = Depends(check_channel(Permission.MANAGE_CHANNELS)),
     channel: Channel = Depends(_forum_channel),
 ):
     changes = body.model_dump(exclude_unset=True)
@@ -381,7 +379,7 @@ async def update_tag(
 async def delete_tag(
     tag_id: int,
     request: Request,
-    server: Server = Depends(check_permission(Permission.MANAGE_CHANNELS, server_of_channel)),
+    server: Server = Depends(check_channel(Permission.MANAGE_CHANNELS)),
     channel: Channel = Depends(_forum_channel),
 ):
     tag = await _channel_tag(channel.id, tag_id)

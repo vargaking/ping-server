@@ -350,7 +350,7 @@ def make_broadcast_notify(comms) -> Notify:
         channel = await Channel.get_or_none(id=channel_id)
         if channel is None:
             return  # channel was deleted
-        await comms.broadcast_to_server(channel.server_id, {
+        await comms.broadcast_to_channel(channel.server_id, channel_id, {
             "type": "voice_state",
             "server_id": channel.server_id,
             "channel_id": channel_id,

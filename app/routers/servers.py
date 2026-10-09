@@ -8,6 +8,7 @@ from tortoise.transactions import in_transaction
 from ..middleware import get_current_user
 from ..permissions import Permission, check_permission, require_permission, server_from_path
 from ..models.Channel import Channel
+from ..models.PermissionOverwrite import PermissionOverwrite
 from ..models.Role import Role
 from ..models.RoleToUser import RoleToUser
 from ..models.Server import Server
@@ -16,8 +17,14 @@ from ..models.User import User
 from ..models.UserToServer import UserToServer
 from ..services import channel_layout
 from ..services.imports import storage as import_storage
-from ..services.permissions import permissions
-from ..services.roles import announce_mask_changes, check_can_assign, seed_server_roles, standing_of
+from ..services.permissions import member_views, permissions
+from ..services.channel_visibility import (
+    announce_visibility,
+    filter_order,
+    filter_settings,
+    send_per_member,
+)
+from ..services.roles import check_can_assign, seed_server_roles, standing_of
 from ..services.server_icon import clean_icon_text, clean_icon_tone
 from ..services.server_name import clean_server_name
 from ..services.storage import ImageValidationError, storage_service
@@ -94,6 +101,8 @@ class ServerResponse(BaseModel):
     # The caller's effective permission mask as a decimal string (JS numbers
     # lose precision past 2^53); filled in by the handlers.
     permissions: str = "0"
+    # The caller's mask in channels where it isn't simply the server mask.
+    channel_permissions: dict[str, str] = {}
 
     @classmethod
     def from_server(cls, server: Server):
@@ -135,10 +144,12 @@ async def server_response(
 ) -> ServerResponse:
     if channel_order is None:
         channel_order = (await channel_layout.legacy_channel_orders([server.id]))[server.id]
+    view = await permissions.view(user.id, server)
     response = ServerResponse.from_server(server)
-    response.server_settings = _with_channel_order(response.server_settings, channel_order)
-    mask = await permissions.effective(user.id, server)
-    response.permissions = str(int(mask or 0))
+    response.server_settings = _with_channel_order(
+        filter_settings(response.server_settings, view), filter_order(channel_order, view))
+    response.permissions = str(int(view.mask if view else 0))
+    response.channel_permissions = view.differing_masks() if view else {}
     return response
 
 
@@ -219,13 +230,12 @@ async def _broadcast_server_updated(request: Request, server: Server, actor_id: 
     if comms is None:
         return
     payload = ServerPublicResponse.from_server(server).model_dump(mode="json")
-    orders = await channel_layout.legacy_channel_orders([server.id])
-    payload["server_settings"] = _with_channel_order(
-        server.server_settings, orders[server.id])
-    await comms.broadcast_to_server(server.id, {
+    order = (await channel_layout.legacy_channel_orders([server.id]))[server.id]
+    await send_per_member(comms, server, lambda user_id, view: None if user_id == actor_id else {
         "type": "server_updated",
-        "server": payload,
-    }, exclude_user_id=actor_id)
+        "server": {**payload, "server_settings": _with_channel_order(
+            filter_settings(server.server_settings, view), filter_order(order, view))},
+    })
 
 
 def _is_channel_reorder(update_data: dict) -> bool:
@@ -453,13 +463,12 @@ async def set_member_roles(
     for role_id in wanted ^ current:
         check_can_assign(standing, roles, roles[role_id])
 
-    before = await permissions.effective(user_id, server) or Permission(0)
+    before = await member_views(server)
     async with in_transaction():
         await RoleToUser.filter(user_id=user_id, role_id__in=list(roles)).delete()
         await RoleToUser.bulk_create(
             [RoleToUser(user_id=user_id, role_id=role_id) for role_id in sorted(wanted)])
-    permissions.invalidate(server.id, user_id)
-    after = await permissions.effective(user_id, server) or Permission(0)
+    permissions.invalidate(server.id)
 
     role_ids = sorted(wanted)
     comms = getattr(request.app.state, "comms", None)
@@ -470,7 +479,7 @@ async def set_member_roles(
             "user_id": user_id,
             "role_ids": role_ids,
         })
-    await announce_mask_changes(request, server, {user_id: before}, {user_id: after})
+    await announce_visibility(request.app.state, server, before, await member_views(server))
 
     return await _member_response(server, membership, role_ids)
 
@@ -511,7 +520,8 @@ async def remove_member(
     await membership.delete()
     role_ids = await Role.filter(server=server).values_list("id", flat=True)
     await RoleToUser.filter(user_id=user_id, role_id__in=role_ids).delete()
-    permissions.invalidate(server.id, user_id)
+    await PermissionOverwrite.filter(server=server, user_id=user_id).delete()
+    permissions.invalidate(server.id)
 
     comms = getattr(request.app.state, "comms", None)
     if comms is not None:

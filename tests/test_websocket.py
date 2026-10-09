@@ -151,7 +151,7 @@ def test_forged_user_id_is_attributed_to_real_sender(two_members):
         assert delivered["content"] == DOC
         assert "is_admin" not in delivered  # unknown fields are not relayed
 
-    stored = alice_client.get("/channels/messages", params={"last_updated": "1970-01-01T00:00:00Z"}).json()
+    stored = alice_client.get(f"/channels/{channel['id']}/messages").json()["messages"]
     assert [(m["id"], m["user_id"]) for m in stored] == [(frame["id"], bob["id"])]
     assert json.loads(stored[0]["content"]) == DOC
 
@@ -182,7 +182,7 @@ def test_non_member_cannot_post_into_a_server(two_members, new_client):
         mallory_ws.send_json(frame)
         assert mallory_ws.receive_json() == {"type": "error", "code": "forbidden", "ref": frame["id"]}
 
-    stored = alice_client.get("/channels/messages", params={"last_updated": "1970-01-01T00:00:00Z"}).json()
+    stored = alice_client.get(f"/channels/{channel['id']}/messages").json()["messages"]
     assert stored == []
 
 
