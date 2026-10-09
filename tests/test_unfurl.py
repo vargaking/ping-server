@@ -481,16 +481,6 @@ def test_message_without_embed_has_empty_list(two_members):
     assert history[0]["embeds"] == []
 
 
-def test_delta_sync_includes_embeds(two_members):
-    alice_client, _, _, _, server, channel = two_members
-    send_and_wait(two_members, chat_frame(server["id"], channel["id"], embeds=[EMBED]))
-
-    res = alice_client.get("/channels/messages", params={"last_updated": "2000-01-01T00:00:00"})
-
-    assert res.status_code == 200, res.text
-    assert res.json()[0]["embeds"] == [EMBED]
-
-
 @pytest.mark.parametrize("embeds", [
     [EMBED, EMBED],
     [{**EMBED, "url": "javascript:alert(1)"}],

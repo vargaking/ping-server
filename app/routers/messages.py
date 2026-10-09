@@ -11,17 +11,17 @@ from tortoise.transactions import in_transaction
 
 from ..middleware import get_current_user
 from ..models.Attachment import Attachment
+from ..models.Channel import Channel
 from ..models.Conversation import Conversation
 from ..models.ForumPost import ForumPost
 from ..models.Message import Message
 from ..models.Reaction import Reaction
 from ..models.Server import Server
 from ..models.User import User
-from ..permissions import Permission, require_permission
+from ..permissions import Permission, require_channel
 from ..services import forum
 from ..services.attachments import attachments_by_message, delete_file
 from ..services.message_content import InvalidContent, normalize_content, serialize
-from ..services.permissions import permissions
 from ..services.reactions import (
     MAX_DISTINCT_EMOJIS_PER_MESSAGE,
     normalize_emoji,
@@ -48,9 +48,9 @@ def _parse_uuid(message_id: str) -> UUID:
 
 async def _load_message_and_scope(
     message_id: str, user: User
-) -> tuple[Message, Server | None, Conversation | None]:
+) -> tuple[Message, Server | None, Conversation | None, Permission]:
     """Fetch a message the caller can see, plus the server or conversation it
-    lives in (exactly one of the two is set).
+    lives in (exactly one of the two is set) and the caller's channel mask.
 
     DM messages are only visible to the two participants; anyone else gets a
     404, matching the conversation endpoints, so ids can't be probed.
@@ -63,13 +63,14 @@ async def _load_message_and_scope(
         conversation = await Conversation.get_or_none(id=message.conversation_id)
         if not conversation or not conversation.has_participant(user.id):
             raise HTTPException(status_code=404, detail="Message not found")
-        return message, None, conversation
+        return message, None, conversation, Permission(0)
 
     server = await Server.get_or_none(id=message.server_id)
-    if not server:
-        raise HTTPException(status_code=404, detail="Server not found")
-    await require_permission(user, server, Permission(0))
-    return message, server, None
+    channel = await Channel.get_or_none(id=message.channel_id)
+    if not server or not channel:
+        raise HTTPException(status_code=404, detail="Message not found")
+    mask = await require_channel(user, channel, Permission(0), not_found="Message not found")
+    return message, server, None, mask
 
 
 async def _notify(
@@ -89,7 +90,8 @@ async def _notify(
             frame, exclude_user_id=exclude_user_id,
         )
     else:
-        await comms.broadcast_to_server(server.id, frame, exclude_user_id=exclude_user_id)
+        await comms.broadcast_to_channel(
+            server.id, frame["channel_id"], frame, exclude_user_id=exclude_user_id)
 
 
 def _wire_message(
@@ -129,7 +131,7 @@ async def edit_message(
     current_user: User = Depends(get_current_user),
 ):
     """Edit a message's content. Only the author may edit; sets edited_at."""
-    message, server, conversation = await _load_message_and_scope(
+    message, server, conversation, _ = await _load_message_and_scope(
         message_id, current_user)
 
     if message.author_id != current_user.id:
@@ -166,12 +168,11 @@ async def delete_message(
     """Delete a message. The author may delete their own; in a server channel
     anyone with MANAGE_MESSAGES may delete anyone's. DMs have no moderators,
     so author only."""
-    message, server, conversation = await _load_message_and_scope(
+    message, server, conversation, mask = await _load_message_and_scope(
         message_id, current_user)
 
     is_author = message.author_id == current_user.id
-    is_moderator = server is not None and await permissions.has(
-        current_user.id, server, Permission.MANAGE_MESSAGES)
+    is_moderator = server is not None and bool(mask & Permission.MANAGE_MESSAGES)
     if not (is_author or is_moderator):
         raise HTTPException(status_code=403, detail="Not allowed to delete this message")
 
@@ -209,9 +210,7 @@ async def delete_message(
 async def _load_reactable_message(
     message_id: str, emoji: str, user: User
 ) -> tuple[Message, Server | None, Conversation | None, str]:
-    message, server, conversation = await _load_message_and_scope(message_id, user)
-    if server is not None:
-        await require_permission(user, server, Permission.VIEW_CHANNEL)
+    message, server, conversation, _ = await _load_message_and_scope(message_id, user)
     normalized = normalize_emoji(emoji)
     if normalized is None:
         raise HTTPException(status_code=400, detail="Invalid emoji")

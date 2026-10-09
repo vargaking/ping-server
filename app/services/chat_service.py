@@ -14,7 +14,6 @@ from app.models.Conversation import Conversation
 from app.models.ForumPost import ForumPost
 from app.models.Message import Message
 from app.models.User import User
-from app.models.UserToServer import UserToServer
 from app.permissions import Permission
 from app.services import forum, read_state
 from app.services.message_content import InvalidContent, normalize_content, serialize
@@ -113,9 +112,10 @@ class ChatService:
 
         # Being logged in is not enough: the sender has to be allowed to post
         # in the server, and the channel has to actually live in that server.
-        can_send = await permissions.has(
-            sender_id, server_id, Permission.VIEW_CHANNEL | Permission.SEND_MESSAGES)
-        channel = can_send and await Channel.get_or_none(id=channel_id, server_id=server_id)
+        channel = await Channel.get_or_none(id=channel_id, server_id=server_id)
+        channel = channel if channel and await permissions.has(
+            sender_id, server_id, Permission.VIEW_CHANNEL | Permission.SEND_MESSAGES,
+            channel_id=channel_id) else None
         if not channel:
             logger.warning(
                 "User %s tried to post to server %s / channel %s without access",
@@ -193,8 +193,7 @@ class ChatService:
             "imported_author": None,
         }
 
-        member_ids = await UserToServer.filter(
-            server_id=server_id).values_list("user_id", flat=True)
+        member_ids = await permissions.viewers(server_id, channel_id)
 
         exclude_user_id = sender_id if skip_sender else None
         if post is not None:
@@ -239,7 +238,7 @@ class ChatService:
         if not post:
             raise MessageRejected("invalid_post")
         if post.locked and not await permissions.has(
-                sender_id, channel.server_id, Permission.MANAGE_MESSAGES):
+                sender_id, channel.server_id, Permission.MANAGE_MESSAGES, channel_id=channel.id):
             raise MessageRejected("post_locked")
         return post
 
@@ -383,10 +382,10 @@ class ChatService:
             await self._fan_out(outgoing, [peer_id], exclude_user_id=sender_id)
             return
 
-        can_send = await permissions.has(
-            sender_id, frame.server_id, Permission.VIEW_CHANNEL | Permission.SEND_MESSAGES)
-        channel = can_send and await Channel.get_or_none(
-            id=frame.channel_id, server_id=frame.server_id)
+        channel = await Channel.get_or_none(id=frame.channel_id, server_id=frame.server_id)
+        channel = channel if channel and await permissions.has(
+            sender_id, frame.server_id, Permission.VIEW_CHANNEL | Permission.SEND_MESSAGES,
+            channel_id=frame.channel_id) else None
         if not channel:
             logger.debug(
                 "Typing dropped: user %s has no access to server %s / channel %s",
@@ -410,8 +409,7 @@ class ChatService:
         }
         if frame.post_id is not None:
             outgoing["post_id"] = frame.post_id
-        member_ids = await UserToServer.filter(
-            server_id=frame.server_id).values_list("user_id", flat=True)
+        member_ids = await permissions.viewers(frame.server_id, frame.channel_id)
         await self._fan_out(outgoing, member_ids, exclude_user_id=sender_id)
 
     def _accept_typing(self, sender_id: int, thread: tuple) -> bool:
@@ -490,7 +488,8 @@ class ChatService:
             message_uuid=message_uuid,
         )
         for uid in recipients:
-            if not await permissions.has(uid, server_id, Permission.VIEW_CHANNEL):
+            if not await permissions.has(
+                    uid, server_id, Permission.VIEW_CHANNEL, channel_id=channel_id):
                 logger.info("Push skipped for user %s: cannot view channel", uid)
                 continue
             push.track(uid, tag, message_pk)

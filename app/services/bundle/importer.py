@@ -43,6 +43,7 @@ from ..attachments import (
 )
 from ..forum import MAX_TAGS_PER_CHANNEL, MAX_TAGS_PER_POST, TAG_NAME_MAX, TITLE_MAX
 from ..message_content import InvalidContent, normalize_content, serialize
+from ..permissions import permissions
 from ..system_user import IMPORTED_PASSWORD_HASH, IMPORTED_USERNAME
 from . import format as bundle_format
 from .format import BundleError, ChannelInfo
@@ -441,6 +442,7 @@ class _Import:
                 position=await channel_layout.next_channel_position(server_id, group_id),
                 channel_settings={"import": {**marker, "created": True}},
             )
+        permissions.invalidate(server_id)
         plan.report.channel_id = plan.channel.id
         return plan.channel
 
@@ -452,6 +454,7 @@ class _Import:
             self.groups[name] = await ChannelGroup.create(
                 server_id=server_id, name=name,
                 position=await channel_layout.next_group_position(server_id))
+            permissions.invalidate(server_id)
         return self.groups[name]
 
     async def _run_channel(self, plan: _Plan) -> None:

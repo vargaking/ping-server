@@ -2,6 +2,7 @@ import logging
 
 from fastapi import WebSocket
 
+from app.models.Server import Server
 from app.models.UserToServer import UserToServer
 from app.services.activity import touch_last_active
 from app.services.permissions import permissions
@@ -160,16 +161,18 @@ class Communication:
                 "Failed to send presence_init to user %s", user_id, exc_info=True)
 
     async def _send_permissions_snapshot(self, user_id: int, websocket: WebSocket) -> None:
-        """Send *websocket* the user's permission mask for every server they are in."""
-        server_ids = await UserToServer.filter(
-            user_id=user_id).values_list("server_id", flat=True)
-        masks = {}
-        for server_id in server_ids:
-            mask = await permissions.effective(user_id, server_id)
-            if mask is not None:
-                masks[str(server_id)] = str(int(mask))
+        """Send *websocket* the user's permission mask for every server they are
+        in, and their masks in channels where those differ."""
+        servers = await Server.filter(server_users__user_id=user_id)
+        masks, channels = {}, {}
+        for server in servers:
+            view = await permissions.view(user_id, server)
+            if view is not None:
+                masks[str(server.id)] = str(int(view.mask))
+                channels[str(server.id)] = view.differing_masks()
         try:
-            await websocket.send_json({"type": "permissions_init", "servers": masks})
+            await websocket.send_json(
+                {"type": "permissions_init", "servers": masks, "channels": channels})
         except Exception:
             logger.warning(
                 "Failed to send permissions_init to user %s", user_id, exc_info=True)
@@ -234,6 +237,15 @@ class Communication:
         member_ids = await UserToServer.filter(
             server_id=server_id).values_list("user_id", flat=True)
         await self.send_to_users(member_ids, frame, exclude_user_id=exclude_user_id)
+
+    async def broadcast_to_channel(
+        self, server_id: int, channel_id: int, frame: dict,
+        *, exclude_user_id: int | None = None,
+    ) -> None:
+        """Send *frame* to every connected member who can view the channel."""
+        await self.send_to_users(
+            await permissions.viewers(server_id, channel_id), frame,
+            exclude_user_id=exclude_user_id)
 
     async def send_to_users(
         self, user_ids, frame: dict, *, exclude_user_id: int | None = None

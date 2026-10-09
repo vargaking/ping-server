@@ -102,17 +102,7 @@ def test_history_rejects_bad_cursor(two_members):
     assert res.status_code == 400
 
 
-def test_delta_sync_respects_limit(two_members):
-    alice_client, bob_client, server, channel = two_members
-    with alice_client.websocket_connect("/ws", headers=HEADERS) as alice_ws, \
-            bob_client.websocket_connect("/ws", headers=HEADERS) as bob_ws:
-        ws_ready(alice_ws)
-        ws_ready(bob_ws)
-        alice_ws.receive_json()  # bob online
-        _post_messages(alice_ws, bob_ws, server["id"], channel["id"], 5)
-
-    stored = alice_client.get(
-        "/channels/messages",
-        params={"last_updated": "1970-01-01T00:00:00Z", "limit": 2},
-    ).json()
-    assert len(stored) == 2
+def test_the_global_message_sync_is_gone(two_members):
+    alice_client, *_ = two_members
+    res = alice_client.get("/channels/messages", params={"last_updated": "1970-01-01T00:00:00Z"})
+    assert res.status_code != 200

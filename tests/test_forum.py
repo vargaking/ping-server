@@ -395,16 +395,6 @@ def test_history_needs_post_id_exactly_in_forum_channels(team):
     assert team.owner.get(f"/channels/{team.text}/messages").status_code == 200
 
 
-def test_delta_sync_carries_post_id(team):
-    post = make_post(team.author, team.forum)["post"]
-    reply(team.member, team, post["id"])
-
-    res = team.owner.get("/channels/messages", params={"last_updated": "2000-01-01T00:00:00Z"})
-
-    assert res.status_code == 200
-    assert {m["post_id"] for m in res.json()} == {post["id"]}
-
-
 def test_quote_reply_stays_inside_the_post(team):
     first = make_post(team.author, team.forum, message=opening("one"))
     second = make_post(team.author, team.forum, message=opening("two"))

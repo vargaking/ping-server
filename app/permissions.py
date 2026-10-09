@@ -68,6 +68,32 @@ async def require_permission(
     return effective
 
 
+async def require_channel(
+    user: User, channel: Channel, perm: Permission = Permission.VIEW_CHANNEL,
+    *, not_found: str = "Channel not found",
+) -> Permission:
+    """Raise unless *user* may do *perm* in *channel*. Non-members get the
+    same 403 as require_permission, and so does a member without View in the
+    whole server; a member a channel rule hides it from gets 404 *not_found*,
+    so private channels can't be probed. Returns the mask."""
+    from .services.permissions import permissions
+
+    effective = await permissions.effective(user.id, channel.server_id, channel_id=channel.id)
+    if effective is None:
+        if await permissions.effective(user.id, channel.server_id) is None:
+            raise HTTPException(status_code=403, detail="Not a member of this server")
+        raise HTTPException(status_code=404, detail=not_found)
+    if not effective & Permission.VIEW_CHANNEL:
+        server_mask = await permissions.effective(user.id, channel.server_id)
+        if server_mask is not None and not server_mask & Permission.VIEW_CHANNEL:
+            # No View anywhere in the server: nothing is hidden by a channel rule.
+            raise HTTPException(status_code=403, detail="Missing permission")
+        raise HTTPException(status_code=404, detail=not_found)
+    if (effective & perm) != perm:
+        raise HTTPException(status_code=403, detail="Missing permission")
+    return effective
+
+
 async def server_from_path(server_id: int) -> Server:
     server = await Server.get_or_none(id=server_id)
     if not server:
@@ -140,3 +166,17 @@ async def manage_invite(
             pass
     await require_permission(current_user, server, Permission.MANAGE_INVITES)
     return invite
+
+
+def check_channel(perm: Permission = Permission.VIEW_CHANNEL):
+    """Like check_permission(perm, server_of_channel), checked against the
+    channel's own mask."""
+    async def dependency(
+        current_user: User = Depends(get_current_user),
+        channel: Channel = Depends(channel_from_path),
+        server: Server = Depends(server_of_channel),
+    ) -> Server:
+        await require_channel(current_user, channel, perm)
+        return server
+
+    return dependency

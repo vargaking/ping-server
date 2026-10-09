@@ -11,7 +11,7 @@ from ..models.Channel import Channel
 from ..models.Server import Server
 from ..models.User import User
 from ..models.UserToServer import UserToServer
-from ..permissions import Permission, require_permission
+from ..permissions import Permission, require_channel, require_permission
 from ..services.permissions import permissions
 from ..services.voice_moderation import (
     SERVER_MUTED_ATTRIBUTE,
@@ -68,7 +68,7 @@ async def create_voice_token(
     # 403 if the user isn't a member of the server this channel belongs to, or
     # can't connect. SPEAK and STREAM are enforced here, at join time, by
     # limiting which sources the token may publish.
-    effective = await require_permission(current_user, channel.server, Permission.CONNECT)
+    effective = await require_channel(current_user, channel, Permission.CONNECT)
 
     # One voice session per user: LiveKit only replaces a duplicate identity
     # within a room, so leave any other channel here.
@@ -144,7 +144,11 @@ async def get_voice_presence(
     if presence is None:
         return []
 
-    channel_ids = await Channel.filter(server_id=server_id).values_list("id", flat=True)
+    view = await permissions.view(current_user.id, server)
+    channel_ids = [
+        channel_id for channel_id in await Channel.filter(
+            server_id=server_id).values_list("id", flat=True)
+        if view.can_view(channel_id)]
     return [
         VoicePresenceChannel(
             channel_id=channel_id,
@@ -172,7 +176,7 @@ async def refresh_voice_presence(
     channel = await Channel.get_or_none(id=channel_id).prefetch_related("server")
     if not channel or channel.type != "voice":
         raise HTTPException(status_code=404, detail="Voice channel not found")
-    await require_permission(current_user, channel.server, Permission(0))
+    await require_channel(current_user, channel, not_found="Voice channel not found")
 
     presence = getattr(request.app.state, "voice_presence", None)
     if presence is not None:
@@ -237,9 +241,9 @@ async def _set_server_mute(request: Request, server: Server, user_id: int, muted
     channel_ids = await voice_channels_of(presence, server.id, user_id)
     if not channel_ids:
         return
-    effective = await permissions.effective(user_id, server) or Permission(0)
-    sources = publish_sources(effective, muted)
+    masks = await permissions.channel_masks(user_id, server) or {}
     for channel_id in channel_ids:
+        sources = publish_sources(masks.get(channel_id, Permission(0)), muted)
         await presence.update_participant(
             channel_id, user_id, sources, server_muted_attributes(muted))
 
