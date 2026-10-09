@@ -29,9 +29,19 @@
 - Deploy notes: migrations, env vars, merge/deploy order.
 - Manual test path: numbered steps from a clean state, expected result per step, edge cases, and what broken looks like.
 
+## Review
+- Every non-draft PR gets an automatic Claude review in CI. It comments inline, and only on real defects. A green `Claude Review` check with no comments means it found nothing.
+- After opening a PR, wait for it (`gh pr checks <n> --watch`) and read the inline comments (`gh api repos/{owner}/{repo}/pulls/<n>/comments`).
+- The reviewer can be wrong. Check each finding against the code before touching anything. Fix the real ones and push. Reply in the thread to the rest with why not.
+- A push triggers a new review. Two fix rounds at most, then leave what's left for the human.
+- A PR that changes `.github/workflows/claude*.yml` gets no review. That is expected.
+- `@claude <instruction>` in a PR comment makes the CI agent push a fix to that branch.
+- Running in CI you have no Linear access: skip the ticket steps and say in your PR comment what belongs on the ticket.
+
 ## Final message after a batch
 - Every PR link.
 - Per PR, the manual testing walkthrough.
+- Per PR, what the review found and what you did about it.
 - Merge/deploy order.
 - Open questions and what you changed in Linear.
 
