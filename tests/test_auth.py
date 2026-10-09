@@ -61,6 +61,16 @@ def test_register_valid_username_charset_accepted(client):
     assert res.status_code == 201
 
 
+def test_register_ignores_a_profile_in_the_body(client):
+    res = client.post("/auth/register", json={
+        "username": "carol",
+        "password": PASSWORD,
+        "profile": {"avatar": "https://example.com/x.png"},
+    })
+    assert res.status_code == 201, res.text
+    assert client.get("/auth/me").json()["profile"] == {}
+
+
 def test_login_wrong_password(client, new_client):
     register(client, "alice")
     res = new_client().post("/auth/login", json={"username": "alice", "password": "nope"})

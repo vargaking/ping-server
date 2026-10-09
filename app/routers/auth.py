@@ -49,7 +49,6 @@ class RegisterRequest(BaseModel):
     username: Username
     password: str = Field(min_length=PASSWORD_MIN_LENGTH)
     public_key: Optional[str] = None
-    profile: dict = {}
 
 
 class MeResponse(UserResponse):
