@@ -7,6 +7,7 @@ from fastapi import FastAPI, HTTPException
 from fastapi.concurrency import asynccontextmanager
 
 from .models.Token import Token
+from .services.stats_history import StatsSampler, sampling_enabled
 from .services.voice_moderation import VoiceModeration
 from .services.voice_presence import create_voice_presence
 
@@ -23,7 +24,8 @@ async def lifespan(app: FastAPI):
     lifespan), but keep it guarded so a housekeeping hiccup can never block the
     app from starting.
 
-    It also runs the voice presence poller when LiveKit is configured.
+    It also runs the voice presence poller when LiveKit is configured, and the
+    stats sampler when STATS_SAMPLING is set.
     """
     try:
         deleted = await Token.filter(
@@ -64,6 +66,15 @@ async def lifespan(app: FastAPI):
     app.state.voice_presence = presence
     app.state.voice_moderation = VoiceModeration()
 
+    stats_task = None
+    try:
+        comms = getattr(app.state, "comms", None)
+        if sampling_enabled() and comms is not None:
+            stats_task = asyncio.create_task(StatsSampler(comms).run())
+    except Exception:
+        logger.warning("Failed to start stats sampling", exc_info=True)
+    app.state.stats_task = stats_task
+
     # Imported here because the attachments service imports this module.
     from .services.imports.runner import ImportRunner
     imports = ImportRunner(getattr(app.state, "comms", None))
@@ -83,6 +94,11 @@ async def lifespan(app: FastAPI):
         await imports.shutdown()
     except Exception:
         logger.warning("Failed to stop imports", exc_info=True)
+
+    if stats_task is not None:
+        stats_task.cancel()
+        with suppress(asyncio.CancelledError):
+            await stats_task
 
     if presence_task is not None:
         presence_task.cancel()

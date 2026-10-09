@@ -63,6 +63,7 @@ The interactive API docs are then at http://localhost:8000/docs.
 | `VAPID_SUBJECT` | no | first `https://` origin in `ALLOWED_ORIGINS` | Push contact: `https://host` or `mailto:you@example.com`. See "Web Push". |
 | `PUSH_EXTRA_HOSTS` | no | *(empty)* | Comma-separated extra push-service hosts (suffix match), for tests or self-hosted push. |
 | `UPLINK_MBPS` | no | `1000` | Link speed shown as the capacity of the network bar on the admin dashboard. |
+| `STATS_SAMPLING` | no | `false` | `true` records the admin stats once a minute for the history charts. Set it on production only: staging shares the database. Needs the `stat_samples` migration. |
 | `SERVER_CREATION` | no | `open` | `open` lets anyone create servers. `waitlist` limits creation to platform admins; everyone else submits a request. Grant admin with `python -m app.scripts.platform_admin <username> --grant`. |
 
 > Session tokens expire 30 days after login/register; expired tokens are

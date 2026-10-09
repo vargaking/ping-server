@@ -141,6 +141,8 @@ LIVEKIT_API_URL=http://127.0.0.1:7882
 VAPID_PUBLIC_KEY=<generated>
 VAPID_PRIVATE_KEY=<generated>
 VAPID_SUBJECT=mailto:you@example.com
+# Admin stats history (production only; staging shares the database).
+STATS_SAMPLING=true
 LOG_DIR=/opt/ping-server-$ENV/logs
 GUNICORN_BIND=127.0.0.1:8000   # 8001 for staging
 DEBUG=false
@@ -294,6 +296,7 @@ To be ticked by hand on the real box. Nothing here has been checked yet.
 - [ ] Single Gunicorn worker: `GUNICORN_WORKERS` unset or `1`. Check: `ps -ef | grep gunicorn` shows one worker under the master.
 - [ ] `LIVEKIT_URL`, `LIVEKIT_API_KEY`, `LIVEKIT_API_SECRET` set; voice joins work.
 - [ ] The Voice card on /admin shows numbers, not "not configured" or "Can't reach LiveKit".
+- [ ] `STATS_SAMPLING=true` on production only. Check: after a few minutes the history charts on /admin show points.
 - [ ] TURN reachable from a typical home network **and** from a phone on mobile data (not just home Wi-Fi): audio both ways.
 - [ ] HTTPS on API and client, `DEBUG=false`, and the session cookie arrives as `SameSite=None; Secure`. Check in a real browser: devtools, Application, Cookies.
 - [ ] `ALLOWED_ORIGINS` / `ALLOWED_ORIGIN_REGEX` from env cover the prod frontend (and previews if wanted). A WS connect from the prod origin succeeds.
