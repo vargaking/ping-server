@@ -85,10 +85,12 @@ class MemberView:
         return {cid for cid in self.channels if self.can_view(cid)}
 
     def differing_masks(self) -> dict[str, str]:
-        """Channel masks that aren't simply the server mask, as the frames send them."""
+        """Masks in the channels the member can view that aren't simply the
+        server mask, as the frames send them. Hidden channels are left out so
+        their ids don't reach the member."""
         return {
             str(cid): str(int(mask)) for cid, mask in self.channels.items()
-            if mask != _plain_channel_mask(self.mask)}
+            if mask & Permission.VIEW_CHANNEL and mask != _plain_channel_mask(self.mask)}
 
 
 def _plain_channel_mask(server_mask: Permission) -> Permission:
@@ -274,3 +276,17 @@ async def channel_viewers(server: Server, channel_id: int) -> set[int]:
 
 
 permissions = PermissionResolver()
+
+
+async def fresh_mask(
+    user_id: int, server: Server, *, channel_id: int | None = None, group_id: int | None = None
+) -> Permission:
+    """The user's mask in a channel or category, read from the database
+    without the cache (so it sees an uncommitted change in the transaction)."""
+    rules = await load_rules(server)
+    assigned = await RoleToUser.filter(
+        user_id=user_id, role_id__in=list(rules.roles)).values_list("role_id", flat=True)
+    base = ALL_PERMISSIONS if user_id == server.owner_id else member_mask(rules.roles, assigned)
+    if channel_id is not None:
+        return rules.mask(user_id, base, assigned, channel_id)
+    return rules.group_mask(user_id, base, assigned, group_id)
