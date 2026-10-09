@@ -117,7 +117,8 @@ async def announce_visibility(
         if comms is not None:
             for channel_id in sorted(lost):
                 await comms.send_to_user(user_id, {
-                    "type": "channel_deleted", "server_id": server.id, "channel_id": channel_id})
+                    "type": "channel_deleted", "server_id": server.id, "channel_id": channel_id,
+                    "reason": "no_access"})
             for group_id in sorted(gained_groups) if not actor else []:
                 await comms.send_to_user(user_id, {
                     "type": "channel_group_created", "server_id": server.id,

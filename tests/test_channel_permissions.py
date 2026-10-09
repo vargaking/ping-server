@@ -437,7 +437,8 @@ def test_losing_and_gaining_view_over_the_socket(crew):
         ws_ready(ws)
         assert overwrite(crew.owner_client, path, deny=VIEW).status_code == 200
         frames = _frames_until(ws, "channel_deleted")
-        assert frames[-1] == {"type": "channel_deleted", "server_id": sid, "channel_id": general}
+        assert frames[-1] == {"type": "channel_deleted", "server_id": sid, "channel_id": general,
+                              "reason": "no_access"}
 
         member_path = f"/channels/{general}/permissions/members/{crew.member['id']}"
         assert overwrite(crew.owner_client, member_path, allow=VIEW).status_code == 200
