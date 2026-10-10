@@ -175,7 +175,7 @@ async def create_server_for(owner: User, **fields) -> Server:
     server = await Server.create(**fields, owner=owner)
     await UserToServer.create(user=owner, server=server)
     await seed_server_roles(server)
-    await channel_layout.seed_default_groups(server)
+    await channel_layout.seed_default_layout(server)
     return server
 
 

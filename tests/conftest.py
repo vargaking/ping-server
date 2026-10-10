@@ -102,9 +102,13 @@ def register(client: TestClient, username: str | None = None) -> dict:
 
 
 def create_server(client: TestClient, name: str = "Test server") -> dict:
+    """Create a server and return it without the default channels."""
     res = client.post("/servers/", json={"name": name})
     assert res.status_code == 201, res.text
-    return res.json()
+    server = res.json()
+    for channel in client.get(f"/servers/{server['id']}/channels").json()["channels"]:
+        assert client.delete(f"/channels/{channel['id']}").status_code == 204
+    return client.get(f"/servers/{server['id']}").json()
 
 
 def create_channel(client: TestClient, server_id: int, name: str = "general",

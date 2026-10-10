@@ -4,6 +4,7 @@ import pytest
 from tests.conftest import ORIGIN, create_channel, create_server, register, ws_ready
 from tests.test_permissions import join, promote
 from tests.test_realtime_events import chat_frame
+from tests.test_server_requests import make_admin, submit
 
 HEADERS = {"origin": ORIGIN}
 
@@ -47,14 +48,62 @@ def team(client, new_client):
 
 # -- seeding and the snapshot ----------------------------------------------
 
-def test_new_server_gets_the_two_default_groups(client):
+def raw_server(client, name="Raw server"):
+    res = client.post("/servers/", json={"name": name})
+    assert res.status_code == 201, res.text
+    return res.json()
+
+
+def default_layout(client, sid):
+    data = snapshot(client, sid)
+    return [
+        (g["name"], g["position"], [(c["name"], c["type"], c["position"]) for c in data["channels"]
+                                    if c["group_id"] == g["id"]])
+        for g in data["groups"]]
+
+
+DEFAULT_LAYOUT = [
+    ("Text channels", 0, [("general", "text", 0)]),
+    ("Voice channels", 1, [("General", "voice", 0)]),
+]
+
+
+def test_new_server_gets_the_default_groups_and_channels(client):
     register(client)
-    sid = create_server(client)["id"]
+    sid = raw_server(client)["id"]
 
-    groups = snapshot(client, sid)["groups"]
+    assert default_layout(client, sid) == DEFAULT_LAYOUT
+    assert {g["server_id"] for g in snapshot(client, sid)["groups"]} == {sid}
 
-    assert [(g["name"], g["position"], g["server_id"]) for g in groups] == [
-        ("Text channels", 0, sid), ("Voice channels", 1, sid)]
+
+def test_approved_server_gets_the_default_groups_and_channels(client, new_client, monkeypatch):
+    monkeypatch.setenv("SERVER_CREATION", "waitlist")
+    requester = new_client()
+    register(requester, "requester")
+    request_id = submit(requester).json()["id"]
+    make_admin(client, "request-admin")
+
+    res = client.post(f"/server-requests/{request_id}/approve")
+    assert res.status_code == 200, res.text
+
+    assert default_layout(requester, res.json()["server_id"]) == DEFAULT_LAYOUT
+
+
+def test_creator_can_post_in_the_default_text_channel(client):
+    register(client)
+    sid = raw_server(client)["id"]
+    [general] = [c for c in snapshot(client, sid)["channels"] if c["type"] == "text"]
+
+    frame = chat_frame(sid, general["id"])
+
+    with client.websocket_connect("/ws", headers=HEADERS) as ws:
+        ws_ready(ws)
+        ws.send_json(frame)
+        assert ws.receive_json()["type"] == "message_ack"
+
+    res = client.get(f"/channels/{general['id']}/messages")
+    assert res.status_code == 200, res.text
+    assert [m["id"] for m in res.json()["messages"]] == [frame["id"]]
 
 
 def test_snapshot_returns_groups_and_channels_in_layout_order(client):

@@ -12,7 +12,10 @@ from ..models.Channel import Channel
 from ..models.ChannelGroup import ChannelGroup
 from ..models.Server import Server
 
-DEFAULT_GROUP_NAMES = ("Text channels", "Voice channels")
+DEFAULT_LAYOUT = (
+    ("Text channels", "general", "text"),
+    ("Voice channels", "General", "voice"),
+)
 MAX_CHANNELS = 500
 MAX_GROUPS = 200
 MAX_LISTED_IDS = 20
@@ -46,9 +49,12 @@ def group_json(group: ChannelGroup) -> dict:
     }
 
 
-async def seed_default_groups(server: Server) -> None:
-    for position, name in enumerate(DEFAULT_GROUP_NAMES):
-        await ChannelGroup.create(server=server, name=name, position=position)
+async def seed_default_layout(server: Server) -> None:
+    for position, (group_name, channel_name, channel_type) in enumerate(DEFAULT_LAYOUT):
+        group = await ChannelGroup.create(server=server, name=group_name, position=position)
+        await Channel.create(
+            server=server, group=group, name=channel_name, type=channel_type,
+            channel_settings={}, position=0)
 
 
 async def next_channel_position(server_id: int, group_id: Optional[int]) -> int:
