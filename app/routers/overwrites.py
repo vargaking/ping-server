@@ -35,6 +35,8 @@ router = APIRouter(tags=["permission overwrites"])
 LOSE_OWN_ACCESS = "You would lose access to this channel"
 MEMBER_ABOVE_YOU = "That member's highest role is at or above yours"
 SUBJECTS = {"roles": "role", "members": "member"}
+NOT_FOUND = {"roles": "Role not found", "members": "Member not found"}
+INT_IDS = range(-(2**31), 2**31)  # the id columns are 32-bit
 
 
 class OverwriteBody(BaseModel):
@@ -196,6 +198,8 @@ async def _write(
     rules for who may edit. What it changed is announced after the response."""
     server = target.server
     actor_mask = await require_permission(user, server, Permission.MANAGE_ROLES)
+    if subject_id not in INT_IDS:
+        raise HTTPException(status_code=404, detail=NOT_FOUND[kind])
     key = target.key(kind, subject_id)
     bits = (body.allow, body.deny)
 

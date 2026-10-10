@@ -5,6 +5,9 @@ import logging
 import time
 from contextlib import ExitStack, asynccontextmanager, contextmanager
 
+import pytest
+from tortoise.backends.sqlite.client import SqliteClient
+
 from app.models.Channel import Channel
 from app.models.User import User
 from app.models.UserToServer import UserToServer
@@ -143,6 +146,16 @@ def held_queue(client, sid):
         release()
 
 
+def delay_the_fan_out(monkeypatch, seconds=0.3):
+    original = overwrites_router.announce_overwrite
+
+    async def late(*args, **kwargs):
+        await asyncio.sleep(seconds)
+        await original(*args, **kwargs)
+
+    monkeypatch.setattr(overwrites_router, "announce_overwrite", late)
+
+
 def category_server(client, name, channels, members):
     sid = create_server(client, name)["id"]
     group = client.post(f"/servers/{sid}/channel-groups", json={"name": "Staff"}).json()
@@ -222,6 +235,27 @@ def test_a_put_that_changes_nothing_sends_no_frames_and_keeps_the_cache(crew, ca
         assert live.settle() == {"owner": [], "member": []}
     assert job_query_counts(caplog) == []
     assert member_reads() == cached_cost
+
+
+@pytest.mark.parametrize("subject_id", [2**31, 99999999999, -(2**31) - 1])
+def test_a_subject_id_no_row_can_have_is_not_found_before_any_query(crew, monkeypatch, subject_id):
+    owner, general = crew.owner_client, crew.general["id"]
+    group = owner.post(f"/servers/{crew.sid}/channel-groups", json={"name": "Staff"}).json()["id"]
+    bound = []
+    execute_query = SqliteClient.execute_query
+
+    async def spy(self, query, values=None):
+        bound.extend(values or [])
+        return await execute_query(self, query, values)
+
+    monkeypatch.setattr(SqliteClient, "execute_query", spy)
+    for make_path in (channel_rule, group_rule):
+        target = general if make_path is channel_rule else group
+        for kind, detail in (("roles", "Role not found"), ("members", "Member not found")):
+            path = make_path(target, kind, subject_id)
+            for res in (put(owner, path, deny=VIEW), put(owner, path), owner.delete(path)):
+                assert (res.status_code, res.json()["detail"]) == (404, detail), path
+    assert subject_id not in bound
 
 
 def test_a_put_that_changes_nothing_still_checks_permissions(crew, new_client):
@@ -561,12 +595,42 @@ def test_the_target_deleted_before_the_job(crew, caplog):
         with held_queue(owner, sid) as release:
             res = put(owner, channel_rule(general, "roles", crew.everyone["id"]), deny=VIEW)
             assert res.status_code == 200
-            assert owner.delete(f"/channels/{general}").status_code == 204
+            run(owner, lambda: Channel.filter(id=general).delete())
             release()
             frames = live.settle()
     assert not any(of_type(fs, ROW_FRAME) or of_type(fs, "channel_updated")
                    for fs in frames.values())
     assert [r for r in caplog.records if r.name == LOGGER and r.levelno >= logging.WARNING] == []
+
+
+def test_a_channel_deleted_after_a_private_write_reaches_who_lost_it(crew, monkeypatch):
+    owner, sid, general = crew.owner_client, crew.sid, crew.general["id"]
+    delay_the_fan_out(monkeypatch)
+    with listening(owner, owner=owner, member=crew.member_client) as live:
+        res = put(owner, channel_rule(general, "roles", crew.everyone["id"]), deny=VIEW)
+        assert res.status_code == 200
+        assert owner.delete(f"/channels/{general}").status_code == 204
+        frames = live.settle()
+    assert [f["channel_id"] for f in of_type(frames["member"], "channel_deleted")] == [general]
+    assert not of_type(frames["member"], ROW_FRAME)
+
+
+def test_a_category_deleted_after_a_private_write_reaches_who_lost_it(crew, monkeypatch):
+    owner, sid = crew.owner_client, crew.sid
+    group = owner.post(f"/servers/{sid}/channel-groups", json={"name": "Staff"}).json()
+    channel = owner.post(f"/channels/{sid}/create", json={
+        "name": "plans", "group_id": group["id"]}).json()
+    delay_the_fan_out(monkeypatch)
+    with listening(owner, owner=owner, member=crew.member_client) as live:
+        res = put(owner, group_rule(group["id"], "roles", crew.everyone["id"]), deny=VIEW)
+        assert res.status_code == 200
+        assert owner.delete(f"/servers/{sid}/channel-groups/{group['id']}").status_code == 204
+        frames = live.settle()
+    member = frames["member"]
+    assert [f["channel_id"] for f in of_type(member, "channel_deleted")] == [channel["id"]]
+    assert len(of_type(member, "channel_group_deleted")) == 1
+    snapshot = crew.member_client.get(f"/servers/{sid}/channels").json()
+    assert group["id"] not in [g["id"] for g in snapshot["groups"]]
 
 
 def test_a_member_who_leaves_before_the_job_gets_nothing(crew, new_client):
