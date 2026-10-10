@@ -78,7 +78,8 @@ async def update_user(user_id: int, user_update: UserUpdate, request: Request, c
 
     user.update_from_dict(update_data)
     try:
-        await user.save()
+        if update_data:
+            await user.save(update_fields=list(update_data))
     except IntegrityError:
         raise USERNAME_TAKEN
 
@@ -126,7 +127,7 @@ async def upload_user_avatar(user_id: int, request: Request, file: UploadFile = 
     profile = user.profile.copy() if user.profile else {}
     profile['avatar'] = url
     user.profile = profile
-    await user.save()
+    await user.save(update_fields=["profile"])
 
     # Notify related users that this profile changed
     if hasattr(request.app.state, "comms"):
