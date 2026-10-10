@@ -53,17 +53,19 @@ A thread file holds one forum post, or one thread of a text channel:
 
 ```
 python -m app.scripts.import_bundle <bundle> --server <server id> --authors authors.json \
-    [--only <channel id> ...] [--map <channel id>=<channel id> ...] [--include-private] [--dry-run]
+    [--only <channel id> ...] [--map <channel id>=<channel id> ...] [--include-private [--private-visible]] [--dry-run]
 ```
 
 `authors.json` maps source author ids to usernames: `{"123": "alice"}`. Authors without an entry are owned by the `[imported]` account, which can't log in.
 
 Run with `--dry-run` first: it prints what each channel would do and writes nothing. Channels match in this order: a `--map` entry, a channel an earlier run of the same bundle created or filled, otherwise a new one. A channel is never merged into another by name; if the name is taken, the report says so and a second channel is added. Running again skips what exists, continues where a failed run stopped, and hands messages to authors mapped since. A bundle can be imported into more than one server; each import is independent.
 
-Not imported yet, and counted in the report: private channels (without `--include-private`), threads inside text channels, reactions, pins on channel messages, custom emoji, avatars, and the text chat of voice channels.
+Private channels are left out unless you pass `--include-private`. They are then created so that only the server owner can see them, or with `--private-visible` so that everyone can. A private channel is never merged into an existing one, and source access lists aren't imported.
+
+Not imported yet, and counted in the report: threads inside text channels, reactions, pins on channel messages, custom emoji, avatars, and the text chat of voice channels.
 
 ## Importing from Server settings
 
 The server owner can upload the bundle as a zip instead of running the script. Zip the bundle folder; `server.json` can be at the root of the zip or in one folder inside it.
 
-Only `server.json`, `channels/<id>/messages/*.json`, `channels/<id>/threads/*.json` and `files/<id>/<name>` are unpacked. Everything else in the zip is ignored, and so are attachment files over `MAX_ATTACHMENT_BYTES`, which the plan counts as over the limit. The upload is checked with the same dry run as `--dry-run`, then imported by the same importer, without private channels. Once imported, the files are removed and the data stays, so authors can be mapped to members later.
+Only `server.json`, `channels/<id>/messages/*.json`, `channels/<id>/threads/*.json` and `files/<id>/<name>` are unpacked. Everything else in the zip is ignored, and so are attachment files over `MAX_ATTACHMENT_BYTES`, which the plan counts as over the limit. The upload is checked with the same dry run as `--dry-run`, then imported by the same importer. Private channels can be ticked, each "only me" or "everyone". Once imported, the files are removed and the data stays, so authors can be mapped to members later.

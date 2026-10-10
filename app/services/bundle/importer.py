@@ -12,6 +12,7 @@ from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
 from datetime import timedelta
 from pathlib import Path
+from typing import Literal
 from uuid import UUID, uuid5
 
 import anyio
@@ -26,10 +27,13 @@ from ...models.ForumPost import ForumPost
 from ...models.ForumPostTag import ForumPostTag
 from ...models.ForumTag import ForumTag
 from ...models.Message import Message
+from ...models.PermissionOverwrite import PermissionOverwrite
 from ...models.ReadState import ReadState
+from ...models.Role import Role
 from ...models.Server import Server
 from ...models.User import User
 from ...models.UserToServer import UserToServer
+from ...permissions import Permission
 from ...ws_schemas import MAX_EMBEDS_PER_MESSAGE, EmbedIn
 from .. import channel_layout
 from ..attachments import (
@@ -61,13 +65,17 @@ class ImportAborted(Exception):
     """The import can't run as asked; nothing was written for this reason."""
 
 
+Visibility = Literal["only_me", "everyone"]
+
+
 @dataclass
 class ImportOptions:
     server_id: int
     authors: dict[str, str] = field(default_factory=dict)
     only: set[str] = field(default_factory=set)
     channel_map: dict[str, int] = field(default_factory=dict)
-    include_private: bool = False
+    # Private source channels to import, by source id: who can see the new channel.
+    private: dict[str, Visibility] = field(default_factory=dict)
     dry_run: bool = False
     # Only hand existing messages to mapped authors. Creates nothing but the import account.
     existing_only: bool = False
@@ -96,6 +104,9 @@ class ChannelReport:
     attachments: int = 0
     attachment_bytes: int = 0
     handed_over: int = 0
+    private: bool = False
+    visibility: Visibility | None = None
+    seen: int = 0  # messages looked at, whether new or not
 
 
 @dataclass
@@ -253,6 +264,7 @@ class _Import:
         self.author_counts: Counter = Counter()
         self.system_id: int | None = None
         self.groups: dict[str, ChannelGroup] = {}
+        self.everyone_id: int | None = None
 
     async def run(self) -> Report:
         await self._resolve_authors()
@@ -313,9 +325,16 @@ class _Import:
 
     async def _plan(self) -> list[_Plan]:
         bundle_channels = {c.id: c for c in self.server.channels}
-        for source_id in [*self.options.only, *self.options.channel_map]:
+        for source_id in [*self.options.only, *self.options.channel_map, *self.options.private]:
             if source_id not in bundle_channels:
                 raise ImportAborted(f"Channel {source_id} is not in the bundle")
+        for source_id in self.options.private:
+            if not bundle_channels[source_id].private:
+                raise ImportAborted(f"Channel {source_id} is not private")
+            if source_id in self.options.channel_map:
+                raise ImportAborted(
+                    f"--map {source_id}={self.options.channel_map[source_id]}: "
+                    "a private channel is never merged into an existing channel")
 
         existing = await Channel.filter(server_id=self.options.server_id)
         by_id = {c.id: c for c in existing}
@@ -365,6 +384,11 @@ class _Import:
                 continue
             else:
                 plan.report.plan = "create"
+                if plan.info.private:
+                    plan.report.visibility = self.options.private[plan.info.id]
+                    plan.report.plan = (
+                        "create, only the owner can see it" if plan.report.visibility == "only_me"
+                        else "create, everyone can see it")
                 plan.report.name_taken = self._channel_name(plan.info).casefold() in taken_names
             category = categories.get(plan.info.category_id)
             plan.category_name = category.name.strip()[:_NAME_MAX] if category else None
@@ -373,6 +397,12 @@ class _Import:
                 new_groups.add(plan.category_name)
 
         creating = sum(1 for p in plans if not p.skipped and p.channel is None)
+        if not self.dry and any(
+                p.report.visibility == "only_me" for p in plans if not p.skipped and p.channel is None):
+            everyone = await Role.get_or_none(server_id=self.options.server_id, is_default=True)
+            if everyone is None:
+                raise ImportAborted("The server has no @everyone role")
+            self.everyone_id = everyone.id
         if len(existing) + creating > channel_layout.MAX_CHANNELS:
             raise ImportAborted(
                 f"The import would create {creating} channels; a server can have at most "
@@ -401,7 +431,7 @@ class _Import:
 
     def _plan_for(self, info: ChannelInfo) -> _Plan:
         report = ChannelReport(
-            source_id=info.id, name=info.name, type=info.type, plan="")
+            source_id=info.id, name=info.name, type=info.type, plan="", private=info.private)
         plan = _Plan(info=info, report=report)
         unreadable = {u.id for u in self.server.unreadable}
         reason = shown = None
@@ -409,7 +439,7 @@ class _Import:
             reason, shown = "not in --only", "not selected"
         elif info.id in unreadable:
             reason = shown = "unreadable"
-        elif info.private and not self.options.include_private:
+        elif info.private and not (self.options.existing_only or info.id in self.options.private):
             reason = shown = "private"
             if not self.options.existing_only:
                 self.report.left_out.private_channels += 1
@@ -440,17 +470,23 @@ class _Import:
             group = await self._group(plan.category_name)
             group_id = group.id if group else None
             topic = (plan.info.topic or "").strip()[:_TOPIC_MAX] or None
-            plan.channel = await Channel.create(
-                name=self._channel_name(plan.info),
-                type=plan.info.type,
-                topic=topic,
-                server_id=server_id,
-                group_id=group_id,
-                position=await channel_layout.next_channel_position(server_id, group_id),
-                channel_settings={"import": {
-                    "source": self.source, "id": plan.info.id, "ids": [plan.info.id],
-                    "created": True}},
-            )
+            async with in_transaction():
+                channel = await Channel.create(
+                    name=self._channel_name(plan.info),
+                    type=plan.info.type,
+                    topic=topic,
+                    server_id=server_id,
+                    group_id=group_id,
+                    position=await channel_layout.next_channel_position(server_id, group_id),
+                    channel_settings={"import": {
+                        "source": self.source, "id": plan.info.id, "ids": [plan.info.id],
+                        "created": True}},
+                )
+                if plan.report.visibility == "only_me":
+                    await PermissionOverwrite.create(
+                        server_id=server_id, channel_id=channel.id, role_id=self.everyone_id,
+                        allow=0, deny=int(Permission.VIEW_CHANNEL))
+            plan.channel = channel
         permissions.invalidate(server_id)
         plan.report.channel_id = plan.channel.id
         return plan.channel
@@ -642,6 +678,7 @@ class _Import:
             self.author_counts[message.author_id] += 1
             unique.setdefault(message_uuid(self.options.server_id, self.source, message.id), message)
         self.report.seen += len(unique)
+        report.seen += len(unique)
 
         existing = {
             row["uuid"]: row for row in await Message.filter(

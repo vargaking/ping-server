@@ -15,10 +15,14 @@ from app.models.ChannelGroup import ChannelGroup
 from app.models.ForumPost import ForumPost
 from app.models.ForumTag import ForumTag
 from app.models.Message import Message
+from app.models.PermissionOverwrite import PermissionOverwrite
 from app.models.ReadState import ReadState
+from app.models.Role import Role
 from app.models.Server import Server
 from app.models.User import User
 from app.models.UserToServer import UserToServer
+from app.permissions import Permission
+from app.scripts import import_bundle as import_cli
 from app.services.bundle import importer
 from app.services.bundle.format import BundleError, iter_channel_messages, load_server
 from app.services.bundle.plan import plan_json
@@ -851,7 +855,7 @@ def test_the_plan_is_the_reports_json_form(client, world, bundle):
     assert set(plan["channels"][0]) == {
         "source_id", "name", "type", "action", "target_name", "name_taken", "reason", "category",
         "messages", "existing_messages", "posts", "existing_posts", "attachments", "attachment_bytes",
-        "handed_over"}
+        "handed_over", "private", "private_action", "visibility"}
     assert plan["left_out"]["avatars"] == 2 and plan["left_out"]["private_channels"] == 1
     assert plan["missing"] == 1
     assert set(plan["left_out"]) == {
@@ -909,13 +913,173 @@ def test_existing_only_creates_the_import_account_when_an_author_is_unmapped_lat
 def test_private_channel_skipped_and_included(client, world, bundle):
     skipped = do_import(client, bundle, world.sid, only={"101", "103"})
     assert plans(skipped)["staff"] == "skipped: private"
+    assert skipped.left_out.private_channels == 1
     assert run(client, Channel.filter(server_id=world.sid, name="staff").exists()) is False
 
-    included = do_import(client, bundle, world.sid, only={"101", "103"}, include_private=True)
-    assert plans(included)["staff"] == "create"
+    included = do_import(
+        client, bundle, world.sid, only={"101", "103"}, private={"103": "everyone"})
+    assert plans(included)["staff"] == "create, everyone can see it"
     staff = channel_named(client, world.sid, "staff")
     assert len(messages_of(client, channel_id=staff.id)) == 1
     assert included.left_out.private_channels == 0
+
+
+def overwrites_of(client, channel_id):
+    rows = run(client, PermissionOverwrite.filter(channel_id=channel_id))
+    return sorted((r.role_id, r.user_id, r.allow, r.deny) for r in rows)
+
+
+def everyone_role(client, sid):
+    return run(client, Role.get(server_id=sid, is_default=True))
+
+
+def test_only_me_creates_one_overwrite_hiding_the_channel_from_everyone(client, world, bundle):
+    report = do_import(client, bundle, world.sid, only={"103"}, private={"103": "only_me"})
+
+    staff = channel_named(client, world.sid, "staff")
+    assert overwrites_of(client, staff.id) == [
+        (everyone_role(client, world.sid).id, None, 0, int(Permission.VIEW_CHANNEL))]
+    assert run(client, PermissionOverwrite.filter(server_id=world.sid).count()) == 1
+    row = next(c for c in report.channels if c.source_id == "103")
+    assert (row.private, row.visibility, row.action) == (True, "only_me", "create")
+    assert row.plan == "create, only the owner can see it"
+    assert row.channel_id == staff.id and row.messages == 1
+
+
+def test_everyone_creates_no_overwrite(client, world, bundle):
+    do_import(client, bundle, world.sid, only={"103"}, private={"103": "everyone"})
+
+    staff = channel_named(client, world.sid, "staff")
+    assert overwrites_of(client, staff.id) == []
+    assert run(client, PermissionOverwrite.filter(server_id=world.sid).count()) == 0
+
+
+def test_a_dry_run_with_private_channels_writes_no_overwrite(client, world, bundle):
+    report = do_import(
+        client, bundle, world.sid, private={"103": "only_me"}, dry_run=True)
+
+    staff = next(c for c in report.channels if c.source_id == "103")
+    assert (staff.private, staff.visibility, staff.messages) == (True, "only_me", 1)
+    assert run(client, PermissionOverwrite.filter(server_id=world.sid).count()) == 0
+    assert run(client, Channel.filter(server_id=world.sid).count()) == 0
+
+
+def test_public_rows_are_not_private(client, world, bundle):
+    report = do_import(client, bundle, world.sid, dry_run=True)
+    assert {c.source_id: c.private for c in report.channels} == {
+        "101": False, "103": True, "105": False, "104": False, "106": False, "107": False}
+    assert all(c.visibility is None for c in report.channels)
+
+
+def test_a_rerun_leaves_the_owners_edits_to_the_overwrites_alone(client, world, bundle):
+    do_import(client, bundle, world.sid, only={"103"}, private={"103": "only_me"})
+    staff = channel_named(client, world.sid, "staff")
+    run(client, PermissionOverwrite.filter(channel_id=staff.id).delete())
+    run(client, PermissionOverwrite.create(
+        server_id=world.sid, channel_id=staff.id, user_id=world.alice_user["id"],
+        allow=int(Permission.VIEW_CHANNEL), deny=0))
+    edited = overwrites_of(client, staff.id)
+
+    for visibility in ("only_me", "everyone"):
+        report = do_import(
+            client, bundle, world.sid, only={"103"}, private={"103": visibility})
+        row = next(c for c in report.channels if c.source_id == "103")
+        assert (row.action, row.visibility, row.private) == ("existing", None, True)
+        assert overwrites_of(client, staff.id) == edited
+    assert run(client, Channel.filter(server_id=world.sid, name="staff").count()) == 1
+
+
+def test_a_private_channel_that_is_not_selected_is_skipped_and_counted(client, world, bundle):
+    report = do_import(client, bundle, world.sid)
+    staff = next(c for c in report.channels if c.source_id == "103")
+    assert (staff.action, staff.reason, staff.private, staff.visibility) == (
+        "skipped", "private", True, None)
+    assert report.left_out.private_channels == 1
+
+
+@pytest.mark.parametrize("private, message", [
+    ({"999": "only_me"}, "Channel 999 is not in the bundle"),
+    ({"101": "only_me"}, "Channel 101 is not private"),
+])
+def test_private_options_must_name_private_channels_of_the_bundle(
+        client, world, bundle, private, message):
+    with pytest.raises(ImportAborted, match=message):
+        do_import(client, bundle, world.sid, private=private)
+    assert run(client, Channel.filter(server_id=world.sid).count()) == 0
+
+
+def test_a_private_channel_is_never_merged_into_an_existing_one(client, world, bundle):
+    target = create_channel(client, world.sid, "staff-room")
+    with pytest.raises(ImportAborted, match="--map 103=.*never merged"):
+        do_import(
+            client, bundle, world.sid, channel_map={"103": target["id"]},
+            private={"103": "only_me"})
+    assert run(client, Message.filter(channel_id=target["id"]).count()) == 0
+
+
+def test_a_missing_everyone_role_aborts_before_anything_is_written(client, world, bundle):
+    run(client, Role.filter(server_id=world.sid, is_default=True).update(is_default=False))
+    with pytest.raises(ImportAborted, match="no @everyone role"):
+        do_import(client, bundle, world.sid, private={"103": "only_me"})
+    assert run(client, Channel.filter(server_id=world.sid).count()) == 0
+    do_import(client, bundle, world.sid, private={"103": "everyone"})
+
+
+def test_existing_only_hands_over_messages_in_an_imported_private_channel(client, world, bundle):
+    do_import(client, bundle, world.sid, only={"103"}, private={"103": "only_me"})
+    staff = channel_named(client, world.sid, "staff")
+    system = run(client, User.get(username=IMPORTED_USERNAME))
+    assert messages_of(client, channel_id=staff.id)[0].author_id == system.id
+
+    report = do_import(
+        client, bundle, world.sid, authors=authors(world), existing_only=True)
+
+    row = next(c for c in report.channels if c.source_id == "103")
+    assert row.handed_over == 1 and row.private is True
+    assert messages_of(client, channel_id=staff.id)[0].author_id == world.alice_user["id"]
+
+
+def test_existing_only_does_not_create_private_channels(client, world, bundle):
+    do_import(client, bundle, world.sid, authors=authors(world), existing_only=True)
+    assert run(client, Channel.filter(server_id=world.sid).count()) == 0
+
+
+def test_messages_seen_per_channel_add_up_to_the_total(client, world, bundle):
+    report = do_import(
+        client, bundle, world.sid, authors=authors(world), private={"103": "only_me"})
+    assert sum(c.seen for c in report.channels) == report.seen
+    assert next(c for c in report.channels if c.source_id == "103").seen == 1
+
+    again = do_import(
+        client, bundle, world.sid, authors=authors(world), private={"103": "only_me"})
+    assert sum(c.seen for c in again.channels) == again.seen == report.seen
+
+
+# Command line
+
+def cli_args(bundle, *flags):
+    return import_cli.parse_args([str(bundle), "--server", "1", *flags])
+
+
+def test_the_command_line_leaves_private_channels_out_by_default(bundle):
+    assert import_cli.build_options(cli_args(bundle)).private == {}
+
+
+def test_include_private_makes_every_private_channel_only_me(bundle):
+    options = import_cli.build_options(cli_args(bundle, "--include-private"))
+    assert options.private == {"103": "only_me"}
+
+
+def test_private_visible_makes_them_visible_to_everyone(bundle):
+    options = import_cli.build_options(
+        cli_args(bundle, "--include-private", "--private-visible"))
+    assert options.private == {"103": "everyone"}
+
+
+def test_private_visible_needs_include_private(bundle, capsys):
+    with pytest.raises(SystemExit):
+        cli_args(bundle, "--private-visible")
+    assert "--include-private" in capsys.readouterr().err
 
 
 def test_unknown_format_version_is_refused(client, world, bundle):

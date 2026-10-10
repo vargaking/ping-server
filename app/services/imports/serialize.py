@@ -1,7 +1,15 @@
 """The Import object the API and the WebSocket frames carry."""
 from ...models.ServerImport import ServerImport
 
-_PLAN_EXTRAS = ("authors", "seen")
+_PLAN_EXTRAS = ("authors", "seen", "private_seen", "private_selection")
+
+
+def planned_messages(plan: dict | None) -> int:
+    """The messages a run of this plan looks at: what the check saw, plus the
+    selected private channels."""
+    plan = plan or {}
+    seen = plan.get("private_seen") or {}
+    return plan.get("seen", 0) + sum(seen.get(i, 0) for i in plan.get("private_selection") or {})
 
 
 def public_plan(plan: dict | None) -> dict | None:
@@ -31,6 +39,7 @@ def import_json(row: ServerImport, *, light: bool = False) -> dict:
         "size": row.size,
         "received": row.received,
         "source": source,
+        "private_channels": dict((row.plan or {}).get("private_selection") or {}),
         "progress": row.progress,
         "failed_step": row.failed_step,
         "error": row.error,

@@ -4,6 +4,7 @@ import asyncio
 import logging
 import time
 from contextlib import ExitStack, asynccontextmanager, contextmanager
+from pathlib import Path
 
 import pytest
 from tortoise.backends.sqlite.client import SqliteClient
@@ -15,6 +16,7 @@ from app.permissions import Permission
 from app.routers import overwrites as overwrites_router
 from app.routers.overwrites import MEMBER_ABOVE_YOU
 from app.services import channel_layout
+from app.services.bundle.importer import ImportOptions, import_bundle
 from app.services.permissions import permissions
 from app.services.roles import ABOVE_YOUR_RANK, BITS_YOU_LACK
 from app.services.server_queue import server_queue
@@ -26,6 +28,7 @@ from tests.test_permissions import join, roles_by_name, run, set_roles
 from tests.test_server_timing import query_count
 from tests.test_voice_moderation import use_presence
 
+FIXTURE = Path(__file__).parent / "fixtures" / "bundle"
 LOGGER = "app.server_queue"
 ROW_FRAME = "permission_overwrite_updated"
 CONNECT = int(Permission.CONNECT)
@@ -786,3 +789,48 @@ def test_a_channel_deleted_under_a_non_owner_write_is_not_found(crew, monkeypatc
     res = put(crew.mod_client, channel_rule(channel, "roles", crew.everyone["id"]), deny=SEND)
     assert res.status_code == 404, res.text
     assert res.json()["detail"] == "Channel not found"
+
+
+# -- a channel the importer adds while a write waits in the queue -----------------------
+
+def names_channel(frames, name, channel_id) -> bool:
+    def walk(value):
+        if isinstance(value, dict):
+            return any(str(key) == str(channel_id) or walk(item) for key, item in value.items())
+        if isinstance(value, list):
+            return any(walk(item) for item in value)
+        return value == name
+
+    return walk(frames)
+
+
+def test_a_private_channel_imported_before_a_queued_write_runs_is_not_announced(
+        crew, monkeypatch, tmp_path):
+    monkeypatch.setenv("ATTACHMENTS_ROOT", str(tmp_path / "attachments"))
+    owner, sid = crew.owner_client, crew.sid
+    groups = owner.get(f"/servers/{sid}/channels").json()["groups"]
+    group = next(g for g in groups if g["name"] == "Text channels")
+    assert overwrite(owner, group_rule(group["id"], "roles", crew.everyone["id"]),
+                     deny=VIEW).status_code == 200
+    warm(owner, sid)
+    for member in (crew.mod_client, crew.member_client):
+        assert member.get(f"/servers/{sid}/channels").status_code == 200
+
+    with listening(owner, owner=owner, mod=crew.mod_client, member=crew.member_client) as live:
+        with held_queue(owner, sid) as release:
+            res = put(owner, group_rule(group["id"], "roles", crew.mod_role["id"]), allow=VIEW)
+            assert res.status_code == 200
+            run(owner, import_bundle, FIXTURE, ImportOptions(
+                server_id=sid, only={"103"}, private={"103": "only_me"}))
+            release()
+            frames = live.settle()
+
+    staff = run(owner, lambda: Channel.get(server_id=sid, name="staff"))
+    assert staff.group_id == group["id"]
+    for name in ("mod", "member"):
+        assert not names_channel(frames[name], "staff", staff.id), (name, frames[name])
+        assert not of_type(frames[name], "channel_created")
+    for client in (crew.mod_client, crew.member_client):
+        assert client.get(f"/channels/{staff.id}/messages").status_code == 404
+        assert staff.id not in [c["id"] for c in client.get(f"/channels/{sid}").json()]
+    assert owner.get(f"/channels/{staff.id}/messages").status_code == 200
