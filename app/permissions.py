@@ -70,21 +70,23 @@ async def require_permission(
 
 async def require_channel(
     user: User, channel: Channel, perm: Permission = Permission.VIEW_CHANNEL,
-    *, not_found: str = "Channel not found",
+    *, not_found: str = "Channel not found", server: Server | None = None,
 ) -> Permission:
     """Raise unless *user* may do *perm* in *channel*. Non-members get the
     same 403 as require_permission, and so does a member without View in the
     whole server; a member a channel rule hides it from gets 404 *not_found*,
-    so private channels can't be probed. Returns the mask."""
+    so private channels can't be probed. Pass the channel's *server* when it is
+    already loaded to save a query. Returns the mask."""
     from .services.permissions import permissions
 
-    effective = await permissions.effective(user.id, channel.server_id, channel_id=channel.id)
+    where = channel.server_id if server is None else server
+    effective = await permissions.effective(user.id, where, channel_id=channel.id)
     if effective is None:
-        if await permissions.effective(user.id, channel.server_id) is None:
+        if await permissions.effective(user.id, where) is None:
             raise HTTPException(status_code=403, detail="Not a member of this server")
         raise HTTPException(status_code=404, detail=not_found)
     if not effective & Permission.VIEW_CHANNEL:
-        server_mask = await permissions.effective(user.id, channel.server_id)
+        server_mask = await permissions.effective(user.id, where)
         if server_mask is not None and not server_mask & Permission.VIEW_CHANNEL:
             # No View anywhere in the server: nothing is hidden by a channel rule.
             raise HTTPException(status_code=403, detail="Missing permission")

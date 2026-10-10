@@ -90,6 +90,12 @@ async def lifespan(app: FastAPI):
 
     yield
 
+    from .services.server_queue import server_queue
+    try:
+        await server_queue.shutdown()
+    except Exception:
+        logger.warning("Failed to finish background jobs", exc_info=True)
+
     try:
         await imports.shutdown()
     except Exception:

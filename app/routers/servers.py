@@ -22,6 +22,7 @@ from ..services.channel_visibility import (
     announce_visibility,
     filter_order,
     filter_settings,
+    load_state,
     send_per_member,
 )
 from ..services.roles import check_can_assign, seed_server_roles, standing_of
@@ -479,7 +480,8 @@ async def set_member_roles(
             "user_id": user_id,
             "role_ids": role_ids,
         })
-    await announce_visibility(request.app.state, server, before, await member_views(server))
+    await announce_visibility(
+        request.app.state, server.id, await load_state(server), before, await member_views(server))
 
     return await _member_response(server, membership, role_ids)
 

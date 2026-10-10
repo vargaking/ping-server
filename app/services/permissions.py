@@ -1,4 +1,6 @@
-from dataclasses import dataclass, field
+from collections.abc import Iterable, Mapping
+from dataclasses import dataclass, field, replace
+from typing import Literal
 
 from ..models.Channel import Channel
 from ..models.PermissionOverwrite import PermissionOverwrite
@@ -18,20 +20,75 @@ class TargetRows:
     members: dict[int, Bits] = field(default_factory=dict)
 
 
-@dataclass
+TargetKind = Literal["channel", "group"]
+SubjectKind = Literal["role", "member"]
+NO_ROW: Bits = (0, 0)
+
+
+@dataclass(frozen=True)
+class RowKey:
+    """Which overwrite row: its target and its subject."""
+    target: TargetKind
+    target_id: int
+    subject: SubjectKind
+    subject_id: int
+
+    @property
+    def filters(self) -> dict[str, int]:
+        return {"channel_id" if self.target == "channel" else "group_id": self.target_id,
+                "role_id" if self.subject == "role" else "user_id": self.subject_id}
+
+
+@dataclass(frozen=True)
+class OverwriteRows:
+    """Every overwrite row of a server, by target."""
+    groups: Mapping[int, TargetRows]
+    channels: Mapping[int, TargetRows]
+
+    def _side(self, key: RowKey) -> Mapping[int, TargetRows]:
+        return self.channels if key.target == "channel" else self.groups
+
+    def bits(self, key: RowKey) -> Bits:
+        rows = self._side(key).get(key.target_id)
+        if rows is None:
+            return NO_ROW
+        subjects = rows.roles if key.subject == "role" else rows.members
+        return subjects.get(key.subject_id, NO_ROW)
+
+    def with_row(self, key: RowKey, bits: Bits) -> "OverwriteRows":
+        """These rows with one row set, or removed for NO_ROW. Untouched
+        targets are shared, so nothing here may mutate a TargetRows."""
+        side = dict(self._side(key))
+        current = side.get(key.target_id)
+        rows = TargetRows() if current is None else TargetRows(
+            dict(current.roles), dict(current.members))
+        subjects = rows.roles if key.subject == "role" else rows.members
+        if bits == NO_ROW:
+            subjects.pop(key.subject_id, None)
+        else:
+            subjects[key.subject_id] = bits
+        if rows.roles or rows.members:
+            side[key.target_id] = rows
+        else:
+            side.pop(key.target_id, None)
+        if key.target == "channel":
+            return replace(self, channels=side)
+        return replace(self, groups=side)
+
+
+@dataclass(frozen=True)
 class ServerRules:
     """Everything a server's channel masks are computed from, loaded together."""
     owner_id: int
-    roles: dict[int, RoleLike]
-    channels: dict[int, int | None]
+    roles: Mapping[int, RoleLike]
+    channels: Mapping[int, int | None]
     group_ids: list[int]
-    groups: dict[int, TargetRows]
-    channel_rows: dict[int, TargetRows]
+    rows: OverwriteRows
 
     def layers(self, channel_id: int, user_id: int):
         group_id = self.channels.get(channel_id)
-        for rows in (self.groups.get(group_id) if group_id is not None else None,
-                     self.channel_rows.get(channel_id)):
+        for rows in (self.rows.groups.get(group_id) if group_id is not None else None,
+                     self.rows.channels.get(channel_id)):
             if rows is not None:
                 yield rows.roles, rows.members.get(user_id)
 
@@ -44,9 +101,27 @@ class ServerRules:
     def group_mask(self, user_id: int, server_mask: Permission, assigned, group_id: int) -> Permission:
         if user_id == self.owner_id:
             return ALL_PERMISSIONS
-        rows = self.groups.get(group_id)
+        rows = self.rows.groups.get(group_id)
         layers = [] if rows is None else [(rows.roles, rows.members.get(user_id))]
         return channel_mask(server_mask, self.roles, assigned, layers)
+
+    def target_mask(
+        self, user_id: int, server_mask: Permission, assigned, key: RowKey
+    ) -> Permission:
+        """The user's mask in the channel or category the row is on."""
+        if key.target == "channel":
+            return self.mask(user_id, server_mask, assigned, key.target_id)
+        return self.group_mask(user_id, server_mask, assigned, key.target_id)
+
+    def with_row(self, key: RowKey, bits: Bits) -> "ServerRules":
+        return replace(self, rows=self.rows.with_row(key, bits))
+
+    def private_flags(self) -> tuple[set[int], set[int]]:
+        """The channels and the categories @everyone can't view."""
+        return (
+            {cid for cid in self.channels if self.is_private(channel_id=cid)},
+            {gid for gid in self.group_ids if self.is_private(group_id=gid)},
+        )
 
     def is_private(self, channel_id: int | None = None, group_id: int | None = None) -> bool:
         """Whether @everyone can't view the channel (or the category)."""
@@ -100,22 +175,27 @@ def _plain_channel_mask(server_mask: Permission) -> Permission:
     return server_mask
 
 
-async def load_rules(server: Server) -> ServerRules:
-    roles = {role.id: role for role in await Role.filter(server_id=server.id)}
-    channels = dict(await Channel.filter(server_id=server.id).values_list("id", "group_id"))
+async def load_rows(server_id: int) -> OverwriteRows:
     groups: dict[int, TargetRows] = {}
-    channel_rows: dict[int, TargetRows] = {}
+    channels: dict[int, TargetRows] = {}
     for channel_id, group_id, role_id, user_id, allow, deny in await PermissionOverwrite.filter(
-            server_id=server.id).values_list(
+            server_id=server_id).values_list(
             "channel_id", "group_id", "role_id", "user_id", "allow", "deny"):
-        target = (channel_rows.setdefault(channel_id, TargetRows()) if channel_id is not None
+        target = (channels.setdefault(channel_id, TargetRows()) if channel_id is not None
                   else groups.setdefault(group_id, TargetRows()))
         if role_id is not None:
             target.roles[role_id] = (allow, deny)
         else:
             target.members[user_id] = (allow, deny)
+    return OverwriteRows(groups, channels)
+
+
+async def load_rules(server: Server) -> ServerRules:
+    roles = {role.id: role for role in await Role.filter(server_id=server.id)}
+    channels = dict(await Channel.filter(server_id=server.id).values_list("id", "group_id"))
+    rows = await load_rows(server.id)
     group_ids = await ChannelGroup.filter(server_id=server.id).values_list("id", flat=True)
-    return ServerRules(server.owner_id, roles, channels, list(group_ids), groups, channel_rows)
+    return ServerRules(server.owner_id, roles, channels, list(group_ids), rows)
 
 
 class PermissionResolver:
@@ -129,6 +209,7 @@ class PermissionResolver:
     def __init__(self) -> None:
         self._cache: dict[tuple[int, int], Permission] = {}
         self._channel_cache: dict[tuple[int, int], MemberView] = {}
+        self._refill: dict[int, set[int]] = {}
         self._invalidations = 0
 
     async def effective(
@@ -212,10 +293,31 @@ class PermissionResolver:
             for key in [k for k in cache if k[1] == server_id]:
                 del cache[key]
 
+    def drop_views(self, server_id: int) -> int:
+        """Drop every member's channel view of the server, remembering whose to
+        refill, and keep the server-level masks (overwrites can't change those).
+        Returns the token refill_views needs."""
+        self._invalidations += 1
+        dropped = self._refill.setdefault(server_id, set())
+        for key in [k for k in self._channel_cache if k[1] == server_id]:
+            dropped.add(key[0])
+            del self._channel_cache[key]
+        return self._invalidations
+
+    def refill_views(self, server_id: int, views: Mapping[int, MemberView], token: int) -> None:
+        """Put back the dropped views, computed after the write, unless anything
+        was invalidated since; then they load again on demand."""
+        if token != self._invalidations:
+            return
+        for user_id in self._refill.pop(server_id, ()):
+            if user_id in views:
+                self._channel_cache[(user_id, server_id)] = views[user_id]
+
     def clear(self) -> None:
         self._invalidations += 1
         self._cache.clear()
         self._channel_cache.clear()
+        self._refill.clear()
 
     @staticmethod
     async def _server_level(user_id: int, server_id: int) -> Permission:
@@ -225,7 +327,7 @@ class PermissionResolver:
         return member_mask(roles, assigned)
 
 
-async def _assignments(roles) -> dict[int, list[int]]:
+async def role_assignments(roles) -> dict[int, list[int]]:
     assigned: dict[int, list[int]] = {}
     for user_id, role_id in await RoleToUser.filter(
             role_id__in=list(roles)).values_list("user_id", "role_id"):
@@ -237,7 +339,7 @@ async def server_masks(server: Server) -> dict[int, Permission]:
     """Every member's server-level mask, from one query each for roles,
     assignments and members."""
     roles = {role.id: role for role in await Role.filter(server_id=server.id)}
-    assigned = await _assignments(roles)
+    assigned = await role_assignments(roles)
     member_ids = await UserToServer.filter(server_id=server.id).values_list("user_id", flat=True)
     return {
         user_id: ALL_PERMISSIONS if user_id == server.owner_id
@@ -246,25 +348,32 @@ async def server_masks(server: Server) -> dict[int, Permission]:
     }
 
 
+def views_of(
+    rules: ServerRules, member_ids: Iterable[int], assigned: Mapping[int, list[int]]
+) -> dict[int, MemberView]:
+    """Every listed member's view under *rules*."""
+    views = {}
+    for user_id in member_ids:
+        mine = assigned.get(user_id, [])
+        base = ALL_PERMISSIONS if user_id == rules.owner_id else member_mask(rules.roles, mine)
+        views[user_id] = rules.view(user_id, base, mine, rules.group_ids)
+    return views
+
+
 async def member_views(server: Server) -> dict[int, MemberView]:
     """Every member's view of *server*. Used for fan-out and to compare what
     members see before and after a change."""
     rules = await load_rules(server)
-    assigned = await _assignments(rules.roles)
+    assigned = await role_assignments(rules.roles)
     member_ids = await UserToServer.filter(server_id=server.id).values_list("user_id", flat=True)
-    result = {}
-    for user_id in member_ids:
-        mine = assigned.get(user_id, [])
-        base = ALL_PERMISSIONS if user_id == server.owner_id else member_mask(rules.roles, mine)
-        result[user_id] = rules.view(user_id, base, mine, rules.group_ids)
-    return result
+    return views_of(rules, member_ids, assigned)
 
 
 async def channel_viewers(server: Server, channel_id: int) -> set[int]:
     rules = await load_rules(server)
     if channel_id not in rules.channels:
         return set()
-    assigned = await _assignments(rules.roles)
+    assigned = await role_assignments(rules.roles)
     member_ids = await UserToServer.filter(server_id=server.id).values_list("user_id", flat=True)
     viewers = set()
     for user_id in member_ids:
@@ -276,17 +385,3 @@ async def channel_viewers(server: Server, channel_id: int) -> set[int]:
 
 
 permissions = PermissionResolver()
-
-
-async def fresh_mask(
-    user_id: int, server: Server, *, channel_id: int | None = None, group_id: int | None = None
-) -> Permission:
-    """The user's mask in a channel or category, read from the database
-    without the cache (so it sees an uncommitted change in the transaction)."""
-    rules = await load_rules(server)
-    assigned = await RoleToUser.filter(
-        user_id=user_id, role_id__in=list(rules.roles)).values_list("role_id", flat=True)
-    base = ALL_PERMISSIONS if user_id == server.owner_id else member_mask(rules.roles, assigned)
-    if channel_id is not None:
-        return rules.mask(user_id, base, assigned, channel_id)
-    return rules.group_mask(user_id, base, assigned, group_id)

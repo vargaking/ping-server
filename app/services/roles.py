@@ -45,6 +45,7 @@ class Standing:
     mask: int
     rank: int
     is_owner: bool
+    assigned: frozenset[int] = frozenset()
 
     def can_touch(self, role: RoleLike) -> bool:
         return self.is_owner or role.position < self.rank
@@ -66,7 +67,7 @@ async def standing_of(
     assigned = await RoleToUser.filter(
         user_id=user.id, role_id__in=list(roles)).values_list("role_id", flat=True)
     rank = max((roles[role_id].position for role_id in assigned), default=0)
-    return Standing(mask=int(mask), rank=rank, is_owner=False)
+    return Standing(mask=int(mask), rank=rank, is_owner=False, assigned=frozenset(assigned))
 
 
 class _Edited:

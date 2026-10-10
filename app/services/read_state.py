@@ -1,4 +1,5 @@
 import logging
+from collections.abc import Collection, Mapping
 
 from tortoise.exceptions import IntegrityError
 from tortoise.functions import Max
@@ -130,28 +131,60 @@ async def _resolve_markers(
     return result
 
 
+async def batch_channel_states(
+    wanted: Mapping[int, Collection[int]]
+) -> dict[int, dict[int, dict]]:
+    """batch_channel_state for many users at once, from the same few queries
+    however many users and channels.
+
+    Returns {user_id: {channel_id: {"last_read_message_id": str|None,
+    "last_message_id": str|None}}}.
+    """
+    channel_ids = sorted({channel_id for ids in wanted.values() for channel_id in ids})
+    if not channel_ids:
+        return {}
+
+    markers = {
+        (user_id, channel_id): marker
+        for user_id, channel_id, marker in await ReadState.filter(
+            user_id__in=list(wanted), channel_id__in=channel_ids
+        ).values_list("user_id", "channel_id", "last_read_message_id")
+        if channel_id in wanted[user_id]
+    }
+    last_by_channel = await _last_messages("channel_id", channel_ids)
+    behind = {
+        marker for (_, channel_id), marker in markers.items()
+        if channel_id in last_by_channel and marker < last_by_channel[channel_id]["id"]}
+    marked = {row["id"]: row for row in await Message.filter(id__in=list(behind)).values(
+        "id", "channel_id", "uuid")} if behind else {}
+
+    result: dict[int, dict[int, dict]] = {}
+    for user_id, ids in wanted.items():
+        states = result[user_id] = {}
+        for channel_id in ids:
+            marker = markers.get((user_id, channel_id))
+            last = last_by_channel.get(channel_id)
+            if marker is None or last is None:
+                last_read = None
+            elif marker >= last["id"]:
+                last_read = str(last["uuid"])
+            elif marked.get(marker, {}).get("channel_id") == channel_id:
+                last_read = str(marked[marker]["uuid"])
+            else:
+                last_read = await resolve_marker_uuid(marker, channel_id=channel_id)
+            states[channel_id] = {
+                "last_read_message_id": last_read,
+                "last_message_id": str(last["uuid"]) if last else None,
+            }
+    return result
+
+
 async def batch_channel_state(user_id: int, channel_ids: list[int]) -> dict:
     """Read marker + last message per channel for a channel list.
 
     Returns {channel_id: {"last_read_message_id": str|None, "last_message_id": str|None}}.
     """
-    if not channel_ids:
-        return {}
-
-    markers = dict(await ReadState.filter(
-        user_id=user_id, channel_id__in=channel_ids
-    ).values_list("channel_id", "last_read_message_id"))
-    last_by_channel = await _last_messages("channel_id", channel_ids)
-    last_read = await _resolve_markers("channel_id", channel_ids, markers, last_by_channel)
-
-    return {
-        cid: {
-            "last_read_message_id": last_read[cid],
-            "last_message_id": (
-                str(last_by_channel[cid]["uuid"]) if cid in last_by_channel else None),
-        }
-        for cid in channel_ids
-    }
+    return (await batch_channel_states({user_id: channel_ids})).get(user_id, {})
 
 
 async def batch_conversation_state(user_id: int, conversation_ids: list[int]) -> dict:

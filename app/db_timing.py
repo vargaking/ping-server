@@ -1,6 +1,8 @@
 import functools
 import logging
 import time
+from collections.abc import Iterator
+from contextlib import contextmanager
 from contextvars import ContextVar
 from dataclasses import dataclass
 
@@ -62,6 +64,22 @@ def instrument_db_clients() -> None:
                 setattr(cls, name, _timed(method))
 
 
+@contextmanager
+def own_query_stats() -> Iterator[QueryStats]:
+    """Count the queries of a block apart from the request it started from,
+    such as work that runs after the response."""
+    stats = QueryStats()
+    token = _stats.set(stats)
+    try:
+        yield stats
+    finally:
+        _stats.reset(token)
+
+
+def is_slow(stats: QueryStats) -> bool:
+    return stats.count > SLOW_QUERY_COUNT or stats.seconds > SLOW_DB_SECONDS
+
+
 def _header(app_seconds: float, stats: QueryStats) -> bytes:
     noun = "query" if stats.count == 1 else "queries"
     return (
@@ -91,7 +109,7 @@ class ServerTimingMiddleware:
                 headers = list(message.get("headers", []))
                 headers.append((b"server-timing", _header(elapsed, stats)))
                 message = {**message, "headers": headers}
-                if stats.count > SLOW_QUERY_COUNT or stats.seconds > SLOW_DB_SECONDS:
+                if is_slow(stats):
                     logger.warning(
                         "Slow request %s %s: %d queries, %.0f ms in the database",
                         scope["method"], scope["path"], stats.count, stats.seconds * 1000,

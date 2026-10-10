@@ -6,6 +6,7 @@ import httpx
 import pytest
 
 from app.app import app
+from app.db_timing import own_query_stats
 from app.models.User import User
 from tests.conftest import ORIGIN, register, ws_ready
 
@@ -36,6 +37,27 @@ def routes():
     app.add_api_route("/test-interleaved", interleaved, methods=["GET"])
     yield
     del app.router.routes[before:]
+
+
+def test_own_query_stats_counts_a_block_apart_from_the_request(client):
+    block = []
+
+    async def split():
+        for _ in range(2):
+            await User.all().count()
+        with own_query_stats() as stats:
+            for _ in range(3):
+                await User.all().count()
+        block.append(stats.count)
+        return {"ok": True}
+
+    before = len(app.router.routes)
+    app.add_api_route("/test-split", split, methods=["GET"])
+    try:
+        assert query_count(client.get("/test-split")) == 2
+    finally:
+        del app.router.routes[before:]
+    assert block == [3]
 
 
 def test_header_on_normal_and_error_responses(client):

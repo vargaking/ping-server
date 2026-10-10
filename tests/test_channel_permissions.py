@@ -12,7 +12,7 @@ from app.permissions import ALL_PERMISSIONS, MEMBER_PERMISSIONS, Permission
 from app.routers import voice
 from app.services import role_resolution
 from app.services.permissions import member_views, permissions, server_masks
-from tests.conftest import ORIGIN, create_channel, create_server, register, ws_ready
+from tests.conftest import ORIGIN, create_channel, create_server, drain_jobs, register, ws_ready
 from tests.test_attachments import upload
 from tests.test_permissions import join, roles_by_name, run, set_roles
 
@@ -36,7 +36,9 @@ def chat_frame(server_id, channel_id, text="hi"):
 
 
 def overwrite(client, path, allow=0, deny=0):
-    return client.put(path, json={"allow": str(allow), "deny": str(deny)})
+    response = client.put(path, json={"allow": str(allow), "deny": str(deny)})
+    drain_jobs(client)
+    return response
 
 
 @pytest.fixture
