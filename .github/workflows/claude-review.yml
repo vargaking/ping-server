@@ -25,7 +25,8 @@ jobs:
         with:
           fetch-depth: 1
 
-      - uses: anthropics/claude-code-action@v1
+      - id: review
+        uses: anthropics/claude-code-action@v1
         with:
           claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
           classify_inline_comments: false
@@ -55,5 +56,21 @@ jobs:
           claude_args: |
             --model sonnet
             --max-turns 40
-            --allowedTools "mcp__github_inline_comment__create_inline_comment,Bash(gh pr diff:*),Bash(gh pr view:*),Bash(gh api repos/${{ github.repository }}/pulls/${{ github.event.pull_request.number }}/comments)"
+            --allowedTools "Read,Grep,Glob,mcp__github_inline_comment__create_inline_comment,Bash(gh pr diff:*),Bash(gh pr view:*),Bash(gh api repos/${{ github.repository }}/pulls/${{ github.event.pull_request.number }}/comments)"
             --disallowedTools "Edit,MultiEdit,Write,NotebookEdit"
+
+      - name: Report what the review read
+        if: always() && steps.review.outputs.execution_file != ''
+        env:
+          EXECUTION_FILE: ${{ steps.review.outputs.execution_file }}
+        run: |
+          jq -r '
+            [.[] | select(.type == "assistant") | .message.content[]? | select(.type == "tool_use")] as $calls
+            | (last(.[] | select(.type == "result")) // {}) as $result
+            | ([$calls[] | select(.name == "Read") | .input.file_path] | unique | length) as $read
+            | ([$calls[] | select(.name == "mcp__github_inline_comment__create_inline_comment")] | length) as $comments
+            | (($result.permission_denials // []) | length) as $denied
+            | "Read \($read) files in \($result.num_turns // "?") turns, \($denied) tool calls denied. "
+              + (if $comments == 0 then "Nothing met the bar." else "\($comments) inline comments." end)
+              + (if $denied > 0 then " Denied: " + ([$result.permission_denials[] | .tool_name] | unique | join(", ")) + "." else "" end)
+          ' "$EXECUTION_FILE" | tee -a "$GITHUB_STEP_SUMMARY"
