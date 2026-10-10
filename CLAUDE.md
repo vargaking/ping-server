@@ -30,7 +30,7 @@
 - Manual test path: numbered steps from a clean state, expected result per step, edge cases, and what broken looks like.
 
 ## Review
-- Every non-draft PR gets an automatic Claude review in CI. It comments inline, and only on real defects. A green `Claude Review` check with no comments means it found nothing.
+- Every non-draft PR gets an automatic Claude review in CI. It comments inline, and only on real defects. A green `Claude Review` check with no comments means it found nothing. Its job summary has one line: how many files it read, and any tool call that was denied.
 - After opening a PR, wait for it (`gh pr checks <n> --watch`) and read the inline comments (`gh api repos/{owner}/{repo}/pulls/<n>/comments`).
 - The reviewer can be wrong. Check each finding against the code before touching anything. Fix the real ones and push. Reply in the thread to the rest with why not.
 - A push triggers a new review. Two fix rounds at most, then leave what's left for the human.
