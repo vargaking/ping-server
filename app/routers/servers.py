@@ -28,6 +28,7 @@ from ..services.channel_visibility import (
 from ..services.roles import check_can_assign, seed_server_roles, standing_of
 from ..services.server_icon import clean_icon_text, clean_icon_tone
 from ..services.server_name import clean_server_name
+from ..services.server_queue import server_queue
 from ..services.storage import ImageValidationError, storage_service
 from ..services.voice_presence import close_voice_channels, remove_from_voice
 from ..settings import server_creation_mode
@@ -464,6 +465,7 @@ async def set_member_roles(
     for role_id in wanted ^ current:
         check_can_assign(standing, roles, roles[role_id])
 
+    await server_queue.idle(server.id)
     before = await member_views(server)
     async with in_transaction():
         await RoleToUser.filter(user_id=user_id, role_id__in=list(roles)).delete()

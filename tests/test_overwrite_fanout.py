@@ -3,13 +3,15 @@ cache refill follow in the server's queue."""
 import asyncio
 import logging
 import time
-from contextlib import ExitStack, contextmanager
+from contextlib import ExitStack, asynccontextmanager, contextmanager
 
+from app.models.Channel import Channel
 from app.models.User import User
 from app.models.UserToServer import UserToServer
 from app.permissions import Permission
 from app.routers import overwrites as overwrites_router
 from app.routers.overwrites import MEMBER_ABOVE_YOU
+from app.services import channel_layout
 from app.services.permissions import permissions
 from app.services.roles import ABOVE_YOUR_RANK, BITS_YOU_LACK
 from app.services.server_queue import server_queue
@@ -17,7 +19,7 @@ from app.services.voice_presence import VoiceParticipant
 from tests.conftest import create_channel, create_server, drain_jobs, register, ws_ready
 from tests.test_channel_permissions import (  # noqa: F401
     HEADERS, SEND, VIEW, crew, overwrite, post_message)
-from tests.test_permissions import join, roles_by_name, run
+from tests.test_permissions import join, roles_by_name, run, set_roles
 from tests.test_server_timing import query_count
 from tests.test_voice_moderation import use_presence
 
@@ -238,7 +240,8 @@ def test_a_put_that_changes_nothing_still_checks_permissions(crew, new_client):
     res = put(crew.member_client, channel_rule(general, "roles", crew.everyone["id"]))
     assert (res.status_code, res.json()["detail"]) == (403, "Missing permission")
     res = put(crew.member_client, channel_rule(crew.secret["id"], "roles", crew.everyone["id"]))
-    assert (res.status_code, res.json()["detail"]) == (404, "Channel not found")
+    assert res.status_code == 404, res.text
+    assert res.json()["detail"] == "Channel not found"
 
 
 # -- caches ---------------------------------------------------------------------------
@@ -632,3 +635,90 @@ def test_members_in_voice_cost_no_queries(crew, monkeypatch, caplog):
     assert source.removed == [(occupied, crew.member["id"])]
     without, with_voice = job_query_counts(caplog)[-2:]
     assert without == with_voice
+
+
+# -- changes that fan out inline wait for the queued jobs ------------------------------
+
+def test_a_role_change_waits_for_the_queued_fan_out(crew, monkeypatch):
+    owner, sid, secret = crew.owner_client, crew.sid, crew.secret["id"]
+    viewer = owner.post(f"/servers/{sid}/roles", json={"name": "Viewer"}).json()
+    assert set_roles(owner, sid, crew.member["id"], [viewer["id"]]).status_code == 200
+    path = channel_rule(secret, "roles", viewer["id"])
+    assert overwrite(owner, path, allow=VIEW).status_code == 200
+    original = overwrites_router.announce_overwrite
+
+    async def late(*args, **kwargs):
+        await asyncio.sleep(0.3)
+        await original(*args, **kwargs)
+
+    monkeypatch.setattr(overwrites_router, "announce_overwrite", late)
+    with listening(owner, owner=owner, member=crew.member_client) as live:
+        assert owner.delete(path).status_code == 204
+        assert set_roles(owner, sid, crew.member["id"], []).status_code == 200
+        frames = live.settle()
+    assert [f["channel_id"] for f in of_type(frames["member"], "channel_deleted")] == [secret]
+
+
+def test_a_role_deletion_waits_for_the_queued_fan_out(crew, monkeypatch):
+    owner, sid, secret = crew.owner_client, crew.sid, crew.secret["id"]
+    viewer = owner.post(f"/servers/{sid}/roles", json={"name": "Viewer"}).json()
+    assert set_roles(owner, sid, crew.member["id"], [viewer["id"]]).status_code == 200
+    path = channel_rule(secret, "roles", viewer["id"])
+    assert overwrite(owner, path, allow=VIEW).status_code == 200
+    original = overwrites_router.announce_overwrite
+
+    async def late(*args, **kwargs):
+        await asyncio.sleep(0.3)
+        await original(*args, **kwargs)
+
+    monkeypatch.setattr(overwrites_router, "announce_overwrite", late)
+    with listening(owner, owner=owner, member=crew.member_client) as live:
+        assert owner.delete(path).status_code == 204
+        assert owner.delete(f"/servers/{sid}/roles/{viewer['id']}").status_code == 204
+        frames = live.settle()
+    assert [f["channel_id"] for f in of_type(frames["member"], "channel_deleted")] == [secret]
+
+
+# -- a non-owner is checked against the category the channel is in now -------------------
+
+def moving_out_of_its_category(monkeypatch, channel_id, delete=False):
+    """Make the channel leave its category (or go away) right after the write
+    gets the server lock, as a request that committed just before would."""
+    real = channel_layout.locked_server
+
+    @asynccontextmanager
+    async def moving(server_id):
+        async with real(server_id):
+            if delete:
+                await Channel.filter(id=channel_id).delete()
+            else:
+                await Channel.filter(id=channel_id).update(group_id=None)
+            yield
+
+    monkeypatch.setattr(overwrites_router.channel_layout, "locked_server", moving)
+
+
+def test_a_non_owner_is_checked_against_the_category_the_channel_is_in_now(crew, monkeypatch):
+    owner, sid = crew.owner_client, crew.sid
+    group = owner.post(f"/servers/{sid}/channel-groups", json={"name": "G"}).json()
+    channel = owner.post(f"/channels/{sid}/create", json={
+        "name": "x", "group_id": group["id"]}).json()["id"]
+    assert overwrite(owner, group_rule(group["id"], "roles", crew.mod_role["id"]),
+                     allow=MANAGE_MESSAGES).status_code == 200
+    moving_out_of_its_category(monkeypatch, channel)
+
+    res = put(crew.mod_client, channel_rule(channel, "roles", crew.everyone["id"]),
+              allow=MANAGE_MESSAGES)
+    assert res.status_code == 403, res.text
+    assert res.json()["detail"] == BITS_YOU_LACK
+    assert owner.get(f"/channels/{channel}/permissions").json() == {"roles": [], "members": []}
+
+
+def test_a_channel_deleted_under_a_non_owner_write_is_not_found(crew, monkeypatch):
+    owner, sid = crew.owner_client, crew.sid
+    channel = create_channel(owner, sid, "gone")["id"]
+    moving_out_of_its_category(monkeypatch, channel, delete=True)
+
+    res = put(crew.mod_client, channel_rule(channel, "roles", crew.everyone["id"]), deny=SEND)
+    assert res.status_code == 404, res.text
+    assert res.json()["detail"] == "Channel not found"

@@ -124,3 +124,51 @@ def test_shutdown_cancels_jobs_that_outlast_the_wait():
         return cancelled, queue._tails, queue._tasks
 
     assert asyncio.run(scenario()) == ([True], {}, set())
+
+
+def test_idle_waits_for_the_jobs_reserved_so_far():
+    async def scenario():
+        queue, order = ServerQueue(), []
+        queue.reserve(1).run(recorder(order, "a", pause=0.05))
+        queue.reserve(1).run(recorder(order, "b", pause=0.05))
+        await queue.idle(1)
+        return order
+
+    assert asyncio.run(scenario()) == ["a", "b"]
+
+
+def test_idle_returns_at_once_without_jobs():
+    async def scenario():
+        queue = ServerQueue()
+        queue.reserve(2).run(recorder([], "other", pause=0.05))
+        await asyncio.wait_for(queue.idle(1), timeout=0.01)
+
+    asyncio.run(scenario())
+
+
+def test_idle_waits_for_a_reserved_slot_until_it_is_used():
+    async def scenario():
+        queue, order = ServerQueue(), []
+        slot = queue.reserve(1)
+        waiting = asyncio.create_task(queue.idle(1))
+        await asyncio.sleep(0.05)
+        finished_early = waiting.done()
+        slot.run(recorder(order, "late"))
+        await waiting
+        return finished_early, order
+
+    assert asyncio.run(scenario()) == (False, ["late"])
+
+
+def test_a_cancelled_idle_leaves_the_job_alone():
+    async def scenario():
+        queue, order = ServerQueue(), []
+        queue.reserve(1).run(recorder(order, "a", pause=0.05))
+        waiting = asyncio.create_task(queue.idle(1))
+        await asyncio.sleep(0.01)
+        waiting.cancel()
+        await asyncio.gather(waiting, return_exceptions=True)
+        await queue.drain()
+        return order
+
+    assert asyncio.run(scenario()) == ["a"]

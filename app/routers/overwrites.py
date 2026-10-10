@@ -1,5 +1,5 @@
 from collections.abc import Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from functools import partial
 from typing import Literal
 
@@ -76,6 +76,15 @@ class Target:
         if self.channel is not None:
             return RowKey("channel", self.channel.id, SUBJECTS[kind], subject_id)
         return RowKey("group", self.group.id, SUBJECTS[kind], subject_id)
+
+    async def current(self) -> "Target":
+        """This target with its channel's category as it is now."""
+        if self.channel is None:
+            return self
+        channel = await Channel.get_or_none(id=self.channel.id)
+        if channel is None:
+            raise HTTPException(status_code=404, detail="Channel not found")
+        return replace(self, channel=channel)
 
     def rules(self, roles: Mapping[int, Role], rows: OverwriteRows) -> ServerRules:
         """The rules as far as masks on this target need them."""
@@ -203,7 +212,8 @@ async def _write(
             rows = await load_rows(server.id)
             roles, standing = await _authorize(target, user, actor_mask, kind, subject_id)
             if not standing.is_owner:
-                _check_bits(target, user, roles, standing, rows, key, bits)
+                _check_bits(
+                    await target.current(), user, roles, standing, rows, key, bits)
             if rows.bits(key) == bits:
                 return row_json(key, bits)
             await _save(server.id, key, rows.bits(key), bits)

@@ -8,6 +8,7 @@ from ..models.Server import Server
 from ..permissions import Permission
 from . import channel_layout, read_state
 from .permissions import MemberView, load_rules, member_views, permissions
+from .server_queue import server_queue
 from .voice_moderation import publish_sources, server_muted_attributes
 from .voice_presence import remove_from_voice, voice_channels_in
 
@@ -206,6 +207,7 @@ class visibility_change:
         self.exclude_user_id = exclude_user_id
 
     async def __aenter__(self) -> "visibility_change":
+        await server_queue.idle(self.server.id)
         self.before = await member_views(self.server)
         return self
 

@@ -84,6 +84,13 @@ class ServerQueue:
                 (time.perf_counter() - start) * 1000,
                 extra={"queries": stats.count})
 
+    async def idle(self, server_id: int) -> None:
+        """Wait for the jobs reserved so far for *server_id*. A job must not call
+        it: it would wait for itself."""
+        tail = self._tails.get(server_id)
+        if tail is not None:
+            await asyncio.wait([tail])
+
     async def drain(self) -> None:
         """Wait until every reserved slot has been used and its job is done."""
         while self._tails:
