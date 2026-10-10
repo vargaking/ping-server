@@ -130,3 +130,6 @@ gcloud-key.json
 # ssh keys
 *.pub
 *.pem
+
+# Claude Code worktrees
+.claude/worktrees/
