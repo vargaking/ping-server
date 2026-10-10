@@ -1106,9 +1106,11 @@ def test_deleting_the_server_stops_its_running_import(client, world, roots):
 SECRET = b"the staff rota"
 
 
-def private_bundle(tmp_path, *, attachment=False, author=None, unreadable=False) -> Path:
+def private_bundle(
+    tmp_path, *, attachment=False, author=None, unreadable=False, category=None,
+) -> Path:
     """The sample bundle, with the staff channel (103) carrying a file, written
-    by an author who posts nowhere else, or unreadable."""
+    by an author who posts nowhere else, unreadable, or alone in a category of its own."""
     target = tmp_path / "private-bundle"
     shutil.copytree(FIXTURE, target)
     path = target / "channels" / "103" / "messages" / "1.json"
@@ -1125,6 +1127,9 @@ def private_bundle(tmp_path, *, attachment=False, author=None, unreadable=False)
         data["authors"].append({"id": author, "name": "erin", "avatar": None, "messages": 1})
     if unreadable:
         data["unreadable"].append({"id": "103", "name": "staff"})
+    if category:
+        data["categories"].append({"id": "c3", "name": category, "position": 2})
+        next(c for c in data["channels"] if c["id"] == "103")["category_id"] = "c3"
     path.write_text(json.dumps(messages))
     (target / "server.json").write_text(json.dumps(data))
     return target
@@ -1295,7 +1300,7 @@ def test_a_retry_without_a_body_reuses_the_selection(client, world, monkeypatch)
 def test_a_retry_with_a_body_replaces_the_selection(client, world, monkeypatch):
     got = ready_import(client, world.sid)
     calls = failing_once(monkeypatch)
-    start(client, world.sid, got["id"], {"private_channels": {"103": "everyone"}})
+    start(client, world.sid, got["id"], {"private_channels": {}})
     assert settle(client, world.sid, got["id"])["status"] == "failed"
 
     retried = start(client, world.sid, got["id"], {"private_channels": {"103": "only_me"}})
@@ -1320,25 +1325,47 @@ def test_a_retry_with_an_empty_selection_drops_it(client, world, monkeypatch):
     assert not run(client, Channel.filter(server_id=world.sid, name="staff").exists())
 
 
-def test_a_changed_visibility_does_not_re_permission_a_channel_an_earlier_run_created(
-        client, world, monkeypatch):
+@pytest.mark.parametrize("first, second", [("everyone", "only_me"), ("only_me", "everyone")])
+def test_a_retry_cannot_change_the_visibility_of_a_channel_an_earlier_run_created(
+        client, world, monkeypatch, first, second):
     got = ready_import(client, world.sid)
     calls = failing_once(monkeypatch)
-    start(client, world.sid, got["id"], {"private_channels": {"103": "only_me"}})
+    start(client, world.sid, got["id"], {"private_channels": {"103": first}})
     assert settle(client, world.sid, got["id"])["status"] == "failed"
     staff = staff_channel(client, world.sid)
     rows = lambda: sorted(run(client, PermissionOverwrite.filter(  # noqa: E731
-        channel_id=staff.id).values_list("id", "deny")))
+        server_id=world.sid).values_list("channel_id", "deny")))
     before = rows()
-    assert len(before) == 1
 
-    start(client, world.sid, got["id"], {"private_channels": {"103": "everyone"}})
+    refused = start(client, world.sid, got["id"], {"private_channels": {"103": second}})
+
+    assert refused.status_code == 422
+    assert refused.json()["detail"] == (
+        "103: the channel may already exist; its visibility can't change on a retry")
+    stored = current(client, world.sid)
+    assert stored["status"] == "failed" and stored["private_channels"] == {"103": first}
+
+    retried = start(client, world.sid, got["id"])
+
+    assert retried.status_code == 202
     done = settle(client, world.sid, got["id"])
-
-    assert calls[1].private == {"103": "everyone"}
-    row = staff_row(done["result"])
-    assert (row["action"], row["visibility"]) == ("existing", None)
+    assert done["status"] == "done" and calls[1].private == {"103": first}
+    assert staff_row(done["result"])["action"] == "existing"
+    assert staff_channel(client, world.sid).id == staff.id
     assert rows() == before
+    assert (len(before) == 1) == (first == "only_me")
+
+
+def test_a_retry_may_repeat_or_add_a_visibility(client, world, monkeypatch):
+    got = ready_import(client, world.sid)
+    failing_once(monkeypatch)
+    start(client, world.sid, got["id"], {"private_channels": {"103": "everyone"}})
+    assert settle(client, world.sid, got["id"])["status"] == "failed"
+
+    same = start(client, world.sid, got["id"], {"private_channels": {"103": "everyone"}})
+
+    assert same.status_code == 202
+    assert same.json()["private_channels"] == {"103": "everyone"}
 
 
 def test_the_disk_check_counts_the_selected_private_attachments(client, world, tmp_path, monkeypatch):
@@ -1465,7 +1492,7 @@ def test_an_only_me_channel_is_invisible_to_members(client, world, tmp_path):
         assert staff.id not in surfaces["server"]["server_settings"]["channel_order"]
         assert str(staff.id) not in surfaces["server"]["channel_permissions"]
         assert str(staff.id) not in surfaces["init"]["channels"][str(sid)]
-        assert "staff" not in json.dumps(surfaces)
+        assert "staff" not in json.dumps(surfaces).lower()
 
         assert member.get(f"/channels/{staff.id}/messages").status_code == 404
         assert member.get(f"/attachments/{attachment.id}").status_code == 404
@@ -1501,3 +1528,57 @@ def test_an_only_me_channel_sends_members_no_frames(client, world):
 
     assert [f for f in frames if f["type"] in ("message", "typing")] == []
     assert str(staff.id) not in json.dumps(frames)
+
+
+def member_sees(member, sid, text) -> bool:
+    layout = member.get(f"/servers/{sid}/channels").json()
+    return text.lower() in json.dumps(layout).lower()
+
+
+def test_the_category_of_an_only_me_channel_is_hidden_from_members_too(client, world, tmp_path):
+    sid = world.sid
+    got = ready_import(client, sid, zip_of(private_bundle(tmp_path, category="Mod Secrets")))
+    assert member_sees(world.alice, sid, "Text channels")
+
+    start(client, sid, got["id"], {"private_channels": {"103": "only_me"}})
+    assert settle(client, sid, got["id"])["status"] == "done"
+
+    group = run(client, ChannelGroup.get(server_id=sid, name="Mod Secrets"))
+    everyone = run(client, Role.get(server_id=sid, is_default=True))
+    rows = run(client, PermissionOverwrite.filter(group_id=group.id))
+    assert [(r.role_id, r.allow, r.deny) for r in rows] == [
+        (everyone.id, 0, int(Permission.VIEW_CHANNEL))]
+    for member in (world.alice, world.bob):
+        assert member_sees(member, sid, "Text channels")
+        assert not member_sees(member, sid, "Mod Secrets")
+        assert not member_sees(member, sid, "staff")
+        assert "mod secrets" not in json.dumps(read_surfaces(member, sid)).lower()
+    assert member_sees(world.owner, sid, "Mod Secrets")
+    assert member_sees(world.owner, sid, "staff")
+
+
+def test_a_category_that_is_visible_anyway_gets_no_overwrite(client, world, tmp_path):
+    sid = world.sid
+    got = ready_import(client, sid, zip_of(private_bundle(tmp_path, category="Mod Secrets")))
+
+    start(client, sid, got["id"], {"private_channels": {"103": "everyone"}})
+    assert settle(client, sid, got["id"])["status"] == "done"
+
+    assert overwrite_count(client, sid) == 0
+    assert member_sees(world.alice, sid, "Mod Secrets")
+
+
+def test_a_rerun_leaves_the_overwrites_of_an_existing_category_alone(client, world, tmp_path):
+    sid = world.sid
+    data = zip_of(private_bundle(tmp_path, category="Mod Secrets"))
+    got = ready_import(client, sid, data)
+    start(client, sid, got["id"], {"private_channels": {"103": "only_me"}})
+    assert settle(client, sid, got["id"])["status"] == "done"
+    group = run(client, ChannelGroup.get(server_id=sid, name="Mod Secrets"))
+    run(client, PermissionOverwrite.filter(group_id=group.id).delete())
+
+    second = ready_import(client, sid, data)
+    start(client, sid, second["id"], {"private_channels": {"103": "only_me"}})
+    assert settle(client, sid, second["id"])["status"] == "done"
+
+    assert run(client, PermissionOverwrite.filter(group_id=group.id).count()) == 0

@@ -242,7 +242,9 @@ async def set_authors(
     return import_json(await ServerImport.get(id=row.id))
 
 
-def _checked_private(plan: dict, requested: dict[str, Visibility]) -> None:
+def _checked_private(
+    plan: dict, requested: dict[str, Visibility], retrying: bool = False,
+) -> None:
     offered = {
         c["source_id"] for c in plan.get("channels", [])
         if c.get("private") and c.get("private_action") is not None}
@@ -250,6 +252,14 @@ def _checked_private(plan: dict, requested: dict[str, Visibility]) -> None:
         if source_id not in offered:
             raise HTTPException(
                 status_code=422, detail=f"{source_id} is not a private channel of this import")
+    if retrying:
+        stored = plan.get("private_selection") or {}
+        for source_id, visibility in requested.items():
+            if source_id in stored and stored[source_id] != visibility:
+                raise HTTPException(
+                    status_code=422,
+                    detail=f"{source_id}: the channel may already exist; "
+                           "its visibility can't change on a retry")
 
 
 @router.post("/{import_id}/start", status_code=status.HTTP_202_ACCEPTED)
@@ -266,7 +276,7 @@ async def start_import(
     plan = row.plan or {}
     requested = body.private_channels if body else None
     if requested is not None:
-        _checked_private(plan, requested)
+        _checked_private(plan, requested, retrying=row.status == "failed")
     selection = dict(plan.get("private_selection") or {}) if requested is None else dict(requested)
     plan = {**plan, "private_selection": selection}
     private_bytes = sum(

@@ -265,6 +265,7 @@ class _Import:
         self.system_id: int | None = None
         self.groups: dict[str, ChannelGroup] = {}
         self.everyone_id: int | None = None
+        self.hidden_groups: set[str] = set()
 
     async def run(self) -> Report:
         await self._resolve_authors()
@@ -366,6 +367,7 @@ class _Import:
 
         categories = {c.id: c for c in self.server.categories}
         new_groups = set()
+        public_groups = set()
         for plan in plans:
             if plan.skipped:
                 continue
@@ -395,6 +397,8 @@ class _Import:
             plan.report.category = plan.category_name
             if found is None and plan.category_name:
                 new_groups.add(plan.category_name)
+                if plan.report.visibility != "only_me":
+                    public_groups.add(plan.category_name)
 
         creating = sum(1 for p in plans if not p.skipped and p.channel is None)
         if not self.dry and any(
@@ -416,6 +420,7 @@ class _Import:
             raise ImportAborted(
                 f"The import would create {len(missing_groups)} categories; a server can have "
                 f"at most {channel_layout.MAX_GROUPS}")
+        self.hidden_groups = new_groups - public_groups
         self.report.channels = [p.report for p in plans]
         return plans
 
@@ -511,9 +516,15 @@ class _Import:
             return None
         if name not in self.groups:
             server_id = self.options.server_id
-            self.groups[name] = await ChannelGroup.create(
-                server_id=server_id, name=name,
-                position=await channel_layout.next_group_position(server_id))
+            async with in_transaction():
+                group = await ChannelGroup.create(
+                    server_id=server_id, name=name,
+                    position=await channel_layout.next_group_position(server_id))
+                if name in self.hidden_groups:
+                    await PermissionOverwrite.create(
+                        server_id=server_id, group_id=group.id, role_id=self.everyone_id,
+                        allow=0, deny=int(Permission.VIEW_CHANNEL))
+            self.groups[name] = group
             permissions.invalidate(server_id)
         return self.groups[name]
 
