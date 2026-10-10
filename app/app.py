@@ -13,7 +13,7 @@ from app.communication import WS_CLOSE_UNAUTHENTICATED, Communication
 from app.db import TORTOISE_CONFIG
 from app.db_timing import ServerTimingMiddleware, instrument_db_clients
 from app.rate_limit import limiter
-from app.routers import admin, attachments, auth, channel_groups, channels, client_errors, conversations, forum, invites, messages, overwrites, push, roles, server_imports, server_requests, servers, unfurl, users, voice
+from app.routers import admin, attachments, auth, channel_groups, channels, client_errors, conversations, forum, invites, messages, overwrites, push, roles, server_imports, server_requests, servers, unfurl, users, voice, whats_new
 from app.settings import ALLOWED_ORIGINS, ALLOWED_ORIGIN_REGEX, is_origin_allowed
 from app.utils import lifespan
 from app.ws_schemas import FrameDecodeError, decode_frame
@@ -75,6 +75,7 @@ app.include_router(attachments.router)
 app.include_router(push.router)
 app.include_router(unfurl.router)
 app.include_router(client_errors.router)
+app.include_router(whats_new.router)
 
 # Serve uploaded media from local disk (avatars, server icons).
 # storage.py writes into MEDIA_ROOT and returns URLs prefixed with MEDIA_BASE_URL;
