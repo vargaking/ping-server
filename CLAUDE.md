@@ -2,7 +2,7 @@
 
 ## Tickets (Linear: team Zeta Chat, project Web Alpha)
 - Linear is the source of truth. A dated "Update <date>" section in a ticket overrides older text.
-- Work one ticket at a time. One agent writes at a time; see Subagents.
+- Work one ticket at a time, unless Parallel tickets lets a group run side by side.
 - Start → In Progress. PR open → In Review, plus a comment with the PR link and manual test path.
 - Linear's GitHub integration can flip a ticket back to In Progress when its PR links. Set In Review after the PR shows on the ticket, and check again before the final message.
 - In Review means someone is reviewing. Merging or closing the PR moves the ticket to Done automatically. Review comments move it back to In Progress: address them, push, and set In Review again.
@@ -60,10 +60,23 @@
 ## Subagents
 - The main session plans, owns git, PRs and Linear, and writes the final message. Subagents do the rest.
 - Read-only work goes to subagents, several at once when the questions are independent: finding code, tracing a flow, checking a ticket against master, reading logs.
-- One subagent writes at a time. Never two writers on this checkout, and none here while one writes in the sibling repo.
+- One writer per checkout at a time. A second writer needs its own worktree; see Parallel tickets.
 - Per ticket: explore, design (Opus, only where Models says so), implement (Sonnet), review by a fresh subagent that gets the ticket and the diff but not the implementer's reasoning, fix.
 - A brief stands on its own: the goal, the files, the rules from this file, what to hand back. The subagent has not seen the conversation.
 - Subagents don't push, open PRs or touch Linear.
 - Their reports are claims. Check what matters (run the test, read the line) before it goes into a PR or a ticket.
 - Reviewers report defects with a concrete trigger. No style, naming or "consider" notes.
 - Skip subagents for a change that is a few lines.
+
+## Parallel tickets
+- Sequential is the default. A group runs side by side only when no two of its tickets edit the same files, none needs another's result, and at most one has a migration or a dependency change.
+- A backend ticket and its frontend ticket can be in one group once the contract between them is written into both tickets.
+- At most two workers in this repo and three across both repos.
+- The plan names each group and why it is safe, before work starts.
+- Models, the migration and dependency changes are done first, in the main checkout, on the ticket's branch, and committed. Only the main session runs aerich.
+- Each ticket then goes to a `ticket-worker`, which gets its own worktree. The brief names the ticket's branch as its base.
+- When a worker hands back, fast-forward the ticket's branch to its commits before anything else touches that branch.
+- A worker that stops because it needs a model, migration or dependency change: make the change in the main checkout, commit, and continue with a worker based on the updated branch.
+- Review as usual. Fixes go to a worker based on the ticket's branch, or into the main checkout when nothing else is writing there.
+- Code in a worktree loads the main checkout's `.env`. A worker's aerich or server would hit the real local database, so workers run neither.
+- Remove a worktree and its branch once the ticket's branch is pushed.
