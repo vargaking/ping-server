@@ -10,6 +10,7 @@ from ..middleware import get_current_user
 from ..models.Token import Token
 from ..models.User import User
 from ..rate_limit import limiter
+from ..services import attachments as attachment_service
 from ..services.system_user import IMPORTED_USERNAME
 from ..services.usernames import Username
 from ..settings import auth_rate_limit
@@ -54,10 +55,15 @@ class RegisterRequest(BaseModel):
 class MeResponse(UserResponse):
     """The caller's own profile. Kept off UserResponse, which other users see."""
     is_platform_admin: bool
+    max_attachment_bytes: int
 
     @classmethod
     def from_user(cls, user: User):
-        return cls(**UserResponse.from_user(user).model_dump(), is_platform_admin=user.is_platform_admin)
+        return cls(
+            **UserResponse.from_user(user).model_dump(),
+            is_platform_admin=user.is_platform_admin,
+            max_attachment_bytes=attachment_service.max_attachment_bytes(),
+        )
 
 
 class TokenResponse(BaseModel):

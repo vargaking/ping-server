@@ -25,7 +25,7 @@ from ..permissions import require_channel
 
 logger = logging.getLogger("app.services.attachments")
 
-_DEFAULT_MAX_ATTACHMENT_BYTES = 10 * 1024 * 1024
+_DEFAULT_MAX_ATTACHMENT_BYTES = 25 * 1024 * 1024
 MAX_ATTACHMENTS_PER_MESSAGE = 10
 
 _IMAGE_CONTENT_TYPES = {
