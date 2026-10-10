@@ -4,7 +4,7 @@ from dataclasses import asdict
 from .importer import ChannelReport, Report
 
 _CHANNEL_FIELDS = (
-    "source_id", "name", "type", "action", "target_name", "reason", "category", "messages",
+    "source_id", "name", "type", "action", "target_name", "name_taken", "reason", "category", "messages",
     "existing_messages", "posts", "existing_posts", "attachments", "attachment_bytes",
     "handed_over")
 

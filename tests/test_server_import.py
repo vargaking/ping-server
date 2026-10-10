@@ -802,6 +802,7 @@ def test_a_second_upload_takes_the_mapping_over_and_adds_nothing(client, world, 
     assert actions == {
         "general": "existing", "staff": "skipped", "ideas": "existing", "Lounge": "existing",
         "off-topic": "existing", "archive": "skipped"}
+    assert not any(c["name_taken"] for c in plan["channels"])
     assert sum(c["handed_over"] for c in plan["channels"]) > 0
     assert import_row(client, first["id"]) is not None
 

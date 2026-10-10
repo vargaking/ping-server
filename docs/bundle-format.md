@@ -58,7 +58,7 @@ python -m app.scripts.import_bundle <bundle> --server <server id> --authors auth
 
 `authors.json` maps source author ids to usernames: `{"123": "alice"}`. Authors without an entry are owned by the `[imported]` account, which can't log in.
 
-Run with `--dry-run` first: it prints what each channel would do and writes nothing. Channels match in this order: a `--map` entry, a channel an earlier run of the same bundle created or filled, a channel with the same name and type, otherwise a new one. Running again skips what exists, continues where a failed run stopped, and hands messages to authors mapped since. A bundle can be imported into more than one server; each import is independent.
+Run with `--dry-run` first: it prints what each channel would do and writes nothing. Channels match in this order: a `--map` entry, a channel an earlier run of the same bundle created or filled, otherwise a new one. A channel is never merged into another by name; if the name is taken, the report says so and a second channel is added. Running again skips what exists, continues where a failed run stopped, and hands messages to authors mapped since. A bundle can be imported into more than one server; each import is independent.
 
 Not imported yet, and counted in the report: private channels (without `--include-private`), threads inside text channels, reactions, pins on channel messages, custom emoji, avatars, and the text chat of voice channels.
 

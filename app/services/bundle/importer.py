@@ -86,6 +86,7 @@ class ChannelReport:
     reason: str | None = None
     target_name: str | None = None
     matched_by: str | None = None
+    name_taken: bool = False
     channel_id: int | None = None
     category: str | None = None
     messages: int = 0
@@ -178,6 +179,18 @@ def message_uuid(server_id: int, source: str, message_id: str) -> UUID:
 def _marker(settings_or_metadata: dict | None) -> dict:
     marker = (settings_or_metadata or {}).get("import")
     return marker if isinstance(marker, dict) else {}
+
+
+def _channel_marker(channel: Channel) -> dict:
+    return _marker(channel.channel_settings)
+
+
+def _marker_ids(marker: dict) -> list[str]:
+    ids = [marker["id"]] if isinstance(marker.get("id"), str) else []
+    listed = marker.get("ids")
+    if isinstance(listed, list):
+        ids += [i for i in listed if isinstance(i, str) and i not in ids]
+    return ids
 
 
 @dataclass
@@ -313,27 +326,15 @@ class _Import:
         plans = [self._plan_for(info) for info in self._in_source_order()]
         matched = {p.info.id: (t, "map") for p in plans if not p.skipped
                    if (t := targets.get(p.info.id))}
-        claimed = {t.id for t, _ in matched.values()}
         for plan in plans:
             if plan.skipped or plan.info.id in matched:
                 continue
-            for channel in existing:
-                marker = _marker(channel.channel_settings)
-                if (marker.get("source") == self.source and marker.get("id") == plan.info.id
-                        and channel.id not in claimed):
+            for channel in sorted(existing, key=lambda c: c.id):
+                marker = _channel_marker(channel)
+                if marker.get("source") == self.source and plan.info.id in _marker_ids(marker):
                     matched[plan.info.id] = (channel, "earlier import")
-                    claimed.add(channel.id)
                     break
-        for plan in plans:
-            if plan.skipped or plan.info.id in matched:
-                continue
-            name = self._channel_name(plan.info)
-            for channel in existing:
-                if (channel.name == name and channel.type == plan.info.type
-                        and channel.id not in claimed):
-                    matched[plan.info.id] = (channel, "name")
-                    claimed.add(channel.id)
-                    break
+        taken_names = {c.name.casefold() for c in existing}
 
         categories = {c.id: c for c in self.server.categories}
         new_groups = set()
@@ -355,6 +356,7 @@ class _Import:
                 continue
             else:
                 plan.report.plan = "create"
+                plan.report.name_taken = self._channel_name(plan.info).casefold() in taken_names
             category = categories.get(plan.info.category_id)
             plan.category_name = category.name.strip()[:_NAME_MAX] if category else None
             plan.report.category = plan.category_name
@@ -418,13 +420,9 @@ class _Import:
     # Channels
 
     async def _ensure_channel(self, plan: _Plan) -> Channel | None:
-        marker = {"source": self.source, "id": plan.info.id}
         if plan.channel is not None:
-            if not self.dry and not self.options.existing_only and not _marker(
-                    plan.channel.channel_settings):
-                plan.channel.channel_settings = {
-                    **plan.channel.channel_settings, "import": marker}
-                await plan.channel.save(update_fields=["channel_settings"])
+            if not self.dry and not self.options.existing_only:
+                await self._record_source(plan.channel, plan.info.id)
             return plan.channel
         if self.dry:
             return None
@@ -440,11 +438,24 @@ class _Import:
                 server_id=server_id,
                 group_id=group_id,
                 position=await channel_layout.next_channel_position(server_id, group_id),
-                channel_settings={"import": {**marker, "created": True}},
+                channel_settings={"import": {
+                    "source": self.source, "id": plan.info.id, "ids": [plan.info.id],
+                    "created": True}},
             )
         permissions.invalidate(server_id)
         plan.report.channel_id = plan.channel.id
         return plan.channel
+
+    async def _record_source(self, channel: Channel, source_id: str) -> None:
+        marker = _channel_marker(channel)
+        if not marker:
+            updated = {"source": self.source, "id": source_id, "ids": [source_id]}
+        elif marker.get("source") == self.source and source_id not in _marker_ids(marker):
+            updated = {**marker, "ids": [*_marker_ids(marker), source_id]}
+        else:
+            return
+        channel.channel_settings = {**channel.channel_settings, "import": updated}
+        await channel.save(update_fields=["channel_settings"])
 
     async def _group(self, name: str | None) -> ChannelGroup | None:
         if name is None:
@@ -465,7 +476,7 @@ class _Import:
                 self.report.left_out.voice_text_chat += await anyio.to_thread.run_sync(
                     self._count_messages, info.id)
             return
-        created = plan.channel is None or bool(_marker(plan.channel.channel_settings).get("created"))
+        created = plan.channel is None or bool(_channel_marker(plan.channel).get("created"))
         async with self._unread_guard(channel, created):
             if info.type == "text":
                 await self._import_text(plan, channel)
@@ -934,7 +945,9 @@ def format_report(report: Report) -> str:
     lines.append("Channels")
     for channel in report.channels:
         how = f" [{channel.matched_by}]" if channel.matched_by else ""
-        lines.append(f"  {channel.name} ({channel.type}): {channel.plan}{how}")
+        note = (" (a channel with this name already exists; a second one is added)"
+                if channel.name_taken else "")
+        lines.append(f"  {channel.name} ({channel.type}): {channel.plan}{how}{note}")
         parts = []
         if channel.type == "forum":
             parts.append(f"{channel.posts} posts")
