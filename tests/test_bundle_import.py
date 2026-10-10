@@ -380,6 +380,24 @@ def test_a_source_mapped_later_is_added_to_the_marker(client, world, bundle):
     assert channel_marker(client, target["id"])["ids"] == ["101", "106"]
 
 
+def test_a_second_bundle_mapped_into_an_imported_channel_is_found_again(client, world, bundle, tmp_path):
+    first = do_import(client, bundle, world.sid, only={"101"})
+    general = next(c.channel_id for c in first.channels if c.name == "general")
+    other = tmp_path / "other"
+    shutil.copytree(bundle, other)
+    edit_server_json(other, lambda data: data["source"].update(server_id="9001"))
+
+    do_import(client, other, world.sid, only={"101"}, channel_map={"101": general})
+    assert channel_marker(client, general)["sources"] == {"discord:9001": ["101"]}
+    count = run(client, Channel.filter(server_id=world.sid).count())
+
+    again = do_import(client, other, world.sid, only={"101"})
+
+    row = next(c for c in again.channels if c.name == "general")
+    assert (row.action, row.channel_id) == ("existing", general)
+    assert run(client, Channel.filter(server_id=world.sid).count()) == count
+
+
 def test_map_target_must_be_a_channel_of_the_same_type_in_this_server(client, world, bundle, new_client):
     voice = create_channel(world.owner, world.sid, "voice-one", "voice")
     with pytest.raises(ImportAborted, match="is a voice channel"):

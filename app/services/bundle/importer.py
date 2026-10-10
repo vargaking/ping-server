@@ -193,6 +193,15 @@ def _marker_ids(marker: dict) -> list[str]:
     return ids
 
 
+def _source_ids(marker: dict, source: str) -> list[str]:
+    """Source channel ids of `source` that landed in the marked channel."""
+    if marker.get("source") == source:
+        return _marker_ids(marker)
+    others = marker.get("sources")
+    listed = others.get(source) if isinstance(others, dict) else None
+    return [i for i in listed if isinstance(i, str)] if isinstance(listed, list) else []
+
+
 @dataclass
 class _Plan:
     info: ChannelInfo
@@ -331,7 +340,7 @@ class _Import:
                 continue
             for channel in sorted(existing, key=lambda c: c.id):
                 marker = _channel_marker(channel)
-                if marker.get("source") == self.source and plan.info.id in _marker_ids(marker):
+                if plan.info.id in _source_ids(marker, self.source):
                     matched[plan.info.id] = (channel, "earlier import")
                     break
         taken_names = {c.name.casefold() for c in existing}
@@ -450,10 +459,14 @@ class _Import:
         marker = _channel_marker(channel)
         if not marker:
             updated = {"source": self.source, "id": source_id, "ids": [source_id]}
-        elif marker.get("source") == self.source and source_id not in _marker_ids(marker):
+        elif source_id in _source_ids(marker, self.source):
+            return
+        elif marker.get("source") == self.source:
             updated = {**marker, "ids": [*_marker_ids(marker), source_id]}
         else:
-            return
+            others = marker.get("sources") if isinstance(marker.get("sources"), dict) else {}
+            updated = {**marker, "sources": {
+                **others, self.source: [*_source_ids(marker, self.source), source_id]}}
         channel.channel_settings = {**channel.channel_settings, "import": updated}
         await channel.save(update_fields=["channel_settings"])
 
