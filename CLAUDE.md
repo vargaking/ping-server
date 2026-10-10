@@ -2,7 +2,7 @@
 
 ## Tickets (Linear: team Zeta Chat, project Web Alpha)
 - Linear is the source of truth. A dated "Update <date>" section in a ticket overrides older text.
-- Work one ticket at a time. Never run parallel agents on this checkout.
+- Work one ticket at a time. One agent writes at a time; see Subagents.
 - Start → In Progress. PR open → In Review, plus a comment with the PR link and manual test path.
 - Linear's GitHub integration can flip a ticket back to In Progress when its PR links. Set In Review after the PR shows on the ticket, and check again before the final message.
 - In Review means someone is reviewing. Merging or closing the PR moves the ticket to Done automatically. Review comments move it back to In Progress: address them, push, and set In Review again.
@@ -56,3 +56,14 @@
   - a bug Sonnet hasn't fixed after two attempts
 - Opus writes the design: types/interfaces, file layout, edge cases. Sonnet implements it. Don't run the whole ticket on Opus.
 - Say in the PR which parts were designed on Opus.
+
+## Subagents
+- The main session plans, owns git, PRs and Linear, and writes the final message. Subagents do the rest.
+- Read-only work goes to subagents, several at once when the questions are independent: finding code, tracing a flow, checking a ticket against master, reading logs.
+- One subagent writes at a time. Never two writers on this checkout, and none here while one writes in the sibling repo.
+- Per ticket: explore, design (Opus, only where Models says so), implement (Sonnet), review by a fresh subagent that gets the ticket and the diff but not the implementer's reasoning, fix.
+- A brief stands on its own: the goal, the files, the rules from this file, what to hand back. The subagent has not seen the conversation.
+- Subagents don't push, open PRs or touch Linear.
+- Their reports are claims. Check what matters (run the test, read the line) before it goes into a PR or a ticket.
+- Reviewers report defects with a concrete trigger. No style, naming or "consider" notes.
+- Skip subagents for a change that is a few lines.
