@@ -44,6 +44,7 @@ from starlette.testclient import WebSocketTestSession  # noqa: E402
 from app.app import app  # noqa: E402
 from app.services import activity  # noqa: E402
 from app.services.permissions import permissions  # noqa: E402
+from app.services.server_queue import server_queue  # noqa: E402
 
 # Hashing at production cost was most of the suite's runtime.
 _gensalt = bcrypt.gensalt
@@ -168,3 +169,12 @@ def ws_ready(ws) -> dict:
             held.append(frame)
     ws.held_frames = held + getattr(ws, "held_frames", [])
     return presence
+
+
+def drain_jobs(client) -> None:
+    """Wait for the work writes leave for after their response (frames, cache refills)."""
+    async def bounded():
+        with anyio.fail_after(FRAME_TIMEOUT_SECONDS):
+            await server_queue.drain()
+
+    client.portal.call(bounded)

@@ -6,6 +6,12 @@ from datetime import datetime, timezone
 
 import pytest
 
+from app.db_timing import own_query_stats
+from app.models.Message import Message
+from app.models.ReadState import ReadState
+from app.models.User import User
+from app.models.UserToServer import UserToServer
+from app.services.read_state import batch_channel_state, batch_channel_states
 from tests.conftest import ORIGIN, create_channel, create_server, register, ws_ready
 
 HEADERS = {"origin": ORIGIN}
@@ -434,3 +440,85 @@ def test_closing_the_last_socket_sends_offline(two_members):
 
         assert alice_ws.receive_json() == {
             "type": "presence_update", "user_id": bob["id"], "online": False}
+
+
+# --- many users at once ----------------------------------------------------
+
+def test_batch_channel_states_matches_one_user_at_a_time(two_members):
+    alice_client, alice, bob_client, bob, server, channel = two_members
+    other = create_channel(alice_client, server["id"], name="other")
+    sid = server["id"]
+
+    async def scenario():
+        users = [await User.create(username=f"reader{i}", password_hash="x") for i in range(3)]
+        for user in users:
+            await UserToServer.create(user=user, server_id=sid)
+        messages = []
+        for _ in range(3):
+            messages.append(await Message.create(
+                uuid=uuid.uuid4(), content="x", author_id=alice["id"], server_id=sid,
+                channel_id=channel["id"], timestamp=datetime.now(timezone.utc)))
+        deleted_id = messages[1].id
+        await messages[1].delete()
+        read, behind, deleted = users
+        await ReadState.create(user=read, channel_id=channel["id"],
+                               last_read_message_id=messages[2].id)
+        await ReadState.create(user=behind, channel_id=channel["id"],
+                               last_read_message_id=messages[0].id)
+        await ReadState.create(user=deleted, channel_id=channel["id"],
+                               last_read_message_id=deleted_id)
+        wanted = {user.id: [channel["id"], other["id"]] for user in users}
+
+        with own_query_stats() as stats:
+            batched = await batch_channel_states(wanted)
+        one_by_one = {user_id: await batch_channel_state(user_id, ids)
+                      for user_id, ids in wanted.items()}
+        return batched, one_by_one, stats.count, [str(m.uuid) for m in messages]
+
+    batched, one_by_one, queries, uuids = alice_client.portal.call(scenario)
+    assert batched == one_by_one
+    states = list(batched.values())
+    assert [s[channel["id"]]["last_read_message_id"] for s in states] == [uuids[2], uuids[0], uuids[0]]
+    assert all(s[channel["id"]]["last_message_id"] == uuids[2] for s in states)
+    assert all(s[other["id"]] == {"last_read_message_id": None, "last_message_id": None}
+               for s in states)
+    assert queries == 5
+
+
+def test_batch_channel_states_queries_do_not_grow_with_deleted_markers(two_members):
+    alice_client, alice, _, _, server, channel = two_members
+    other = create_channel(alice_client, server["id"], name="other")
+    sid = server["id"]
+
+    async def scenario():
+        channels = {}
+        for channel_id, deleted in ((channel["id"], 2), (other["id"], 0)):
+            messages = [await Message.create(
+                uuid=uuid.uuid4(), content="x", author_id=alice["id"], server_id=sid,
+                channel_id=channel_id, timestamp=datetime.now(timezone.utc)) for _ in range(4)]
+            deleted_id = messages[deleted].id
+            await messages[deleted].delete()
+            read = str(messages[deleted - 1].uuid) if deleted else None
+            channels[channel_id] = (read, str(messages[3].uuid), deleted_id)
+        counts, states = {}, {}
+        for members in (2, 20):
+            users = [await User.create(username=f"gone{members}_{i}", password_hash="x")
+                     for i in range(members)]
+            for user in users:
+                for channel_id, (_, _, deleted_id) in channels.items():
+                    await ReadState.create(
+                        user=user, channel_id=channel_id, last_read_message_id=deleted_id)
+            with own_query_stats() as stats:
+                states[members] = await batch_channel_states(
+                    {user.id: list(channels) for user in users})
+            counts[members] = stats.count
+        return counts, states, channels
+
+    counts, states, channels = alice_client.portal.call(scenario)
+    assert counts[2] == counts[20]
+    for members, by_user in states.items():
+        assert len(by_user) == members
+        for per_channel in by_user.values():
+            for channel_id, (read, last, _) in channels.items():
+                assert per_channel[channel_id] == {
+                    "last_read_message_id": read, "last_message_id": last}

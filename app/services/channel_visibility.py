@@ -1,3 +1,5 @@
+from collections.abc import Collection
+from dataclasses import dataclass
 from typing import Any, Mapping
 
 from ..models.Channel import Channel
@@ -6,8 +8,9 @@ from ..models.Server import Server
 from ..permissions import Permission
 from . import channel_layout, read_state
 from .permissions import MemberView, load_rules, member_views, permissions
+from .server_queue import server_queue
 from .voice_moderation import publish_sources, server_muted_attributes
-from .voice_presence import remove_from_voice, voice_channels_of
+from .voice_presence import remove_from_voice, voice_channels_in
 
 
 def filter_layout(layout: dict, view: MemberView | None) -> dict:
@@ -40,11 +43,26 @@ def filter_settings(settings: dict | None, view: MemberView | None) -> dict:
 async def private_flags(server_id: int) -> tuple[set[int], set[int]]:
     """The channels and the categories @everyone can't view."""
     server = await Server.get(id=server_id)
-    rules = await load_rules(server)
-    return (
-        {cid for cid in rules.channels if rules.is_private(channel_id=cid)},
-        {gid for gid in rules.group_ids if rules.is_private(group_id=gid)},
-    )
+    return (await load_rules(server)).private_flags()
+
+
+@dataclass
+class ServerState:
+    """What visibility frames are built from, read once per fan-out."""
+    channels: dict[int, Channel]
+    groups: dict[int, ChannelGroup]
+    layout: dict
+    private_channels: set[int]
+    private_groups: set[int]
+
+
+async def load_state(server: Server) -> ServerState:
+    channels = await Channel.filter(server_id=server.id).order_by("position", "id")
+    groups = await ChannelGroup.filter(server_id=server.id).order_by("position", "id")
+    private_channels, private_groups = (await load_rules(server)).private_flags()
+    return ServerState(
+        {channel.id: channel for channel in channels}, {group.id: group for group in groups},
+        channel_layout.layout_of(channels, groups), private_channels, private_groups)
 
 
 def group_payload(group: ChannelGroup, private_groups: set[int]) -> dict:
@@ -86,70 +104,93 @@ def permissions_frame(server_id: int, view: MemberView) -> dict:
 
 
 async def announce_visibility(
-    app_state: Any, server: Server,
+    app_state: Any, server_id: int, state: ServerState,
     before: Mapping[int, MemberView], after: Mapping[int, MemberView],
     *, exclude_user_id: int | None = None,
+    flipped_channels: Collection[int] = (), flipped_groups: Collection[int] = (),
 ) -> None:
     """Tell every member what changed for them: channels and categories they
     lost or gained, their new masks, and the voice rooms they may no longer
     be in or speak in. *exclude_user_id* (the actor, who has the result from
-    the response) gets only lost channels and mask changes."""
+    the response) gets only lost channels and mask changes. Channels and
+    categories in *flipped_channels* / *flipped_groups* changed their private
+    flag: those who keep seeing them get the new object."""
     from ..routers.channels import ChannelResponse
 
     comms = getattr(app_state, "comms", None)
     presence = getattr(app_state, "voice_presence", None)
     moderation = getattr(app_state, "voice_moderation", None)
-    channels = {channel.id: channel for channel in await Channel.filter(server_id=server.id)}
-    groups = {group.id: group for group in await ChannelGroup.filter(server_id=server.id)}
-    private_channels, private_groups = await private_flags(server.id)
-    layout = await channel_layout.get_layout(server.id)
+    members = [(user_id, before[user_id], new) for user_id, new in after.items()
+               if user_id in before]
+    gained = {
+        user_id: (set() if user_id == exclude_user_id
+                  else (new.visible_channels() - old.visible_channels()) & set(state.channels))
+        for user_id, old, new in members}
+    read_states = {}
+    if comms is not None:
+        read_states = await read_state.batch_channel_states({
+            user_id: sorted(ids) for user_id, ids in gained.items() if ids})
+    channel_payloads: dict[int, dict] = {}
+    group_payloads: dict[int, dict] = {}
 
-    for user_id, new in after.items():
-        old = before.get(user_id)
-        if old is None:
-            continue
-        lost = (old.visible_channels() - new.visible_channels()) & set(channels)
-        gained = new.visible_channels() - old.visible_channels()
-        lost_groups = (old.groups - new.groups) & set(groups)
-        gained_groups = new.groups - old.groups
-
+    for user_id, old, new in members:
         actor = user_id == exclude_user_id
+        lost = (old.visible_channels() - new.visible_channels()) & set(state.channels)
+        lost_groups = (old.groups - new.groups) & set(state.groups)
+        gained_groups = (new.groups - old.groups) & set(state.groups)
+
         if comms is not None:
             for channel_id in sorted(lost):
                 await comms.send_to_user(user_id, {
-                    "type": "channel_deleted", "server_id": server.id, "channel_id": channel_id,
+                    "type": "channel_deleted", "server_id": server_id, "channel_id": channel_id,
                     "reason": "no_access"})
             for group_id in sorted(gained_groups) if not actor else []:
                 await comms.send_to_user(user_id, {
-                    "type": "channel_group_created", "server_id": server.id,
-                    "group": group_payload(groups[group_id], private_groups)})
-            gained = set() if actor else gained
-            state = await read_state.batch_channel_state(user_id, sorted(gained)) if gained else {}
-            for channel_id in sorted(gained):
+                    "type": "channel_group_created", "server_id": server_id,
+                    "group": group_payload(state.groups[group_id], state.private_groups)})
+            for channel_id in sorted(gained[user_id]):
                 payload = ChannelResponse.from_channel(
-                    channels[channel_id],
-                    last_read_message_id=state.get(channel_id, {}).get("last_read_message_id"),
-                    last_message_id=state.get(channel_id, {}).get("last_message_id"),
-                    private=channel_id in private_channels,
+                    state.channels[channel_id],
+                    last_read_message_id=read_states[user_id][channel_id]["last_read_message_id"],
+                    last_message_id=read_states[user_id][channel_id]["last_message_id"],
+                    private=channel_id in state.private_channels,
                 )
                 await comms.send_to_user(user_id, {
-                    "type": "channel_created", "server_id": server.id,
+                    "type": "channel_created", "server_id": server_id,
                     "channel": payload.model_dump(mode="json")})
-            mine = filter_layout(layout, new)
+            mine = filter_layout(state.layout, new)
             for group_id in sorted(lost_groups) if not actor else []:
                 await comms.send_to_user(user_id, {
-                    "type": "channel_group_deleted", "server_id": server.id,
+                    "type": "channel_group_deleted", "server_id": server_id,
                     "group_id": group_id, "layout": mine})
             if old.mask != new.mask or old.differing_masks() != new.differing_masks():
-                await comms.send_to_user(user_id, permissions_frame(server.id, new))
+                await comms.send_to_user(user_id, permissions_frame(server_id, new))
+            for group_id in sorted(flipped_groups):
+                if group_id in state.groups and group_id in old.groups and group_id in new.groups:
+                    if group_id not in group_payloads:
+                        group_payloads[group_id] = group_payload(
+                            state.groups[group_id], state.private_groups)
+                    await comms.send_to_user(user_id, {
+                        "type": "channel_group_updated", "server_id": server_id,
+                        "group": group_payloads[group_id]})
+            for channel_id in sorted(flipped_channels):
+                if channel_id in state.channels and old.can_view(channel_id) and new.can_view(channel_id):
+                    if channel_id not in channel_payloads:
+                        channel_payloads[channel_id] = ChannelResponse.from_channel(
+                            state.channels[channel_id],
+                            private=channel_id in state.private_channels).model_dump(
+                            mode="json", exclude={"last_read_message_id", "last_message_id"})
+                    await comms.send_to_user(user_id, {
+                        "type": "channel_updated", "server_id": server_id,
+                        "channel": channel_payloads[channel_id]})
 
-        for channel_id in await voice_channels_of(presence, server.id, user_id):
+        for channel_id in voice_channels_in(presence, state.channels, user_id):
             was = old.channels.get(channel_id, Permission(0))
             now = new.channels.get(channel_id, Permission(0))
             if not now & Permission.CONNECT:
                 await remove_from_voice(presence, [channel_id], user_id)
             elif (was ^ now) & (Permission.SPEAK | Permission.STREAM):
-                server_muted = moderation is not None and moderation.is_muted(server.id, user_id)
+                server_muted = moderation is not None and moderation.is_muted(server_id, user_id)
                 await presence.update_participant(
                     channel_id, user_id, publish_sources(now, server_muted),
                     server_muted_attributes(server_muted))
@@ -166,6 +207,7 @@ class visibility_change:
         self.exclude_user_id = exclude_user_id
 
     async def __aenter__(self) -> "visibility_change":
+        await server_queue.idle(self.server.id)
         self.before = await member_views(self.server)
         return self
 
@@ -174,5 +216,5 @@ class visibility_change:
             return
         permissions.invalidate(self.server.id)
         await announce_visibility(
-            self.app_state, self.server, self.before, await member_views(self.server),
-            exclude_user_id=self.exclude_user_id)
+            self.app_state, self.server.id, await load_state(self.server), self.before,
+            await member_views(self.server), exclude_user_id=self.exclude_user_id)

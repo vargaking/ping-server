@@ -1,7 +1,7 @@
 import asyncio
 import logging
 import os
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass
 
 from livekit import api
@@ -321,6 +321,16 @@ async def voice_channels_of(
     server_channels = await Channel.filter(
         server_id=server_id, type="voice", id__in=in_voice).values_list("id", flat=True)
     return list(server_channels)
+
+
+def voice_channels_in(
+    presence: VoicePresence | None, channels: Mapping[int, Channel], user_id: int
+) -> list[int]:
+    """The voice channels among *channels* the user is in, without a query."""
+    if presence is None:
+        return []
+    return [channel_id for channel_id in presence.channels_of(user_id)
+            if channel_id in channels and channels[channel_id].type == "voice"]
 
 
 async def close_voice_channels(presence: VoicePresence | None, channel_ids) -> None:

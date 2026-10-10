@@ -24,6 +24,7 @@ from ..permissions import (
 from ..services import channel_layout, read_state
 from ..services.channel_visibility import private_flags, visibility_change
 from ..services.permissions import permissions
+from ..services.server_queue import server_queue
 from ..services.attachments import attachments_by_message
 from ..services.reactions import reactions_by_message
 from ..services.replies import reply_json, reply_refs
@@ -424,6 +425,7 @@ async def delete_channel(
 ):
     """Delete a channel and all of its messages."""
 
+    await server_queue.idle(server.id)
     viewers = await permissions.viewers(server.id, channel.id)
     was_voice = channel.type == "voice"
     async with channel_layout.locked_server(server.id):

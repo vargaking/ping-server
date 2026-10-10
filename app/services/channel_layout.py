@@ -1,4 +1,5 @@
 from collections import Counter
+from collections.abc import Iterable
 from contextlib import asynccontextmanager
 from typing import Optional
 
@@ -62,9 +63,8 @@ async def next_group_position(server_id: int) -> int:
     return 0 if not top or top[0] is None else top[0] + 1
 
 
-async def get_layout(server_id: int) -> dict:
-    groups = await ChannelGroup.filter(server_id=server_id).order_by("position", "id")
-    channels = await Channel.filter(server_id=server_id).order_by("position", "id")
+def layout_of(channels: Iterable[Channel], groups: Iterable[ChannelGroup]) -> dict:
+    """The layout of channels and categories already in (position, id) order."""
     by_group: dict[Optional[int], list[int]] = {}
     for channel in channels:
         by_group.setdefault(channel.group_id, []).append(channel.id)
@@ -75,6 +75,12 @@ async def get_layout(server_id: int) -> dict:
             for group in groups
         ],
     }
+
+
+async def get_layout(server_id: int) -> dict:
+    groups = await ChannelGroup.filter(server_id=server_id).order_by("position", "id")
+    channels = await Channel.filter(server_id=server_id).order_by("position", "id")
+    return layout_of(channels, groups)
 
 
 def flatten(layout: dict) -> list[int]:
