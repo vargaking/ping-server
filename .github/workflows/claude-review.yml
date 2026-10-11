@@ -133,7 +133,7 @@ jobs:
             | ([$reads[] | .input.file_path // empty | select(contains(".pr-review/") | not)] | unique | length) as $other
             | [$calls[] | select(.name == "mcp__github_inline_comment__create_inline_comment")] as $comments
             | ([$comments[] | select($failed[.id] | not)] | length) as $posted
-            | ([$result.permission_denials[]? | "\(.tool_name): \(.tool_input.command // .tool_input.file_path // (.tool_input | tojson) | .[0:200])"]) as $denied
+            | ([$result.permission_denials[]? | "\(.tool_name): \(.tool_input.command // .tool_input.file_path // (.tool_input | tojson) | gsub("[[:cntrl:]]"; " ") | .[0:200])"]) as $denied
             | {diff: $diff, other: $other, line: (
                 "Read the diff: \($diff). Other files read: \($other). Turns: \($result.num_turns // "?"). "
                 + "Comments posted: \($posted), failed: \(($comments | length) - $posted). "
