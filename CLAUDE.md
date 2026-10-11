@@ -39,11 +39,12 @@
 - That footer carries a session link when the PR is created. Save the description once more without the footer: the proxy puts it back without the link.
 
 ## Review
-- Every non-draft PR gets an automatic Claude review in CI. It comments inline, and only on real defects. A green `Claude Review` check with no comments means it found nothing. Its job summary has one line: how many files it read, and any tool call that was denied.
-- After opening a PR, wait for it (`gh pr checks <n> --watch`) and read the inline comments (`gh api repos/{owner}/{repo}/pulls/<n>/comments`).
+- Every non-draft PR gets an automatic Claude review in CI. It comments inline, and only on real defects. A green `Claude Review` check with no comments means it read the diff and found nothing that passed the bar. The job fails if it never read the diff, and warns if it read nothing but the diff.
+- Its job summary has one line: whether the diff was read, how many other files it read, comments posted and failed, and any denied tool call.
+- In a local session, after opening a PR, wait for the review (`gh pr checks <n> --watch`) and read the inline comments (`gh api repos/{owner}/{repo}/pulls/<n>/comments`).
 - The reviewer can be wrong. Check each finding against the code before touching anything. Fix the real ones and push. Reply in the thread to the rest with why not.
 - A push triggers a new review. Two fix rounds at most, then leave what's left for the human.
-- A PR that changes `.github/workflows/claude*.yml` gets no review. That is expected.
+- A PR that changes `.github/workflows/claude-review.yml` is skipped, and the summary says "skipped, expected".
 - `@claude <instruction>` in a PR comment makes the CI agent push a fix to that branch.
 - Running in CI you have no Linear access: skip the ticket steps and say in your PR comment what belongs on the ticket.
 
