@@ -8,7 +8,7 @@ sessions, and LiveKit for voice.
 - **WebSocket `/ws`** — chat delivery and presence; identity comes from the
   session cookie, established at the handshake (never from frame contents). Clients may send `{"type": "ping", "t": <number>}`
   and get `{"type": "pong", "t": <same number>}` back.
-- **Storage** — uploads (avatars, server icons) are written to local disk and
+- **Storage** — uploads (avatars, profile banners, server icons) are written to local disk and
   served by the app's StaticFiles mount (or Nginx in production).
 
 ## Requirements
