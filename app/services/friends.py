@@ -135,8 +135,10 @@ async def _delete(
     me_id: int, other_id: int, reason: Reason, **expected,
 ) -> Change:
     a, b = Friendship.normalize_pair(me_id, other_id)
+    # Taken before the delete so a request made right after it is always newer.
+    at = _now()
     deleted = await Friendship.filter(user_a_id=a, user_b_id=b, **expected).delete()
-    return Change(me_id, other_id, None, reason if deleted else None, _now())
+    return Change(me_id, other_id, None, reason if deleted else None, at)
 
 
 async def decline(me_id: int, other_id: int) -> Change:
