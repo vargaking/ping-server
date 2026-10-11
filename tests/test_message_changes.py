@@ -272,6 +272,7 @@ def test_a_cursor_older_than_the_retention_resets(room):
     pytest.param(token(t="2026-01-01T00:00:00"), id="naive time"),
     pytest.param(token(k=7), id="unknown kind"),
     pytest.param(token(i=-1), id="negative row"),
+    pytest.param(token(i=2**31), id="row beyond the id range"),
 ])
 def test_a_cursor_that_does_not_decode_is_400(room, since):
     res = room.carol.get("/messages/changes", params={"since": since})

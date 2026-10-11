@@ -70,12 +70,17 @@ def _parse_time(value: Any) -> datetime:
     return parsed.astimezone(timezone.utc)
 
 
+# Row ids are 32-bit integer columns; a larger id would fail in the query.
+MAX_ROW_ID = 2**31 - 1
+
+
 def decode(cursor: str) -> FeedPosition | None:
     try:
         data = json.loads(base64.urlsafe_b64decode(cursor.encode()))
         row_id = data["i"]
         if (data["v"] != CURSOR_VERSION or data["k"] not in (BEFORE_ROWS, EDITED, DELETED)
-                or not isinstance(row_id, int) or isinstance(row_id, bool) or row_id < 0):
+                or not isinstance(row_id, int) or isinstance(row_id, bool)
+                or not 0 <= row_id <= MAX_ROW_ID):
             return None
         floor = data["f"]
         return FeedPosition(
