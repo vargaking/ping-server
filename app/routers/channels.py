@@ -86,21 +86,32 @@ class HistoryPage:
     has_newer: bool
 
 
+def _message_id(value: Optional[str]) -> Optional[UUID]:
+    if not value:
+        return None
+    try:
+        return UUID(value)
+    except ValueError:
+        raise HTTPException(status_code=422, detail="Not a message id")
+
+
 async def history_page(
     query,
     order_field: str,
     fields: tuple[str, ...],
     *,
     before: Optional[str],
-    around: Optional[UUID],
-    after: Optional[UUID],
+    around: Optional[str],
+    after: Optional[str],
     limit: int,
 ) -> HistoryPage:
     """One page of a thread's history; query is already scoped to the thread.
 
     before and after walk away from a position, around centres a window on
-    one message. Every mode returns its rows newest first.
+    one message. Every mode returns its rows newest first. around and after
+    are parsed here rather than by FastAPI so that access is checked first.
     """
+    around, after = _message_id(around), _message_id(after)
     if sum((bool(before), around is not None, after is not None)) > 1:
         raise HTTPException(
             status_code=422, detail="Use only one of before, around and after")
@@ -280,8 +291,8 @@ class ReadMarkerUpdate(BaseModel):
 async def get_channel_messages(
     channel_id: int,
     before: Optional[str] = None,
-    around: Optional[UUID] = None,
-    after: Optional[UUID] = None,
+    around: Optional[str] = None,
+    after: Optional[str] = None,
     limit: int = HISTORY_PAGE_SIZE,
     post_id: Optional[int] = None,
     channel: Channel = Depends(channel_from_path),

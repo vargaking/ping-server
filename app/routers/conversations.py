@@ -240,8 +240,8 @@ CONVERSATION_FIELDS = (
 async def get_conversation_messages(
     conversation_id: int,
     before: Optional[str] = None,
-    around: Optional[UUID] = None,
-    after: Optional[UUID] = None,
+    around: Optional[str] = None,
+    after: Optional[str] = None,
     limit: int = HISTORY_PAGE_SIZE,
     current_user: User = Depends(get_current_user),
 ):

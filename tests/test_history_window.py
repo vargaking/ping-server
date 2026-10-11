@@ -259,9 +259,11 @@ def test_malformed_window_target_is_422(thread, param):
     assert res.status_code == 422
 
 
+@pytest.mark.parametrize("valid", [True, False], ids=["valid", "malformed"])
 @pytest.mark.parametrize("param", ["around", "after"])
-def test_window_checks_access_first(thread, world, param):
-    res = world.stranger.get(thread.url, params={**thread.params, param: thread.ids[6]})
+def test_window_checks_access_first(thread, world, param, valid):
+    target = thread.ids[6] if valid else "not-a-uuid"
+    res = world.stranger.get(thread.url, params={**thread.params, param: target})
     if thread.kind == "direct":
         assert res.status_code == 404
         assert res.json()["detail"] == "Conversation not found"
