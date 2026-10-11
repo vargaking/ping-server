@@ -6,11 +6,11 @@ from pydantic_core import PydanticCustomError
 
 USERNAME_MIN_LENGTH = 3
 USERNAME_MAX_LENGTH = 32
-_USERNAME = re.compile(r"^[A-Za-z0-9._-]+$")
+_USERNAME = re.compile(r"[A-Za-z0-9._-]+")
 
 
 def _check_username(value: str) -> str:
-    if not USERNAME_MIN_LENGTH <= len(value) <= USERNAME_MAX_LENGTH or not _USERNAME.match(value):
+    if not USERNAME_MIN_LENGTH <= len(value) <= USERNAME_MAX_LENGTH or not _USERNAME.fullmatch(value):
         raise PydanticCustomError(
             "username",
             "Use 3 to 32 characters: letters, numbers, dots, dashes and underscores.",

@@ -107,7 +107,8 @@ def test_create_is_validated(client):
     assert client.post(url, json={"name": "Taken"}).status_code == 409
     for body in (
         {}, {"name": "   "}, {"name": "x" * 51}, {"name": "a", "color": "red"},
-        {"name": "a", "color": "#12345"}, {"name": "a", "allow": "abc"},
+        {"name": "a", "color": "#12345"}, {"name": "a", "color": "#aabbcc\n"},
+        {"name": "a", "allow": "abc"},
         {"name": "a", "allow": str(1 << 40)}, {"name": "a", "deny": -1},
         {"name": "a", "allow": bits(KICK), "deny": bits(KICK)},
         {"name": "a", "parent_id": 999999}, {"name": "a", "allow": True},

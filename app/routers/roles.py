@@ -26,7 +26,7 @@ from ..services.roles import (
 router = APIRouter(prefix="/servers", tags=["roles"])
 
 ROLE_NAME_MAX = 50
-COLOR_PATTERN = re.compile(r"^#[0-9a-fA-F]{6}$")
+COLOR_PATTERN = re.compile(r"#[0-9a-fA-F]{6}")
 
 
 class RoleResponse(BaseModel):
@@ -73,7 +73,7 @@ class RoleFields(BaseModel):
     @field_validator("color")
     @classmethod
     def _color(cls, value: Optional[str]) -> Optional[str]:
-        if value is not None and not COLOR_PATTERN.match(value):
+        if value is not None and not COLOR_PATTERN.fullmatch(value):
             raise ValueError("Color must look like #rrggbb")
         return value
 

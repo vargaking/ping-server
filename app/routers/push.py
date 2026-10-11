@@ -19,11 +19,11 @@ MAX_ENDPOINT_LENGTH = 2048
 MAX_SUBSCRIPTIONS_PER_USER = 10
 P256DH_BYTES = 65
 AUTH_BYTES = 16
-_BASE64URL = re.compile(r"^[A-Za-z0-9_-]+={0,2}$")
+_BASE64URL = re.compile(r"[A-Za-z0-9_-]+={0,2}")
 
 
 def _key_of_length(value: str, size: int) -> str:
-    if not _BASE64URL.match(value):
+    if not _BASE64URL.fullmatch(value):
         raise ValueError("must be base64url")
     unpadded = value.rstrip("=")
     try:

@@ -405,6 +405,7 @@ def test_bad_endpoints_are_rejected(client, endpoint):
     {"p256dh": P256DH, "auth": b64url(bytes(15))},
     {"p256dh": P256DH, "auth": b64url(bytes(17))},
     {"p256dh": "not base64!", "auth": AUTH},
+    {"p256dh": P256DH + "=\n", "auth": AUTH},
     {"p256dh": P256DH, "auth": "+/+/+/+/+/+/+/+/+/+/+/"},
     {"p256dh": P256DH},
     {},
