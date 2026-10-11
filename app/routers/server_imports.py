@@ -18,7 +18,7 @@ from ..services.attachments import attachments_root, sanitize_filename
 from ..services.imports import storage
 from ..services.imports.runner import ImportRunner
 from ..services.bundle.importer import Visibility
-from ..services.imports.serialize import import_json, planned_messages
+from ..services.imports.serialize import import_json, planned_messages, upload_active
 from ..services.system_user import IMPORTED_USERNAME
 from ..settings import import_chunk_bytes, import_max_bytes
 from ..utils import require_owner
@@ -116,6 +116,8 @@ async def create_import(
     _require_enabled()
     if await ServerImport.filter(server_id=server.id, status__in=RUNNING).exists():
         raise HTTPException(status_code=409, detail="An import is already running")
+    if any(upload_active(r) for r in await ServerImport.filter(server_id=server.id, status="uploading")):
+        raise HTTPException(status_code=409, detail="An upload is already in progress")
     limit = import_max_bytes()
     if body.size > limit:
         raise HTTPException(
