@@ -256,6 +256,7 @@ def test_create_starts_an_upload_with_a_clean_file_name(client, world):
     assert first.json()["source"] is None and first.json()["plan"] is None
     assert first.json()["authors"] == []
 
+    force(client, first.json()["id"], updated_at=datetime.now(timezone.utc) - timedelta(minutes=1))
     named = create(client, world.sid, 5, "C:\\dumps\\my export.zip")
     assert named.json()["filename"] == "my export.zip"
     assert create(client, world.sid, 5, ("a" * 300) + ".zip").status_code == 422
@@ -290,19 +291,54 @@ def test_with_a_limit_of_zero_imports_are_off_but_leftovers_can_be_deleted(
     assert not folder(roots, imp["id"]).exists()
 
 
-def test_a_new_upload_replaces_unfinished_ones_but_not_a_running_import(client, world, roots):
+def test_a_new_upload_is_refused_while_an_import_is_running(client, world):
     first = create(client, world.sid, 100).json()
-    assert put_piece(client, world.sid, first["id"], 0, b"x" * 10).status_code == 200
-    assert folder(roots, first["id"]).exists()
+    force(client, first["id"], status="importing")
 
-    second = create(client, world.sid, 100).json()
-    assert import_row(client, first["id"]) is None and not folder(roots, first["id"]).exists()
-    assert current(client, world.sid)["id"] == second["id"]
-
-    force(client, second["id"], status="importing")
     busy = create(client, world.sid, 100)
     assert (busy.status_code, busy.json()["detail"]) == (409, "An import is already running")
-    assert import_row(client, second["id"]) is not None
+    assert import_row(client, first["id"]) is not None
+
+
+@pytest.mark.parametrize("age, code", [(0, 409), (35, 201)])
+def test_a_new_upload_waits_while_another_one_is_sending(client, world, roots, age, code):
+    first = create(client, world.sid, 100).json()
+    assert put_piece(client, world.sid, first["id"], 0, b"x" * 10).status_code == 200
+    force(client, first["id"], updated_at=datetime.now(timezone.utc) - timedelta(seconds=age))
+
+    second = create(client, world.sid, 100)
+    assert second.status_code == code
+    if code == 409:
+        assert second.json()["detail"] == "An upload is already in progress"
+        assert import_row(client, first["id"]) is not None and folder(roots, first["id"]).exists()
+    else:
+        assert import_row(client, first["id"]) is None and not folder(roots, first["id"]).exists()
+        assert current(client, world.sid)["id"] == second.json()["id"]
+
+
+@pytest.mark.parametrize("status, age, active", [
+    ("uploading", 0, True),
+    ("uploading", 25, True),
+    ("uploading", 35, False),
+    ("ready", 0, False),
+    ("failed", 0, False),
+])
+def test_an_upload_is_active_while_pieces_keep_arriving(client, world, status, age, active):
+    imp = create(client, world.sid, 100).json()
+    force(client, imp["id"], status=status,
+          updated_at=datetime.now(timezone.utc) - timedelta(seconds=age))
+
+    assert current(client, world.sid)["upload_active"] is active
+
+
+def test_a_piece_makes_a_quiet_upload_active_again(client, world):
+    imp = create(client, world.sid, 100).json()
+    assert imp["upload_active"] is True
+    force(client, imp["id"], updated_at=datetime.now(timezone.utc) - timedelta(seconds=60))
+    assert current(client, world.sid)["upload_active"] is False
+
+    assert put_piece(client, world.sid, imp["id"], 0, b"x" * 10).status_code == 200
+    assert current(client, world.sid)["upload_active"] is True
 
 
 # Uploading
@@ -902,6 +938,7 @@ def test_progress_goes_to_the_owner_and_the_end_to_every_member(client, world, m
         assert {f["server_id"] for f in shown} == {world.sid}
         assert {f["import"]["status"] for f in shown} >= {"unpacking", "ready"}
         assert all(f["import"]["id"] == got["id"] for f in shown)
+        assert all(f["import"]["upload_active"] is False for f in shown)
         assert all(
             f["import"]["plan"] is None and f["import"]["result"] is None
             and f["import"]["authors"] == [] for f in shown)

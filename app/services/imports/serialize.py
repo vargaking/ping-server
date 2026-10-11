@@ -1,6 +1,9 @@
 """The Import object the API and the WebSocket frames carry."""
+from datetime import datetime, timedelta, timezone
+
 from ...models.ServerImport import ServerImport
 
+UPLOAD_ACTIVE_FOR = timedelta(seconds=30)
 _PLAN_EXTRAS = ("authors", "seen", "private_seen", "private_selection")
 
 
@@ -26,6 +29,12 @@ def author_list(row: ServerImport) -> list[dict]:
         for a in (row.plan or {}).get("authors", [])]
 
 
+def upload_active(row: ServerImport, now: datetime | None = None) -> bool:
+    """Whether an upload is being written right now: a piece arrived recently."""
+    return (row.status == "uploading"
+            and (now or datetime.now(timezone.utc)) - row.updated_at < UPLOAD_ACTIVE_FOR)
+
+
 def import_json(row: ServerImport, *, light: bool = False) -> dict:
     """*light* leaves out the plan, the result and the authors, which can be
     large; WebSocket frames use it."""
@@ -38,6 +47,7 @@ def import_json(row: ServerImport, *, light: bool = False) -> dict:
         "filename": row.filename,
         "size": row.size,
         "received": row.received,
+        "upload_active": upload_active(row),
         "source": source,
         "private_channels": dict((row.plan or {}).get("private_selection") or {}),
         "progress": row.progress,
