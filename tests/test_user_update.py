@@ -32,7 +32,7 @@ def test_rename_to_a_free_name(client):
     assert client.get("/auth/me").json()["username"] == "new.name-1_"
 
 
-@pytest.mark.parametrize("username", ["ab", "a" * 33, "with space", "at@sign", "", "[imported]"])
+@pytest.mark.parametrize("username", ["ab", "a" * 33, "with space", "at@sign", "", "[imported]", "alice\n"])
 def test_invalid_usernames_are_refused_with_a_readable_message(client, username):
     me = register(client)
     res = client.put(f"/users/{me['id']}", json={"username": username})

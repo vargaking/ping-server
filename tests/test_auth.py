@@ -1,5 +1,7 @@
 from datetime import datetime, timedelta, timezone
 
+import pytest
+
 from app.models.Token import Token
 from tests.conftest import PASSWORD, register
 
@@ -38,20 +40,9 @@ def test_register_short_password_rejected(client):
     assert "password" in _error_fields(res)
 
 
-def test_register_short_username_rejected(client):
-    res = _register(client, "ab", PASSWORD)
-    assert res.status_code == 422
-    assert "username" in _error_fields(res)
-
-
-def test_register_long_username_rejected(client):
-    res = _register(client, "x" * 33, PASSWORD)
-    assert res.status_code == 422
-    assert "username" in _error_fields(res)
-
-
-def test_register_invalid_username_charset_rejected(client):
-    res = _register(client, "bad name!", PASSWORD)
+@pytest.mark.parametrize("username", ["ab", "x" * 33, "bad name!", "alice\n"])
+def test_register_refuses_an_invalid_username(client, username):
+    res = _register(client, username, PASSWORD)
     assert res.status_code == 422
     assert "username" in _error_fields(res)
 
