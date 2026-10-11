@@ -21,6 +21,7 @@ from ..models.User import User
 from ..permissions import Permission, require_channel
 from ..services import forum
 from ..services.attachments import attachments_by_message, delete_file
+from ..services.message_changes import write_tombstone
 from ..services.message_content import InvalidContent, normalize_content, serialize
 from ..services.reactions import (
     MAX_DISTINCT_EMOJIS_PER_MESSAGE,
@@ -188,6 +189,7 @@ async def delete_message(
         message_id=message.id).values_list("storage_path", flat=True)
     async with in_transaction():
         await message.delete()
+        await write_tombstone(message)
         if post is not None:
             await ForumPost.filter(id=post.id, reply_count__gt=0).update(
                 reply_count=F("reply_count") - 1)
