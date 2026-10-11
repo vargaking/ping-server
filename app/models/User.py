@@ -11,6 +11,7 @@ class User(models.Model):
     password_hash = fields.TextField()
     is_platform_admin = fields.BooleanField(default=False)
     last_active_at = fields.DatetimeField(null=True, db_index=True)
+    whats_new_seen_id = fields.CharField(max_length=12, null=True)
 
     def set_password(self, password: str):
         salt = bcrypt.gensalt()
