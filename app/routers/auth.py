@@ -13,6 +13,7 @@ from ..rate_limit import limiter
 from ..services import attachments as attachment_service
 from ..services.system_user import IMPORTED_USERNAME
 from ..services.usernames import Username
+from ..services.voice_presence import remove_from_voice
 from ..settings import auth_rate_limit
 from .users import UserResponse
 
@@ -132,10 +133,18 @@ async def logout(request: Request, response: Response):
     """
     token = request.cookies.get("access_token")
     if token:
+        user_ids = await Token.filter(token=token).values_list("user_id", flat=True)
+        user_id = user_ids[0] if user_ids else None
         await Token.filter(token=token).delete()
         comms = getattr(request.app.state, "comms", None)
         if comms is not None:
             await comms.close_session(token)
+        # Voice is one session per user, so a call on another device must survive.
+        still_online = comms is not None and comms.connection_manager.is_online(user_id)
+        if user_id is not None and not still_online:
+            presence = getattr(request.app.state, "voice_presence", None)
+            if presence is not None:
+                await remove_from_voice(presence, presence.channels_of(user_id), user_id)
     response.delete_cookie("access_token", path="/")
     return {"detail": "Logged out"}
 

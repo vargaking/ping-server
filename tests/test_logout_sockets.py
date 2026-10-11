@@ -2,7 +2,9 @@
 import pytest
 from starlette.websockets import WebSocketDisconnect
 
-from tests.conftest import ORIGIN, PASSWORD, create_server, register, ws_ready
+from app.services.voice_presence import VoiceParticipant, VoicePresence
+from tests.conftest import (
+    ORIGIN, PASSWORD, create_channel, create_server, register, ws_ready)
 from tests.test_websocket import join
 
 HEADERS = {"origin": ORIGIN}
@@ -121,3 +123,85 @@ def test_logout_without_cookie_is_ok(client):
 def test_logout_with_unknown_cookie_is_ok(client):
     client.cookies.set("access_token", "forged")
     assert client.post("/auth/logout").status_code == 200
+
+
+class VoiceSource:
+    def __init__(self, fail=False):
+        self.fail = fail
+        self.removed = []
+
+    async def fetch(self):
+        return {}
+
+    async def fetch_channel(self, channel_id):
+        return ()
+
+    async def remove_participant(self, channel_id, user_id):
+        if self.fail:
+            raise RuntimeError("livekit unreachable")
+        self.removed.append((channel_id, user_id))
+
+    async def aclose(self):
+        pass
+
+
+def put_in_voice(client, monkeypatch, user_id, channel_id, source):
+    async def notify(channel_id, participants):
+        pass
+
+    presence = VoicePresence(source, notify)
+    monkeypatch.setattr(client.app.state, "voice_presence", presence)
+    client.portal.call(presence.apply_snapshot, {
+        channel_id: (VoiceParticipant(user_id, muted=False, deafened=False),)})
+
+
+def test_logout_of_the_only_session_leaves_voice(client, monkeypatch):
+    me = register(client)
+    lounge = create_channel(client, create_server(client)["id"], "lounge", "voice")
+    source = VoiceSource()
+    put_in_voice(client, monkeypatch, me["id"], lounge["id"], source)
+
+    with client.websocket_connect("/ws", headers=HEADERS) as ws:
+        ws_ready(ws)
+        assert client.post("/auth/logout").status_code == 200
+
+    assert source.removed == [(lounge["id"], me["id"])]
+
+
+def test_logout_of_one_of_two_sessions_stays_in_voice(client, new_client, monkeypatch):
+    me = register(client, "alice")
+    lounge = create_channel(client, create_server(client)["id"], "lounge", "voice")
+    other = new_client()
+    assert other.post(
+        "/auth/login", json={"username": "alice", "password": PASSWORD}).status_code == 200
+    source = VoiceSource()
+    put_in_voice(client, monkeypatch, me["id"], lounge["id"], source)
+
+    with client.websocket_connect("/ws", headers=HEADERS) as closed_ws, \
+            other.websocket_connect("/ws", headers=HEADERS) as open_ws:
+        ws_ready(closed_ws)
+        ws_ready(open_ws)
+        assert client.post("/auth/logout").status_code == 200
+        assert_closed_unauthenticated(closed_ws)
+        assert source.removed == []
+
+        other.post("/auth/logout")
+        assert_closed_unauthenticated(open_ws)
+    assert source.removed == [(lounge["id"], me["id"])]
+
+
+def test_logout_without_voice_configured(client, monkeypatch):
+    register(client)
+    monkeypatch.setattr(client.app.state, "voice_presence", None)
+    assert client.post("/auth/logout").status_code == 200
+
+
+def test_logout_succeeds_when_livekit_removal_fails(client, monkeypatch):
+    me = register(client)
+    lounge = create_channel(client, create_server(client)["id"], "lounge", "voice")
+    put_in_voice(client, monkeypatch, me["id"], lounge["id"], VoiceSource(fail=True))
+
+    res = client.post("/auth/logout")
+
+    assert res.status_code == 200
+    assert 'access_token=""' in res.headers["set-cookie"]
