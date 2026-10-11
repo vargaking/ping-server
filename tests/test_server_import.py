@@ -1,5 +1,6 @@
 """Importing an export from the server settings: upload, check, map authors,
 import, re-map. Drives the HTTP API; the work itself is the bundle importer's."""
+import asyncio
 import io
 import json
 import shutil
@@ -1035,6 +1036,34 @@ def test_a_failed_import_that_wrote_rows_still_tells_what_changed(client, world,
         assert updated(frames)[-1]["import"]["status"] == "failed"
         assert finished(alice_ws)["channel_ids"] == written
     assert settle(client, world.sid, got["id"])["status"] == "failed"
+
+
+def test_a_cancelled_import_that_wrote_rows_still_tells_what_changed(client, world, monkeypatch):
+    got = ready_import(client, world.sid)
+    real = runner_module.import_bundle
+
+    async def stalls_after_a_batch(bundle, options, progress=None):
+        async def stalls(seen, channel):
+            await asyncio.Event().wait()
+
+        return await real(bundle, options, stalls)
+
+    monkeypatch.setattr(runner_module, "import_bundle", stalls_after_a_batch)
+    with client.websocket_connect("/ws", headers=HEADERS) as owner_ws, \
+            world.alice.websocket_connect("/ws", headers=HEADERS) as alice_ws:
+        ws_ready(owner_ws)
+        ws_ready(alice_ws)
+        assert start(client, world.sid, got["id"]).status_code == 202
+        task = wait_for(lambda: runner()._tasks.get(UUID(got["id"])))
+        wait_for(lambda: counts(client, world.sid)[2] > 0)
+
+        client.portal.call(runner().stop, [UUID(got["id"])])
+
+        written = ids_of(client, world.sid, "off-topic")
+        assert finished(owner_ws)["channel_ids"] == written
+        assert finished(alice_ws)["channel_ids"] == written
+    assert task.cancelled()
+    assert not runner().is_running(UUID(got["id"]))
 
 
 def test_a_failed_import_that_wrote_nothing_sends_no_end(client, world, monkeypatch):

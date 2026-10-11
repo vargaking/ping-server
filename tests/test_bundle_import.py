@@ -1388,6 +1388,35 @@ def test_existing_only_without_handovers_bumps_nothing(client, world, bundle):
     assert revs(client, world.sid) == before and options.touched == set()
 
 
+def test_a_handover_bumps_the_channel_holding_the_rows_not_the_one_mapped_now(
+        client, world, bundle):
+    run_import(client, bundle, world.sid, only={"101"}, authors=authors(world))
+    target = create_channel(client, world.sid, "target")
+
+    _, options = run_import(
+        client, bundle, world.sid, only={"101"}, channel_map={"101": target["id"]},
+        authors=authors(world, a2=world.bob_user["username"]))
+
+    general = channel_named(client, world.sid, "general")
+    assert revs(client, world.sid)["general"] == 2
+    assert revs(client, world.sid)["target"] is None
+    assert options.touched == {general.id}
+
+
+def test_a_handover_into_a_channel_without_a_marker_bumps_it_without_inventing_a_source(
+        client, world, bundle):
+    run_import(client, bundle, world.sid, only={"101"}, authors=authors(world))
+    general = channel_named(client, world.sid, "general")
+    run(client, Channel.filter(id=general.id).update(channel_settings={}))
+    target = create_channel(client, world.sid, "target")
+
+    run_import(
+        client, bundle, world.sid, only={"101"}, channel_map={"101": target["id"]},
+        authors=authors(world, a2=world.bob_user["username"]))
+
+    assert channel_marker(client, general.id) == {"rev": 1}
+
+
 def test_a_handover_into_a_mapped_channel_without_a_marker_records_the_source(
         client, world, bundle):
     general = create_channel(client, world.sid, "general")

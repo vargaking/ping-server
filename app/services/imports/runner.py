@@ -192,6 +192,8 @@ class ImportRunner:
             async with self._lock:
                 await getattr(self, f"_{kind}")(job)
         except asyncio.CancelledError:
+            if job.touched:
+                await self._announce_finished(job)
             raise
         except Exception as exc:
             await self._fail(job, kind, exc)
