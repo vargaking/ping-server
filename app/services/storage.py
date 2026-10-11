@@ -111,7 +111,11 @@ class StorageService:
             return None
 
     async def upload_image(
-        self, file_content: bytes, destination_path: str, *, max_size_px: int
+        self,
+        file_content: bytes,
+        destination_path: str,
+        *,
+        max_size_px: int | tuple[int, int],
     ) -> Optional[str]:
         """Validate, normalise and store an image upload.
 
@@ -119,8 +123,9 @@ class StorageService:
         - sniffs the *real* format with Pillow and rejects non-allowlisted types
           (415 via UnsupportedImageTypeError) — the client-declared MIME/header
           is never trusted
-        - re-encodes to PNG, bounded to a ``max_size_px`` square, which both
-          resizes and strips any non-image payload smuggled in the file
+        - re-encodes to PNG, fitted inside ``max_size_px`` (a square, or a
+          (width, height) box) without upscaling, which both resizes and
+          strips any non-image payload smuggled in the file
 
         Returns the public URL, or ``None`` if the underlying write fails.
         """
@@ -152,8 +157,8 @@ class StorageService:
         try:
             with Image.open(BytesIO(file_content)) as img:
                 img = img.convert("RGBA")
-                # Bound within a max_size_px square, preserving aspect ratio.
-                img.thumbnail((max_size_px, max_size_px))
+                box = (max_size_px, max_size_px) if isinstance(max_size_px, int) else max_size_px
+                img.thumbnail(box)
                 buffer = BytesIO()
                 img.save(buffer, format="PNG")
         except (UnidentifiedImageError, OSError, ValueError, SyntaxError):

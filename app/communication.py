@@ -2,6 +2,9 @@ import logging
 
 from fastapi import WebSocket
 
+from tortoise.expressions import Q
+
+from app.models.Conversation import Conversation
 from app.models.Server import Server
 from app.models.UserToServer import UserToServer
 from app.services.activity import touch_last_active
@@ -137,6 +140,15 @@ class Communication:
                 server_id__in=user_server_ids
             ).values_list("user_id", flat=True)
         ) - {user_id}
+
+    @staticmethod
+    async def get_conversation_partner_ids(user_id: int) -> set[int]:
+        """Return the IDs of users who have a direct-message conversation with
+        *user_id*, whether or not it has any messages."""
+        pairs = await Conversation.filter(
+            Q(user_a_id=user_id) | Q(user_b_id=user_id)
+        ).values_list("user_a_id", "user_b_id")
+        return {uid for pair in pairs for uid in pair} - {user_id}
 
     async def _send_presence_snapshot(
         self,
@@ -274,24 +286,14 @@ class Communication:
         """Notify related users that a user's profile has changed.
 
         Sends a lightweight invalidation message (just the user_id) to users
-        who share a server with the updated user, and to the user's own
-        sockets so their other tabs update too. Clients should fetch the
-        updated profile via REST if they need the new data.
+        who share a server with the updated user, to users who have a direct
+        conversation with them, and to the user's own sockets so their other
+        tabs update too. Clients should fetch the updated profile via REST if
+        they need the new data.
         """
-        related_user_ids = await self.get_related_user_ids(user_id) | {user_id}
-
-        message = {
-            "type": "user_invalidate",
-            "user_id": user_id,
-        }
-
-        for uid in related_user_ids:
-            for ws in self.connection_manager.get_websockets(uid):
-                try:
-                    await ws.send_json(message)
-                except Exception:
-                    logger.warning(
-                        "Failed to send user invalidate to user %s",
-                        uid,
-                        exc_info=True,
-                    )
+        recipients = (
+            await self.get_related_user_ids(user_id)
+            | await self.get_conversation_partner_ids(user_id)
+            | {user_id}
+        )
+        await self.send_to_users(recipients, {"type": "user_invalidate", "user_id": user_id})

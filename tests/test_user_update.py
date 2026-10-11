@@ -1,4 +1,4 @@
-"""PUT /users/{id}: only the username and the public key can be changed there."""
+"""PUT /users/{id}: only the username, the public key and the banner colour can be changed there."""
 from io import BytesIO
 
 import pytest
