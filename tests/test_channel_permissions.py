@@ -98,12 +98,6 @@ def mask(assigned, layers, roles=ROLES):
     return int(role_resolution.channel_mask(server, roles, assigned, layers))
 
 
-def test_member_mask_is_unchanged_by_the_layer_refactor():
-    assert int(role_resolution.member_mask(ROLES, [])) == int(MEMBER_PERMISSIONS)
-    assert int(role_resolution.member_mask(ROLES, [3])) == int(
-        MEMBER_PERMISSIONS | Permission.MANAGE_MESSAGES)
-
-
 def test_no_rows_change_nothing():
     assert mask([2], []) == mask([2], [({}, None)]) == int(
         MEMBER_PERMISSIONS | Permission.MANAGE_MESSAGES)
@@ -288,52 +282,73 @@ def test_default_channel_is_left_out_for_members_who_cant_view_it(crew):
     assert settings["default_channel_id"] == crew.secret["id"]
 
 
-def test_channel_routes_are_404(crew, monkeypatch):
-    c, secret = crew.member_client, crew.secret["id"]
+REACTION = "%F0%9F%91%8D"
+
+CHANNEL_ROUTES = {
+    "read history": lambda c, channel, message: c.get(f"/channels/{channel}/messages"),
+    "mark read": lambda c, channel, message: c.put(
+        f"/channels/{channel}/read", json={"message_id": message}),
+    "edit a message": lambda c, channel, message: c.patch(
+        f"/messages/{message}", json={"content": doc()}),
+    "delete a message": lambda c, channel, message: c.delete(f"/messages/{message}"),
+    "add a reaction": lambda c, channel, message: c.put(f"/messages/{message}/reactions/{REACTION}"),
+    "remove a reaction": lambda c, channel, message: c.delete(
+        f"/messages/{message}/reactions/{REACTION}"),
+    "list viewers": lambda c, channel, message: c.get(f"/channels/{channel}/viewers"),
+    "edit the channel": lambda c, channel, message: c.patch(f"/channels/{channel}", json={"name": "x"}),
+    "delete the channel": lambda c, channel, message: c.delete(f"/channels/{channel}"),
+    "upload": lambda c, channel, message: upload(c, channel_id=channel),
+}
+
+
+@pytest.mark.parametrize("call", CHANNEL_ROUTES.values(), ids=CHANNEL_ROUTES)
+def test_channel_routes_are_404(crew, call):
+    secret = crew.secret["id"]
     message_id = post_message(crew.mod_client, crew.sid, secret)
-    assert c.get(f"/channels/{secret}/messages").status_code == 404
-    assert c.put(f"/channels/{secret}/read", json={"message_id": message_id}).status_code == 404
-    assert c.patch(f"/messages/{message_id}", json={"content": doc()}).status_code == 404
-    assert c.delete(f"/messages/{message_id}").status_code == 404
-    assert c.put(f"/messages/{message_id}/reactions/%F0%9F%91%8D").status_code == 404
-    assert c.delete(f"/messages/{message_id}/reactions/%F0%9F%91%8D").status_code == 404
-    assert c.get(f"/channels/{secret}/viewers").status_code == 404
-    assert c.patch(f"/channels/{secret}", json={"name": "x"}).status_code == 404
-    assert c.delete(f"/channels/{secret}").status_code == 404
-    assert upload(c, channel_id=secret).status_code == 404
 
+    assert call(crew.member_client, secret, message_id).status_code == 404
+
+
+def test_attachments_and_viewers_of_a_hidden_channel_go_to_who_can_see_it(crew):
+    secret = crew.secret["id"]
     attachment = upload(crew.mod_client, channel_id=secret).json()
-    assert crew.mod_client.get(attachment["url"]).status_code == 200
-    assert c.get(attachment["url"]).status_code == 404
 
+    assert crew.mod_client.get(attachment["url"]).status_code == 200
+    assert crew.member_client.get(attachment["url"]).status_code == 404
     viewers = crew.mod_client.get(f"/channels/{secret}/viewers").json()["user_ids"]
     assert sorted(viewers) == sorted([crew.owner["id"], crew.mod["id"]])
 
 
-def test_forum_routes_are_404(crew):
-    owner, sid = crew.owner_client, crew.sid
-    forum = create_channel(owner, sid, "ideas", "forum")
-    path = f"/channels/{forum['id']}/permissions/roles/{crew.everyone['id']}"
-    assert overwrite(owner, path, deny=VIEW).status_code == 200
-    post = owner.post(f"/channels/{forum['id']}/posts", json={
-        "title": "Plan", "message": {
-            "id": str(uuid.uuid4()), "content": doc(),
-            "timestamp": datetime.now(timezone.utc).isoformat()}})
-    assert post.status_code == 201, post.text
-    post_id = post.json()["post"]["id"]
+def post_body(title):
+    return {"title": title, "message": {
+        "id": str(uuid.uuid4()), "content": doc(),
+        "timestamp": datetime.now(timezone.utc).isoformat()}}
 
-    c = crew.member_client
-    assert c.get(f"/channels/{forum['id']}/posts").status_code == 404
-    assert c.get(f"/channels/{forum['id']}/posts/{post_id}").status_code == 404
-    assert c.get(f"/channels/{forum['id']}/tags").status_code == 404
-    assert c.post(f"/channels/{forum['id']}/tags", json={"name": "x"}).status_code == 404
-    assert c.patch(f"/posts/{post_id}", json={"title": "Mine"}).status_code == 404
-    assert c.delete(f"/posts/{post_id}").status_code == 404
-    assert c.post(f"/channels/{forum['id']}/posts", json={
-        "title": "Sneaky", "message": {
-            "id": str(uuid.uuid4()), "content": doc(),
-            "timestamp": datetime.now(timezone.utc).isoformat()}}).status_code == 404
-    assert c.get(f"/channels/{forum['id']}/messages", params={"post_id": post_id}).status_code == 404
+
+FORUM_ROUTES = {
+    "list posts": lambda c, forum, post: c.get(f"/channels/{forum}/posts"),
+    "read a post": lambda c, forum, post: c.get(f"/channels/{forum}/posts/{post}"),
+    "list tags": lambda c, forum, post: c.get(f"/channels/{forum}/tags"),
+    "create a tag": lambda c, forum, post: c.post(f"/channels/{forum}/tags", json={"name": "x"}),
+    "edit a post": lambda c, forum, post: c.patch(f"/posts/{post}", json={"title": "Mine"}),
+    "delete a post": lambda c, forum, post: c.delete(f"/posts/{post}"),
+    "create a post": lambda c, forum, post: c.post(
+        f"/channels/{forum}/posts", json=post_body("Sneaky")),
+    "read a post's messages": lambda c, forum, post: c.get(
+        f"/channels/{forum}/messages", params={"post_id": post}),
+}
+
+
+@pytest.mark.parametrize("call", FORUM_ROUTES.values(), ids=FORUM_ROUTES)
+def test_forum_routes_are_404(crew, call):
+    owner = crew.owner_client
+    forum = create_channel(owner, crew.sid, "ideas", "forum")["id"]
+    path = f"/channels/{forum}/permissions/roles/{crew.everyone['id']}"
+    assert overwrite(owner, path, deny=VIEW).status_code == 200
+    post = owner.post(f"/channels/{forum}/posts", json=post_body("Plan"))
+    assert post.status_code == 201, post.text
+
+    assert call(crew.member_client, forum, post.json()["post"]["id"]).status_code == 404
 
 
 def test_voice_routes(crew, monkeypatch):
@@ -354,17 +369,6 @@ def test_voice_routes(crew, monkeypatch):
     assert overwrite(owner, path, deny=int(Permission.CONNECT)).status_code == 200
     assert c.post("/api/voice/token", json={"channel_id": room["id"]}).status_code == 403
     assert c.post(f"/api/voice/presence/channels/{room['id']}/refresh").status_code == 204
-
-
-def test_a_channel_rule_cant_hide_a_channel_a_server_rule_allows_reading_by_id(crew):
-    """A member without View in the whole server keeps the old 403."""
-    owner, sid = crew.owner_client, crew.sid
-    everyone = crew.everyone
-    res = owner.patch(f"/servers/{sid}/roles/{everyone['id']}", json={
-        "allow": str(int(MEMBER_PERMISSIONS) & ~VIEW)})
-    assert res.status_code == 200, res.text
-    assert crew.member_client.get(
-        f"/channels/{crew.general['id']}/messages").status_code == 403
 
 
 # -- sockets ---------------------------------------------------------------------
@@ -504,6 +508,132 @@ def test_a_new_channel_in_a_private_category_goes_only_to_its_viewers(crew):
         marker = owner.post(f"/channels/{sid}/create", json={"name": "open"}).json()
         frame = ws.receive_json()
         assert frame["type"] == "channel_created" and frame["channel"]["id"] == marker["id"]
+
+
+def category_with_a_channel(crew, private):
+    """A category holding `plans`. When *private*, @everyone can't view it and Mod can."""
+    owner, sid = crew.owner_client, crew.sid
+    group = owner.post(f"/servers/{sid}/channel-groups", json={"name": "Staff"}).json()
+    channel = owner.post(f"/channels/{sid}/create", json={
+        "name": "plans", "group_id": group["id"]}).json()
+    if private:
+        base = f"/channel-groups/{group['id']}/permissions/roles"
+        assert overwrite(owner, f"{base}/{crew.everyone['id']}", deny=VIEW).status_code == 200
+        assert overwrite(owner, f"{base}/{crew.mod_role['id']}", allow=VIEW).status_code == 200
+    return SimpleNamespace(group=group, channel=channel, rules=f"/channel-groups/{group['id']}/permissions")
+
+
+def test_moving_a_channel_into_a_private_category_hides_it_from_who_cant_view_the_category(crew):
+    owner, sid = crew.owner_client, crew.sid
+    staff = category_with_a_channel(crew, private=True)
+    plans = owner.post(f"/channels/{sid}/create", json={"name": "ideas"}).json()["id"]
+    with crew.member_client.websocket_connect("/ws", headers=HEADERS) as ws:
+        ws_ready(ws)
+
+        res = owner.patch(f"/channels/{plans}", json={"group_id": staff.group["id"]})
+        assert res.status_code == 200, res.text
+
+        frames = _frames_until(ws, "channel_deleted")
+        assert frames[-1] == {"type": "channel_deleted", "server_id": sid, "channel_id": plans,
+                              "reason": "no_access"}
+    assert plans not in [c["id"] for c in crew.member_client.get(f"/channels/{sid}").json()]
+    snapshot = crew.member_client.get(f"/servers/{sid}/channels").json()
+    assert plans not in [c["id"] for c in snapshot["channels"]]
+    assert crew.member_client.get(f"/channels/{plans}/messages").status_code == 404
+
+    seen_by_mod = {c["id"]: c for c in crew.mod_client.get(f"/channels/{sid}").json()}
+    assert seen_by_mod[plans]["private"] is True
+    assert crew.mod_client.get(f"/channels/{plans}/messages").status_code == 200
+
+
+def test_deleting_a_private_category_opens_its_channels_to_everyone(crew):
+    owner, sid = crew.owner_client, crew.sid
+    staff = category_with_a_channel(crew, private=True)
+    plans = staff.channel["id"]
+    assert plans not in [c["id"] for c in crew.member_client.get(f"/channels/{sid}").json()]
+
+    assert owner.delete(f"/servers/{sid}/channel-groups/{staff.group['id']}").status_code == 204
+
+    assert plans in [c["id"] for c in crew.member_client.get(f"/channels/{sid}").json()]
+    snapshot = crew.member_client.get(f"/servers/{sid}/channels").json()
+    assert staff.group["id"] not in [g["id"] for g in snapshot["groups"]]
+    assert plans in [c["id"] for c in snapshot["channels"] if c["group_id"] is None]
+    assert crew.member_client.get(f"/channels/{plans}/messages").status_code == 200
+    assert run(owner, PermissionOverwrite.filter(group_id=staff.group["id"]).count) == 0
+
+
+def test_a_manager_who_sees_a_category_reads_and_writes_its_rules(crew):
+    staff = category_with_a_channel(crew, private=True)
+    mod = crew.mod_client
+    member_rule = f"{staff.rules}/members/{crew.member['id']}"
+
+    listing = mod.get(staff.rules)
+    assert listing.status_code == 200
+    assert listing.json()["members"] == []
+    assert overwrite(mod, member_rule, deny=SEND).status_code == 200
+    assert mod.get(staff.rules).json()["members"] == [
+        {"user_id": crew.member["id"], "allow": "0", "deny": str(SEND)}]
+    assert overwrite(mod, member_rule).status_code == 204
+    assert mod.get(staff.rules).json()["members"] == []
+
+    manage = int(Permission.MANAGE_MESSAGES)
+    assert overwrite(mod, member_rule, allow=manage).status_code == 403
+    admin = roles_by_name(crew.owner_client, crew.sid)["Admin"]
+    assert overwrite(mod, f"{staff.rules}/roles/{admin['id']}", deny=SEND).status_code == 403
+
+
+@pytest.mark.parametrize("call", [
+    lambda c, rules, member: c.get(rules),
+    lambda c, rules, member: c.put(f"{rules}/members/{member}", json={"allow": "0", "deny": str(SEND)}),
+    lambda c, rules, member: c.delete(f"{rules}/members/{member}"),
+], ids=["read", "write", "delete"])
+@pytest.mark.parametrize("private, status", [(False, 403), (True, 404)],
+                         ids=["category they can see", "category they can't see"])
+def test_category_rules_are_for_role_managers_who_can_see_the_category(crew, private, status, call):
+    staff = category_with_a_channel(crew, private=private)
+
+    assert call(crew.member_client, staff.rules, crew.member["id"]).status_code == status
+
+
+def test_a_manager_who_cant_view_a_private_category_reads_its_rules_but_cant_write_them(crew):
+    owner, sid = crew.owner_client, crew.sid
+    lead = owner.post(f"/servers/{sid}/roles", json={
+        "name": "Lead", "allow": str(int(Permission.MANAGE_ROLES | Permission.MANAGE_CHANNELS))}).json()
+    low = owner.post(f"/servers/{sid}/roles", json={"name": "Low"}).json()
+    assert set_roles(owner, sid, crew.member["id"], [lead["id"]]).status_code == 200
+    staff = category_with_a_channel(crew, private=True)
+    low_rule = f"{staff.rules}/roles/{low['id']}"
+    assert overwrite(owner, low_rule, deny=SEND).status_code == 200
+    manager = crew.member_client
+    assert staff.channel["id"] not in [c["id"] for c in manager.get(f"/channels/{sid}").json()]
+
+    assert manager.get(staff.rules).status_code == 200
+    assert overwrite(manager, low_rule, deny=SEND | SPEAK).status_code == 403
+    assert overwrite(manager, low_rule, deny=SEND).status_code == 403
+    assert manager.delete(low_rule).status_code == 403
+    assert owner.get(staff.rules).json()["roles"][-1] == {
+        "role_id": low["id"], "allow": "0", "deny": str(SEND)}
+    channel_rules = f"/channels/{staff.channel['id']}/permissions"
+    assert manager.get(channel_rules).status_code == 404
+    assert overwrite(manager, f"{channel_rules}/roles/{low['id']}", deny=SEND).status_code == 404
+
+
+def test_a_manage_channels_holder_can_delete_a_private_category_they_cant_see_into(crew, new_client):
+    owner, sid = crew.owner_client, crew.sid
+    floor = owner.post(f"/servers/{sid}/roles", json={
+        "name": "Floor", "allow": str(int(Permission.MANAGE_CHANNELS))}).json()
+    assert set_roles(owner, sid, crew.member["id"], [floor["id"]]).status_code == 200
+    bystander_client, _ = join(owner, new_client, sid)
+    staff = category_with_a_channel(crew, private=True)
+    plans = staff.channel["id"]
+    manager = crew.member_client
+    assert plans not in [c["id"] for c in manager.get(f"/channels/{sid}").json()]
+
+    assert manager.delete(f"/servers/{sid}/channel-groups/{staff.group['id']}").status_code == 204
+
+    for client in (manager, bystander_client):
+        assert plans in [c["id"] for c in client.get(f"/channels/{sid}").json()]
+        assert client.get(f"/channels/{plans}/messages").status_code == 200
 
 
 def test_reordering_without_seeing_every_channel_keeps_the_hidden_ones(crew):

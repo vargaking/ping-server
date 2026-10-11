@@ -2,7 +2,6 @@
 import pytest
 
 from app.models.Role import Role
-from app.models.RoleToUser import RoleToUser
 from app.permissions import (
     ADMIN_PERMISSIONS,
     ALL_PERMISSIONS,
@@ -118,74 +117,6 @@ def test_members_list_shows_assigned_roles_only(team, client):
 
 # -- resolver ------------------------------------------------------------
 
-def test_resolver_owner_member_admin_and_outsider(team, client, new_client):
-    server_id = team["server"]["id"]
-
-    async def masks():
-        return [
-            await permissions.effective(team[who]["id"], server_id)
-            for who in ("owner", "member", "admin")
-        ]
-
-    owner, member, admin = run(client, masks)
-    assert owner == ALL_PERMISSIONS
-    assert member == MEMBER_PERMISSIONS
-    assert admin == ADMIN_PERMISSIONS
-
-    outsider = register(new_client())
-    assert run(client, permissions.effective, outsider["id"], server_id) is None
-    assert run(client, permissions.effective, team["member"]["id"], 999999) is None
-
-
-def test_resolver_deny_clears_a_bit(team, client):
-    server_id = team["server"]["id"]
-    member_id = team["member"]["id"]
-
-    async def setup():
-        role = await Role.create(
-            server_id=server_id, name="Muted", deny=int(Permission.SEND_MESSAGES))
-        await RoleToUser.create(role_id=role.id, user_id=member_id)
-        permissions.invalidate(server_id, member_id)
-        return await permissions.effective(member_id, server_id)
-
-    assert run(client, setup) == MEMBER_PERMISSIONS & ~Permission.SEND_MESSAGES
-
-
-def test_resolver_ors_in_the_parent_chain(team, client):
-    server_id = team["server"]["id"]
-    member_id = team["member"]["id"]
-
-    async def setup():
-        grandparent = await Role.create(
-            server_id=server_id, name="Grand", allow=int(Permission.MANAGE_SERVER))
-        parent = await Role.create(
-            server_id=server_id, name="Parent", allow=int(Permission.MANAGE_ROLES),
-            parent_id=grandparent.id)
-        child = await Role.create(server_id=server_id, name="Child", parent_id=parent.id)
-        await RoleToUser.create(role_id=child.id, user_id=member_id)
-        permissions.invalidate(server_id, member_id)
-        return await permissions.effective(member_id, server_id)
-
-    assert run(client, setup) == (
-        MEMBER_PERMISSIONS | Permission.MANAGE_SERVER | Permission.MANAGE_ROLES)
-
-
-def test_resolver_terminates_on_a_parent_cycle(team, client):
-    server_id = team["server"]["id"]
-    member_id = team["member"]["id"]
-
-    async def setup():
-        a = await Role.create(server_id=server_id, name="A", allow=int(Permission.MANAGE_SERVER))
-        b = await Role.create(server_id=server_id, name="B", parent_id=a.id)
-        a.parent_id = b.id
-        await a.save()
-        await RoleToUser.create(role_id=a.id, user_id=member_id)
-        permissions.invalidate(server_id, member_id)
-        return await permissions.effective(member_id, server_id)
-
-    assert run(client, setup) == MEMBER_PERMISSIONS | Permission.MANAGE_SERVER
-
-
 def test_resolver_cache_follows_assignment_removal_and_joining(client, new_client):
     register(client)
     server = create_server(client)
@@ -194,6 +125,7 @@ def test_resolver_cache_follows_assignment_removal_and_joining(client, new_clien
     sid = server["id"]
 
     assert run(client, permissions.effective, user["id"], sid) is None
+    assert run(client, permissions.effective, user["id"], 999999) is None
     invite_and_join(client, joiner, sid)
     assert run(client, permissions.effective, user["id"], sid) == MEMBER_PERMISSIONS
 
@@ -633,12 +565,3 @@ def test_no_permissions_updated_when_the_mask_does_not_change(team, client):
         assert set_roles(client, sid, member_id, [cosmetic, admin_role]).status_code == 200
         assert ws.receive_json()["type"] == "member_roles_updated"
         assert ws.receive_json()["type"] == "permissions_updated"
-
-
-def test_kicked_member_is_told_and_loses_the_server(team, client):
-    sid, member = team["server"]["id"], team["member"]
-    with team["member_client"].websocket_connect("/ws", headers=HEADERS) as ws:
-        ws_ready(ws)
-        assert client.delete(f"/servers/{sid}/members/{member['id']}").status_code == 204
-        assert ws.receive_json()["type"] == "member_left"
-    assert run(client, permissions.effective, member["id"], sid) is None

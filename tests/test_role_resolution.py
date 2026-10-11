@@ -1,6 +1,8 @@
 """The pure role resolver: inheritance inside a role, position across roles."""
 from dataclasses import dataclass
 
+import pytest
+
 from app.permissions import ALL_PERMISSIONS, MEMBER_PERMISSIONS, Permission
 from app.services.role_resolution import descendants, member_mask, resolved, would_cycle
 
@@ -27,20 +29,14 @@ def everyone(allow=MEMBER_PERMISSIONS):
     return FakeRole(id=1, allow=int(allow), is_default=True)
 
 
-def test_child_allow_beats_parent_deny():
-    roles = roles_of(
-        FakeRole(id=2, deny=int(KICK)),
-        FakeRole(id=3, allow=int(KICK), parent_id=2),
-    )
-    assert resolved(3, roles) == (int(KICK), 0)
-
-
-def test_child_deny_beats_parent_allow():
-    roles = roles_of(
-        FakeRole(id=2, allow=int(KICK | MANAGE)),
-        FakeRole(id=3, deny=int(KICK), parent_id=2),
-    )
-    assert resolved(3, roles) == (int(MANAGE), int(KICK))
+@pytest.mark.parametrize("parent, child, expected", [
+    pytest.param(dict(deny=int(KICK)), dict(allow=int(KICK)), (int(KICK), 0), id="child allow beats parent deny"),
+    pytest.param(dict(allow=int(KICK | MANAGE)), dict(deny=int(KICK)), (int(MANAGE), int(KICK)),
+                 id="child deny beats parent allow"),
+])
+def test_the_nearer_role_decides(parent, child, expected):
+    roles = roles_of(FakeRole(id=2, **parent), FakeRole(id=3, parent_id=2, **child))
+    assert resolved(3, roles) == expected
 
 
 def test_grandparent_value_survives_when_nothing_nearer_says_anything():
@@ -52,33 +48,19 @@ def test_grandparent_value_survives_when_nothing_nearer_says_anything():
     assert resolved(4, roles) == (int(KICK), 0)
 
 
-def test_muted_above_a_role_that_allows_the_bit_denies_it():
-    roles = roles_of(
-        everyone(),
-        FakeRole(id=2, position=1, allow=int(SEND)),
-        FakeRole(id=3, position=2, deny=int(SEND)),
-    )
-    assert not member_mask(roles, [2, 3]) & SEND
-
-
-def test_muted_below_a_role_that_says_nothing_about_the_bit_still_denies_it():
-    roles = roles_of(
-        everyone(),
-        FakeRole(id=2, position=2, allow=int(KICK)),
-        FakeRole(id=3, position=1, deny=int(SEND)),
-    )
+@pytest.mark.parametrize("other, muted, send, kick", [
+    pytest.param(dict(position=1, allow=int(SEND)), dict(position=2), False, False,
+                 id="muted above a role that allows the bit"),
+    pytest.param(dict(position=2, allow=int(KICK)), dict(position=1), False, True,
+                 id="muted below a role that says nothing about the bit"),
+    pytest.param(dict(position=2, allow=int(SEND)), dict(position=1), True, False,
+                 id="role above muted that allows the bit"),
+])
+def test_muted_is_decided_by_rank(other, muted, send, kick):
+    roles = roles_of(everyone(), FakeRole(id=2, **other), FakeRole(id=3, deny=int(SEND), **muted))
     mask = member_mask(roles, [2, 3])
-    assert not mask & SEND
-    assert mask & KICK
-
-
-def test_role_above_muted_that_allows_the_bit_wins():
-    roles = roles_of(
-        everyone(),
-        FakeRole(id=2, position=2, allow=int(SEND)),
-        FakeRole(id=3, position=1, deny=int(SEND)),
-    )
-    assert member_mask(roles, [2, 3]) & SEND
+    assert bool(mask & SEND) is send
+    assert bool(mask & KICK) is kick
 
 
 def test_unrelated_roles_add_up():

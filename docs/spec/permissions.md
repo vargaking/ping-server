@@ -14,9 +14,9 @@ Test names are short: server tests are `file::test` under `tests/` in this repo;
 - **PERM-02** Any member can read the role list and the member list (owner first, assigned role ids, never @everyone). Outsiders get 404 or 403, never data.
   - permissions::test_roles_are_hidden_from_non_members, test_non_members_get_403_or_404_never_data, test_members_list_shows_assigned_roles_only; members::test_list_members_returns_owner_first_with_join_dates
 - **PERM-03** A new role lands just above @everyone and pushes the others up. Names are trimmed, 1–50 characters, unique in the server. A server holds at most 100 roles.
-  - roles_api::test_new_role_lands_at_position_one_and_the_others_shift_up, test_create_accepts_initial_fields, test_create_is_validated, test_a_server_holds_at_most_one_hundred_roles
+  - roles_api::test_new_role_lands_at_position_one_and_the_others_shift_up, test_create_accepts_initial_fields, test_create_refuses_a_taken_name, test_create_rejects_a_bad_body, test_a_server_holds_at_most_one_hundred_roles
 - **PERM-04** Role fields are validated the same way on create and edit: colour `#rrggbb` or none, known bits only, no bit both allowed and denied, a parent from the same server. Each field can be changed alone.
-  - roles_api::test_create_is_validated, test_create_accepts_integer_permissions_too, test_parent_from_another_server_is_rejected, test_patch_changes_each_field, test_patch_validation
+  - roles_api::test_create_rejects_a_bad_body, test_create_accepts_integer_permissions_too, test_parent_from_another_server_is_rejected, test_patch_changes_each_field, test_patch_rejects_a_bad_body, test_patch_refuses_a_taken_name_and_an_unknown_role
 - **PERM-05** A role can inherit from one parent. A loop is refused ("That would make X inherit from itself"). Deleting a parent keeps its children with their own bits.
   - roles_api::test_a_cycle_is_rejected_with_a_message, test_deleting_a_parent_leaves_children_with_their_own_bits; fe: roles.test (wouldCycle, mirror)
 - **PERM-06** @everyone can't be renamed, deleted, given a parent or a deny; editing its allow changes everyone at once. Admin is an ordinary role. *(open: built-in admin role)*
@@ -31,9 +31,9 @@ Test names are short: server tests are `file::test` under `tests/` in this repo;
 ## Working out a member's permissions
 
 - **PERM-10** Server permissions are @everyone's, then each held role from lowest rank to highest; for each bit the highest role that says anything decides. Unrelated roles add up; a deny on @everyone does nothing.
-  - role_resolution::test_muted_above_a_role_that_allows_the_bit_denies_it, test_muted_below_a_role_that_says_nothing_about_the_bit_still_denies_it, test_role_above_muted_that_allows_the_bit_wins, test_unrelated_roles_add_up, test_default_role_deny_is_ignored_and_unassigned_roles_do_not_apply; roles_api::test_a_role_grants_its_bits, test_muted_above_and_below_a_role_that_allows_the_bit, test_two_unrelated_roles_add_up; fe: roles.test (memberMask, applyLayer — a hand-copied mirror)
+  - role_resolution::test_muted_is_decided_by_rank, test_unrelated_roles_add_up, test_default_role_deny_is_ignored_and_unassigned_roles_do_not_apply; roles_api::test_a_role_grants_its_bits, test_muted_above_and_below_a_role_that_allows_the_bit; fe: roles.test (memberMask, applyLayer — a hand-copied mirror)
 - **PERM-11** Inheritance resolves nearest first. Old data can't break it: a loop stops, a bit both allowed and denied counts as denied, unknown bits drop, equal ranks apply in id order.
-  - role_resolution::test_child_allow_beats_parent_deny, test_child_deny_beats_parent_allow, test_grandparent_value_survives_when_nothing_nearer_says_anything, test_a_parent_cycle_in_old_data_terminates, test_a_bit_in_both_allow_and_deny_of_one_role_counts_as_deny, test_mask_is_limited_to_known_bits, test_equal_positions_are_applied_in_id_order; roles_api::test_a_child_inherits_and_its_deny_wins; permissions::test_resolver_ors_in_the_parent_chain, test_resolver_terminates_on_a_parent_cycle; fe: roles.test (resolveRole, mirror)
+  - role_resolution::test_the_nearer_role_decides, test_grandparent_value_survives_when_nothing_nearer_says_anything, test_a_parent_cycle_in_old_data_terminates, test_a_bit_in_both_allow_and_deny_of_one_role_counts_as_deny, test_mask_is_limited_to_known_bits, test_equal_positions_are_applied_in_id_order; roles_api::test_a_child_inherits_and_its_deny_wins; fe: roles.test (resolveRole, mirror)
 
 ## Who may change roles
 
@@ -53,13 +53,13 @@ Test names are short: server tests are `file::test` under `tests/` in this repo;
 - **PERM-17** Manage Channels lets a member create, edit, move and delete channels and categories.
   - permissions::test_admin_manages_channels; channel_groups::test_plain_member_cannot_write_categories_or_layout; channel_crud::test_non_owner_cannot_update_or_delete
 - **PERM-18** Server name, settings and icon need Manage Server, which no default role has. *(open: built-in admin role)*
-  - permissions::test_admin_cannot_manage_the_server_or_roles, test_channel_order_update_needs_only_manage_channels; the positive path for a non-owner with Manage Server: no test
+  - permissions::test_admin_cannot_manage_the_server_or_roles, test_channel_order_update_needs_only_manage_channels; server_settings::test_a_member_with_manage_server_manages_the_server_but_cannot_delete_it
 - **PERM-19** Kick removes a member, not the owner or someone else who can kick. The kicked member is told and loses the server, their roles and their channel rules.
-  - permissions::test_admin_kicks_a_member, test_owner_can_kick_an_admin, test_kicked_member_is_told_and_loses_the_server; members::test_owner_kicks_member_and_everyone_is_told
+  - permissions::test_admin_kicks_a_member, test_owner_can_kick_an_admin; members::test_owner_kicks_member_and_everyone_is_told
 - **PERM-20** Create Invite makes and manages your own invites; Manage Invites manages everyone's.
   - permissions::test_admin_manages_invites, test_creator_edits_and_revokes_own_invite_without_manage_invites, test_creator_cannot_touch_another_members_invite, test_creator_who_lost_create_invite_cannot_edit_their_invite
 - **PERM-21** Manage Messages lets a member delete others' messages and moderate forum posts. It is a channel permission.
-  - permissions::test_moderators_delete_other_peoples_messages_but_members_do_not; forum::test_moderators_can_edit_pin_lock_and_delete_any_post; granted or taken by a channel rule: no test
+  - permissions::test_moderators_delete_other_peoples_messages_but_members_do_not; forum::test_moderators_can_edit_pin_lock_and_delete_any_post; message_edit_delete::test_a_channel_rule_grants_or_takes_manage_messages
 - **PERM-22** A denied base permission holds everywhere: no View → 403 on reads and lists; no Send → a "forbidden" frame; no Connect → no voice token; Speak and Stream decide what the token may publish.
   - permissions::test_denied_view_channel_blocks_reads_and_downloads, test_denied_send_messages_is_a_forbidden_frame, test_denied_connect_blocks_the_voice_token; voice_token::test_member_without_stream_cannot_publish_screen, test_member_without_speak_and_stream_cannot_publish
 - **PERM-23** Mute and Move let a member server-mute, unmute or disconnect others in voice; not themselves, not the owner, not someone with the same permission unless they are the owner.
@@ -74,11 +74,11 @@ Test names are short: server tests are `file::test` under `tests/` in this repo;
 - **PERM-26** A channel or category is private when @everyone can't view it. There is no separate switch; the Private switch in the Permissions tab is the @everyone View rule.
   - overwrite_fanout::test_channel_updated_only_when_the_private_flag_flips; fe: channelResolution.test (isPrivate, privateRow); e2e: channel-permissions.spec (the switch and the @everyone row are the same setting; category settings: private on and off)
 - **PERM-27** A member who can't view a channel doesn't see it anywhere, and every route by its id answers 404, so it can't be probed. A rule change applies on the next request.
-  - channel_permissions::test_lists_leave_the_channel_out, test_channel_routes_are_404, test_forum_routes_are_404, test_voice_routes, test_a_hidden_channel_is_404_for_its_overwrite_routes; overwrite_fanout::test_reads_right_after_a_write_see_it
+  - channel_permissions::test_lists_leave_the_channel_out, test_channel_routes_are_404, test_attachments_and_viewers_of_a_hidden_channel_go_to_who_can_see_it, test_forum_routes_are_404, test_voice_routes, test_a_hidden_channel_is_404_for_its_overwrite_routes; overwrite_fanout::test_reads_right_after_a_write_see_it
 - **PERM-28** They get none of its live frames, can't post in it, aren't pushed when mentioned there, and aren't offered in its @mention list.
   - channel_permissions::test_a_hidden_member_gets_none_of_the_channels_frames, test_a_hidden_member_cant_send_or_type, test_send_denied_on_one_channel; push::test_a_mention_in_a_private_channel_pushes_only_its_viewers; client mention filter: no test
-- **PERM-29** Reading or writing rules needs Manage Roles and a target you can see. A non-owner writes rules only for roles and members below their rank.
-  - channel_permissions::test_listing_shows_rows_to_role_managers_only, test_a_manager_cant_touch_roles_or_members_at_or_above_them; category rules for a non-owner: no test
+- **PERM-29** Reading or writing rules needs Manage Roles and a target you can see. A non-owner writes rules only for roles and members below their rank. A manager who sees a private category only through Manage Channels can read its rules but every write is refused (403); the same channel answers 404. *(open: a manager who sees a category only through Manage Channels)*
+  - channel_permissions::test_listing_shows_rows_to_role_managers_only, test_a_manager_cant_touch_roles_or_members_at_or_above_them, test_a_manager_who_sees_a_category_reads_and_writes_its_rules, test_category_rules_are_for_role_managers_who_can_see_the_category, test_a_manager_who_cant_view_a_private_category_reads_its_rules_but_cant_write_them; overwrite_fanout::test_a_put_that_changes_nothing_still_checks_permissions
 - **PERM-30** A non-owner can't change a bit they lack in that channel, or save a change that takes away their own View. So a non-owner manager can make a channel private only if a lower role they may edit keeps them in. *(open: non-owner manager making a channel private)*
   - channel_permissions::test_a_manager_cant_grant_a_bit_they_dont_hold_there, test_a_manager_cant_take_away_their_own_view; e2e: channel-permissions.spec (a manager who would lose access is told before anything is sent; a manager can turn Private on while the View write for a lower role is still saving)
 - **PERM-31** A channel imported as "only me" gets one @everyone-denied-View rule (and its new category too). A re-run leaves the rules alone.
@@ -87,18 +87,18 @@ Test names are short: server tests are `file::test` under `tests/` in this repo;
 ## Categories
 
 - **PERM-32** A category's rules apply to its channels unless a channel has its own. A member sees a category if they have Manage Channels, can view it, or can view one channel in it. *(open: a manager who sees a category only through one channel)*
-  - channel_permissions::test_a_private_category_hides_its_channels_until_one_moves_out; overwrite_fanout::test_a_category_write_leaves_channels_with_their_own_rule_alone; the Manage Channels clause: no test
+  - channel_permissions::test_a_private_category_hides_its_channels_until_one_moves_out; overwrite_fanout::test_a_category_write_leaves_channels_with_their_own_rule_alone; channel_permissions::test_a_manager_who_cant_view_a_private_category_reads_its_rules_but_cant_write_them (the Manage Channels clause)
 - **PERM-33** Moving a channel out of a private category shows it; creating one inside shows it only to viewers. Moving a channel into a private category hides it.
-  - channel_permissions::test_a_private_category_hides_its_channels_until_one_moves_out, test_a_new_channel_in_a_private_category_goes_only_to_its_viewers; moving in: no test
-- **PERM-34** Deleting a category keeps its channels and removes its rules, so a formerly private category's channels become visible.
-  - channel_groups::test_delete_group_keeps_channels_and_messages_and_appends_them_to_ungrouped (layout only); what members can see afterwards: no test
+  - channel_permissions::test_a_private_category_hides_its_channels_until_one_moves_out, test_a_new_channel_in_a_private_category_goes_only_to_its_viewers, test_moving_a_channel_into_a_private_category_hides_it_from_who_cant_view_the_category
+- **PERM-34** Deleting a category keeps its channels and removes its rules, so a formerly private category's channels become visible. Manage Channels is enough, even for a private category you can't see into. *(open: deleting a private category opens its channels to everyone)*
+  - channel_groups::test_delete_group_keeps_channels_and_messages_and_appends_them_to_ungrouped (layout only); channel_permissions::test_deleting_a_private_category_opens_its_channels_to_everyone, test_a_manage_channels_holder_can_delete_a_private_category_they_cant_see_into
 
 ## Live updates
 
 - **PERM-35** Members get their masks on connect (`permissions_init`, with differing channel masks of visible channels) and live (`permissions_updated`, only when their own mask changed). Role events reach every member.
   - permissions::test_permissions_init_lists_every_server_the_user_is_in, test_promote_and_demote_notify_the_target_and_the_rest, test_no_permissions_updated_when_the_mask_does_not_change; roles_api::test_only_members_whose_mask_changed_get_permissions_updated, test_role_events_are_broadcast; channel_permissions::test_permissions_init_carries_the_differing_masks_of_visible_channels; client side (serversState.canIn, setPermissions): no test
 - **PERM-36** In a voice room, losing Connect removes the member; losing Speak or Stream cuts only that source.
-  - roles_api::test_denying_speak_takes_the_microphone_away_mid_call, test_losing_connect_removes_the_member_from_the_call, test_changes_that_leave_voice_bits_alone_do_not_touch_the_room; overwrite_fanout::test_members_in_voice_cost_no_queries
+  - roles_api::test_denying_speak_takes_the_microphone_away_mid_call, test_losing_connect_removes_the_member_from_the_call, test_changes_that_leave_voice_bits_alone_do_not_touch_the_room; overwrite_fanout::test_a_rule_that_removes_only_speak_or_stream_cuts_that_source_mid_call, test_members_in_voice_cost_no_queries
 - **PERM-37** A rule change that changes what a member sees tells them: `channel_deleted` (no_access), `channel_created`, category frames, `permissions_updated`. The client then drops the channel, and moves a reader of it to the server home with "You no longer have access".
   - channel_permissions::test_losing_and_gaining_view_over_the_socket; overwrite_fanout::test_a_gained_channel_carries_its_read_state; e2e: channel-permissions.spec (making a channel private takes it away from a member without a reload)
 - **PERM-38** Role managers who can see the target get `permission_overwrite_updated`, and an open Permissions tab applies it without refetching.
@@ -122,35 +122,22 @@ The client copies the server's resolution (PERM-10, 11, 25) to drive the editor.
 ## Findings
 
 **Asserted more than once** (keep the first)
-- PERM-10/11 server: role_resolution::test_unrelated_roles_add_up over roles_api::test_two_unrelated_roles_add_up; role_resolution::test_child_deny_beats_parent_allow over roles_api::test_a_child_inherits_and_its_deny_wins; role_resolution::test_grandparent_value_survives_when_nothing_nearer_says_anything and test_a_parent_cycle_in_old_data_terminates over permissions::test_resolver_ors_in_the_parent_chain (name is stale: it no longer ORs) and test_resolver_terminates_on_a_parent_cycle; permissions::test_resolver_deny_clears_a_bit repeats role_resolution's Muted tests; permissions::test_resolver_owner_member_admin_and_outsider repeats three neighbouring tests.
-- PERM-30: channel_permissions' two 403 tests over the same 403 asserts inside overwrite_fanout::test_a_rejected_write_queues_nothing (keep only its "no frames, no job" part). The same applies to the rank, 404 and hidden-target asserts repeated inside overwrite_fanout::test_a_put_that_changes_nothing_still_checks_permissions.
-- PERM-22: permissions::test_denied_view_channel_blocks_reads_and_downloads over channel_permissions::test_a_channel_rule_cant_hide_a_channel_a_server_rule_allows_reading_by_id (misnamed: it asserts the server-wide 403).
-- PERM-19: members::test_owner_kicks_member_and_everyone_is_told over permissions::test_kicked_member_is_told_and_loses_the_server.
 - PERM-41: overwritesState.test owns the save queue. e2e "a failed save flips back with one toast" and "quick clicks on one row: the last one wins" assert the same; "the toggle changes before a slow server answers" adds only `aria-busy`. Remove the first two, fold the third into "one click sends one request".
 - PERM-40: e2e "private with nobody allowed says only the owner can see it" and the text asserts in "each toggle names where its value comes from" repeat overwrites.test strings. Remove the first; move the three strings only e2e checks ("Overrides:", the inherited-role label, the member row label) to a component test.
 - PERM-26: the Private switch writing the @everyone rule is asserted in five places. Keep e2e "the switch and the @everyone row are the same setting" and the category test; drop the repeats inside the other e2e tests.
 
 **Should be one parametrised test**
-- role_resolution: the three Muted tests; child-allow/child-deny.
-- roles_api: the bad-body loops in test_create_is_validated / test_patch_validation (one case per input); the three "bits you lack" tests; Speak denied by edit vs by assignment; Connect lost by role vs by @everyone.
-- channel_permissions: test_channel_routes_are_404 and test_forum_routes_are_404 (one case per route); hidden vs Send-denied sending.
-- overwrite_fanout: channel vs category for the private-flag flip, the row frame, and "deleted after a private write"; unassign vs delete in the "waits for the queued fan-out" pair.
+- Server: the four "bits you lack" tests in roles_api cover four operations with different setups, and hidden vs Send-denied sending in channel_permissions asserts different things, so they stay separate. So do the private-flag pair and the row-frame pair in overwrite_fanout.
 - fe: roles.test (resolveRole pair, memberMask Muted trio, canAssignRole, rankOf, nameColor); overwrites.test (roleInheritedText, memberInheritedText, visibilityLine); overwritesState.test (the two reset leak tests). No `it.each` exists in these files today.
 
 **Map to no behaviour**
 - e2e "rows open and close from the keyboard": tests the browser's native `<details>`; the app has no key handling there.
-- channel_permissions::test_member_mask_is_unchanged_by_the_layer_refactor (refactor guard); overwrite_fanout's query-budget and cache tests (performance and internals; keep as such, not as behaviour); roles_migration (one-off migration).
+- overwrite_fanout's query-budget and cache tests (performance and internals; keep as such, not as behaviour); roles_migration (one-off migration).
 - fe: overwrites.test's tests of trivial row helpers and the snapshot of the toggle list.
 - Hand-copied twins: the frontend resolution tests copy the server's rule tests case by case, and nothing ties the two together. One shared table of cases read by both suites would replace them.
 
 **Untested, worst regression first**
-1. PERM-34: what members can see after a private category is deleted (leak or permanent hiding).
-2. PERM-33: moving a channel into a private category.
-3. PERM-29/32: category rules for non-owners; the category rules route is never called by a test.
-4. PERM-35 client side: `serversState.canIn` and the masks from `permissions_init` / `permissions_updated` gate the composer, voice, stream and message menus, with only Send exercised (one e2e).
-5. PERM-42: the tab's guards other than losing your own View; they live inside the component.
-6. PERM-21: Manage Messages granted or taken by a channel rule.
-7. PERM-18: a non-owner with Manage Server.
-8. PERM-23 client: which members show mute, move and kick.
-9. PERM-28 client: the @mention list in a private channel.
-10. PERM-36: a channel rule that removes only Speak or Stream mid-call.
+1. PERM-35 client side: `serversState.canIn` and the masks from `permissions_init` / `permissions_updated` gate the composer, voice, stream and message menus, with only Send exercised (one e2e).
+2. PERM-42: the tab's guards other than losing your own View; they live inside the component.
+3. PERM-23 client: which members show mute, move and kick.
+4. PERM-28 client: the @mention list in a private channel.

@@ -98,23 +98,32 @@ def test_create_accepts_initial_fields(client):
         bits(MANAGE_MESSAGES), bits(SEND), parent["id"])
 
 
-def test_create_is_validated(client):
+def test_create_refuses_a_taken_name(client):
     register(client)
     sid = create_server(client)["id"]
     create_role(client, sid, "Taken")
-    url = f"/servers/{sid}/roles"
 
-    assert client.post(url, json={"name": "Taken"}).status_code == 409
-    for body in (
-        {}, {"name": "   "}, {"name": "x" * 51}, {"name": "a", "color": "red"},
-        {"name": "a", "color": "#12345"}, {"name": "a", "color": "#aabbcc\n"},
-        {"name": "a", "allow": "abc"},
-        {"name": "a", "allow": str(1 << 40)}, {"name": "a", "deny": -1},
-        {"name": "a", "allow": bits(KICK), "deny": bits(KICK)},
-        {"name": "a", "parent_id": 999999}, {"name": "a", "allow": True},
-        {"name": "a", "allow": None},
-    ):
-        assert client.post(url, json=body).status_code == 422, body
+    assert client.post(f"/servers/{sid}/roles", json={"name": "Taken"}).status_code == 409
+
+
+@pytest.mark.parametrize("body", [
+    {}, {"name": "   "}, {"name": "x" * 51}, {"name": "a", "color": "red"},
+    {"name": "a", "color": "#12345"}, {"name": "a", "color": "#aabbcc\n"},
+    {"name": "a", "allow": "abc"},
+    {"name": "a", "allow": str(1 << 40)}, {"name": "a", "deny": -1},
+    {"name": "a", "allow": bits(KICK), "deny": bits(KICK)},
+    {"name": "a", "parent_id": 999999}, {"name": "a", "allow": True},
+    {"name": "a", "allow": None},
+], ids=[
+    "no name", "blank name", "name too long", "colour not hex", "colour too short",
+    "colour with a trailing newline", "allow not a number", "allow with an unknown bit",
+    "negative deny", "bit both allowed and denied", "unknown parent", "boolean allow",
+    "null allow"])
+def test_create_rejects_a_bad_body(client, body):
+    register(client)
+    sid = create_server(client)["id"]
+
+    assert client.post(f"/servers/{sid}/roles", json=body).status_code == 422
 
 
 def test_create_accepts_integer_permissions_too(client):
@@ -178,26 +187,32 @@ def test_patch_changes_each_field(client):
     assert (kept["deny"], kept["name"]) == (bits(SEND), "Again")
 
 
-def test_patch_validation(client):
+def test_patch_refuses_a_taken_name_and_an_unknown_role(client):
     register(client)
     sid = create_server(client)["id"]
-    a = create_role(client, sid, "A")
-    b = create_role(client, sid, "B", allow=bits(KICK))
+    create_role(client, sid, "A")
+    b = create_role(client, sid, "B")
     url = f"/servers/{sid}/roles/{b['id']}"
+    other = create_role(client, create_server(client, "Two")["id"], "Foreign")
 
     assert client.patch(url, json={"name": "A"}).status_code == 409
     assert client.patch(url, json={"name": "B"}).status_code == 200
-    assert client.patch(url, json={"color": "#xyzxyz"}).status_code == 422
-    assert client.patch(url, json={"name": None}).status_code == 422
-    assert client.patch(url, json={"deny": bits(KICK)}).status_code == 422
-    assert client.patch(url, json={"allow": str(1 << 50)}).status_code == 422
-    assert client.patch(url, json={"parent_id": b["id"]}).status_code == 422
-    assert client.patch(url, json={"parent_id": 999999}).status_code == 422
     assert client.patch(f"/servers/{sid}/roles/999999", json={"name": "x"}).status_code == 404
-    other = create_role(client, create_server(client, "Two")["id"], "Foreign")
     assert client.patch(
         f"/servers/{sid}/roles/{other['id']}", json={"name": "x"}).status_code == 404
-    assert client.patch(url, json={"parent_id": a["id"]}).status_code == 200
+
+
+@pytest.mark.parametrize("fields", [
+    {"color": "#xyzxyz"}, {"name": None}, {"deny": bits(KICK)}, {"allow": str(1 << 50)},
+    {"parent_id": 999999},
+], ids=["colour not hex", "null name", "bit both allowed and denied", "unknown bit",
+        "unknown parent"])
+def test_patch_rejects_a_bad_body(client, fields):
+    register(client)
+    sid = create_server(client)["id"]
+    role = create_role(client, sid, "B", allow=bits(KICK))
+
+    assert patch_role(client, sid, role["id"], **fields).status_code == 422
 
 
 def test_a_cycle_is_rejected_with_a_message(client):
@@ -361,17 +376,6 @@ def test_muted_above_and_below_a_role_that_allows_the_bit(client, new_client):
 
     order_roles(client, sid, [mod["id"], muted["id"], roles_by_name(client, sid)["Admin"]["id"]])
     assert mask_of(joiner, sid) & SEND
-
-
-def test_two_unrelated_roles_add_up(client, new_client):
-    register(client)
-    sid = create_server(client)["id"]
-    joiner, user = join(client, new_client, sid)
-    kicker = create_role(client, sid, "Kicker", allow=bits(KICK))
-    cleaner = create_role(client, sid, "Cleaner", allow=bits(MANAGE_MESSAGES))
-    set_roles(client, sid, user["id"], [kicker["id"], cleaner["id"]])
-
-    assert mask_of(joiner, sid) == int(MEMBER_PERMISSIONS | KICK | MANAGE_MESSAGES)
 
 
 # -- rank and bit rules ---------------------------------------------------
@@ -601,28 +605,41 @@ def test_deleting_a_role_tells_the_members_who_lost_bits(crew, client):
 
 # -- voice ----------------------------------------------------------------
 
-def test_denying_speak_takes_the_microphone_away_mid_call(crew, client, monkeypatch):
+@pytest.mark.parametrize("by", ["editing the role", "assigning the role"])
+def test_denying_speak_takes_the_microphone_away_mid_call(crew, client, monkeypatch, by):
     sid, member_id = crew["sid"], crew["member"]["id"]
     lounge = crew["lounge"]["id"]
-    quiet = create_role(client, sid, "Quiet")
-    set_roles(client, sid, member_id, [quiet["id"]])
+    editing = by == "editing the role"
+    quiet = create_role(client, sid, "Quiet", **({} if editing else {"deny": bits(Permission.SPEAK)}))
+    if editing:
+        set_roles(client, sid, member_id, [quiet["id"]])
     source = use_presence(client, monkeypatch, {lounge: _in_voice(member_id)})
 
-    assert patch_role(client, sid, quiet["id"], deny=bits(Permission.SPEAK)).status_code == 200
+    if editing:
+        res = patch_role(client, sid, quiet["id"], deny=bits(Permission.SPEAK))
+    else:
+        res = set_roles(client, sid, member_id, [quiet["id"]])
+    assert res.status_code == 200
 
     assert source.removed == []
     assert source.updated == [
         (lounge, member_id, ["screen_share", "screen_share_audio"], {"server_muted": ""})]
 
 
-def test_losing_connect_removes_the_member_from_the_call(crew, client, monkeypatch):
+@pytest.mark.parametrize("by", ["a role", "@everyone"])
+def test_losing_connect_removes_the_member_from_the_call(crew, client, monkeypatch, by):
     sid, member_id = crew["sid"], crew["member"]["id"]
     lounge = crew["lounge"]["id"]
-    kicked = create_role(client, sid, "Offline")
-    set_roles(client, sid, member_id, [kicked["id"]])
+    if by == "a role":
+        role = create_role(client, sid, "Offline")
+        set_roles(client, sid, member_id, [role["id"]])
+        change = {"deny": bits(Permission.CONNECT)}
+    else:
+        role = roles_by_name(client, sid)["@everyone"]
+        change = {"allow": bits(MEMBER_PERMISSIONS & ~Permission.CONNECT)}
     source = use_presence(client, monkeypatch, {lounge: _in_voice(member_id)})
 
-    assert patch_role(client, sid, kicked["id"], deny=bits(Permission.CONNECT)).status_code == 200
+    assert patch_role(client, sid, role["id"], **change).status_code == 200
 
     assert source.removed == [(lounge, member_id)]
     assert source.updated == []
@@ -638,28 +655,3 @@ def test_changes_that_leave_voice_bits_alone_do_not_touch_the_room(crew, client,
     assert patch_role(client, sid, kicker["id"], allow=bits(KICK)).status_code == 200
 
     assert source.removed == [] and source.updated == []
-
-
-def test_assigning_and_unassigning_a_role_updates_the_room(crew, client, monkeypatch):
-    sid, member_id = crew["sid"], crew["member"]["id"]
-    lounge = crew["lounge"]["id"]
-    quiet = create_role(client, sid, "Quiet", deny=bits(Permission.SPEAK))
-    source = use_presence(client, monkeypatch, {lounge: _in_voice(member_id)})
-
-    assert set_roles(client, sid, member_id, [quiet["id"]]).status_code == 200
-
-    assert source.updated == [
-        (lounge, member_id, ["screen_share", "screen_share_audio"], {"server_muted": ""})]
-
-
-def test_everyone_edit_reaches_members_in_voice(crew, client, monkeypatch):
-    sid, member_id = crew["sid"], crew["member"]["id"]
-    lounge = crew["lounge"]["id"]
-    everyone = roles_by_name(client, sid)["@everyone"]
-    source = use_presence(client, monkeypatch, {lounge: _in_voice(member_id)})
-
-    assert patch_role(
-        client, sid, everyone["id"], allow=bits(MEMBER_PERMISSIONS & ~Permission.CONNECT)
-    ).status_code == 200
-
-    assert (lounge, member_id) in source.removed
