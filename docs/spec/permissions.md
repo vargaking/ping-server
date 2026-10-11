@@ -90,8 +90,8 @@ Test names are short: server tests are `file::test` under `tests/` in this repo;
   - channel_permissions::test_a_private_category_hides_its_channels_until_one_moves_out; overwrite_fanout::test_a_category_write_leaves_channels_with_their_own_rule_alone; channel_permissions::test_a_manager_who_cant_view_a_private_category_reads_its_rules_but_cant_write_them (the Manage Channels clause)
 - **PERM-33** Moving a channel out of a private category shows it; creating one inside shows it only to viewers. Moving a channel into a private category hides it.
   - channel_permissions::test_a_private_category_hides_its_channels_until_one_moves_out, test_a_new_channel_in_a_private_category_goes_only_to_its_viewers, test_moving_a_channel_into_a_private_category_hides_it_from_who_cant_view_the_category
-- **PERM-34** Deleting a category keeps its channels and removes its rules, so a formerly private category's channels become visible. Manage Channels is enough, even for a private category you can't see into. *(open: deleting a private category opens its channels to everyone)*
-  - channel_groups::test_delete_group_keeps_channels_and_messages_and_appends_them_to_ungrouped (layout only); channel_permissions::test_deleting_a_private_category_opens_its_channels_to_everyone, test_a_manage_channels_holder_can_delete_a_private_category_they_cant_see_into
+- **PERM-34** Deleting a category keeps its channels and removes its rules, so a formerly private category's channels become visible, and members who keep a channel are told it is public. Manage Channels is enough, even for a private category you can't see into. *(open: deleting a private category opens its channels to everyone)*
+  - channel_groups::test_delete_group_keeps_channels_and_messages_and_appends_them_to_ungrouped (layout only); channel_permissions::test_deleting_a_private_category_opens_its_channels_to_everyone, test_a_manage_channels_holder_can_delete_a_private_category_they_cant_see_into; channel_groups::test_deleting_a_private_category_tells_who_kept_its_channels_they_are_public
 
 ## Live updates
 
