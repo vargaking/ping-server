@@ -1,5 +1,6 @@
 import base64
 import logging
+from dataclasses import dataclass
 from datetime import datetime
 from typing import List, Literal, Optional
 from uuid import UUID
@@ -38,6 +39,21 @@ router = APIRouter(prefix="/channels", tags=["channels"])
 HISTORY_PAGE_SIZE = 50
 MAX_HISTORY_PAGE_SIZE = 100
 
+CHANNEL_FIELDS = (
+    "id",
+    "uuid",
+    "content",
+    "author_id",
+    "channel_id",
+    "server_id",
+    "post_id",
+    "timestamp",
+    "created_at",
+    "edited_at",
+    "reply_to_uuid",
+    "metadata",
+)
+
 
 def _encode_cursor(at: datetime, row_id: int) -> str:
     """Opaque cursor pointing just before a row, keyed by (time, id)."""
@@ -52,6 +68,91 @@ def _decode_cursor(cursor: str) -> tuple[datetime, int]:
         return datetime.fromisoformat(iso), int(message_id)
     except (ValueError, TypeError):
         raise HTTPException(status_code=400, detail="Invalid cursor")
+
+
+def _older_than(order_field: str, at: datetime, row_id: int) -> Q:
+    return Q(**{f"{order_field}__lt": at}) | Q(**{order_field: at, "id__lt": row_id})
+
+
+def _newer_than(order_field: str, at: datetime, row_id: int) -> Q:
+    return Q(**{f"{order_field}__gt": at}) | Q(**{order_field: at, "id__gt": row_id})
+
+
+@dataclass
+class HistoryPage:
+    rows: list[dict]  # newest first
+    next_cursor: Optional[str]
+    has_more: bool
+    has_newer: bool
+
+
+async def history_page(
+    query,
+    order_field: str,
+    fields: tuple[str, ...],
+    *,
+    before: Optional[str],
+    around: Optional[UUID],
+    after: Optional[UUID],
+    limit: int,
+) -> HistoryPage:
+    """One page of a thread's history; query is already scoped to the thread.
+
+    before and after walk away from a position, around centres a window on
+    one message. Every mode returns its rows newest first.
+    """
+    if sum((bool(before), around is not None, after is not None)) > 1:
+        raise HTTPException(
+            status_code=422, detail="Use only one of before, around and after")
+
+    anchor_uuid = around or after
+    anchor = None
+    if anchor_uuid is not None:
+        anchor = await query.filter(uuid=anchor_uuid).first().values(*fields)
+        if anchor is None:
+            raise HTTPException(status_code=404, detail="Message not found")
+        anchor_at, anchor_id = anchor[order_field], anchor["id"]
+
+    newest_first = (f"-{order_field}", "-id")
+    oldest_first = (order_field, "id")
+
+    if around is not None:
+        older_n = limit // 2
+        newer_n = limit - 1 - older_n
+        older = await query.filter(_older_than(order_field, anchor_at, anchor_id)) \
+            .order_by(*newest_first).limit(older_n + 1).values(*fields)
+        newer = await query.filter(_newer_than(order_field, anchor_at, anchor_id)) \
+            .order_by(*oldest_first).limit(newer_n + 1).values(*fields)
+        rows = newer[:newer_n][::-1] + [anchor] + older[:older_n]
+        has_more = len(older) > older_n
+        has_newer = len(newer) > newer_n
+    elif after is not None:
+        newer = await query.filter(_newer_than(order_field, anchor_at, anchor_id)) \
+            .order_by(*oldest_first).limit(limit + 1).values(*fields)
+        rows = newer[:limit][::-1]
+        has_more = True
+        has_newer = len(newer) > limit
+        # Empty page: the cursor sits at the anchor, which the client holds.
+        oldest = rows[-1] if rows else anchor
+        return HistoryPage(
+            rows, _encode_cursor(oldest[order_field], oldest["id"]), has_more, has_newer)
+    else:
+        has_newer = False
+        page_query = query
+        if before:
+            cursor_at, cursor_id = _decode_cursor(before)
+            older_than_cursor = _older_than(order_field, cursor_at, cursor_id)
+            page_query = query.filter(older_than_cursor)
+            has_newer = await query.exclude(older_than_cursor).exists()
+        # Fetch one extra row to tell whether an older page exists.
+        rows = await page_query.order_by(*newest_first).limit(limit + 1).values(*fields)
+        has_more = len(rows) > limit
+        rows = rows[:limit]
+
+    next_cursor = None
+    if has_more and rows:
+        next_cursor = _encode_cursor(rows[-1][order_field], rows[-1]["id"])
+    return HistoryPage(rows, next_cursor, has_more, has_newer)
 
 
 def _serialize(
@@ -175,11 +276,12 @@ class ReadMarkerUpdate(BaseModel):
     message_id: str
 
 
-
 @router.get("/{channel_id}/messages")
 async def get_channel_messages(
     channel_id: int,
     before: Optional[str] = None,
+    around: Optional[UUID] = None,
+    after: Optional[UUID] = None,
     limit: int = HISTORY_PAGE_SIZE,
     post_id: Optional[int] = None,
     channel: Channel = Depends(channel_from_path),
@@ -189,6 +291,8 @@ async def get_channel_messages(
     in a forum channel (which needs post_id; no other channel takes it).
 
     Pass the previous page's next_cursor as before to walk further back.
+    around (a message id) returns a window centred on that message, after
+    the messages newer than it. Use at most one of before, around and after.
     """
     limit = max(1, min(limit, MAX_HISTORY_PAGE_SIZE))
 
@@ -202,43 +306,18 @@ async def get_channel_messages(
 
     # A post is ordered by the message's own timestamp, which imported
     # history sets; everything else by arrival.
-    order_field = "timestamp" if in_forum else "created_at"
-    query = Message.filter(channel_id=channel_id, post_id=post_id)
-    if before:
-        cursor_at, cursor_id = _decode_cursor(before)
-        query = query.filter(
-            Q(**{f"{order_field}__lt": cursor_at})
-            | Q(**{order_field: cursor_at, "id__lt": cursor_id})
-        )
-
-    # Fetch one extra row to tell whether an older page exists.
-    rows = await query.order_by(f"-{order_field}", "-id").limit(limit + 1).values(
-        "id",
-        "uuid",
-        "content",
-        "author_id",
-        "channel_id",
-        "server_id",
-        "post_id",
-        "timestamp",
-        "created_at",
-        "edited_at",
-        "reply_to_uuid",
-        "metadata",
+    page = await history_page(
+        Message.filter(channel_id=channel_id, post_id=post_id),
+        "timestamp" if in_forum else "created_at",
+        CHANNEL_FIELDS,
+        before=before, around=around, after=after, limit=limit,
     )
 
-    has_more = len(rows) > limit
-    rows = rows[:limit]
-
-    next_cursor = None
-    if has_more and rows:
-        last = rows[-1]
-        next_cursor = _encode_cursor(last[order_field], last["id"])
-
     return {
-        "messages": await _serialize_all(rows),
-        "next_cursor": next_cursor,
-        "has_more": has_more,
+        "messages": await _serialize_all(page.rows),
+        "next_cursor": page.next_cursor,
+        "has_more": page.has_more,
+        "has_newer": page.has_newer,
     }
 
 
