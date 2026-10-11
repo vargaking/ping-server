@@ -1209,6 +1209,7 @@ def test_a_real_dm_push_carries_the_uuid_the_peer_sees(dm_pair, push_on):
             ws_ready(ws)
             ws.send_json(frame)
             sync(ws)
+        bob_ws.receive_json()  # alice online
         received = bob_ws.receive_json()
     drain(dm_pair.alice_client)
 

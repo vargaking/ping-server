@@ -1,3 +1,4 @@
+import asyncio
 import logging
 
 from fastapi import WebSocket
@@ -150,21 +151,38 @@ class Communication:
         ).values_list("user_a_id", "user_b_id")
         return {uid for pair in pairs for uid in pair} - {user_id}
 
+    async def get_presence_audience_ids(self, user_id: int) -> set[int]:
+        """Return the IDs of users who see *user_id*'s presence and whose
+        presence *user_id* sees: server co-members and direct-message partners."""
+        related, partners = await asyncio.gather(
+            self.get_related_user_ids(user_id),
+            self.get_conversation_partner_ids(user_id),
+        )
+        return related | partners
+
+    async def announce_presence_between(self, user_a_id: int, user_b_id: int) -> None:
+        """Tell each of two users who just became partners that the other is
+        online. Nothing is sent for an offline user: offline is the default."""
+        for user_id, other_id in ((user_a_id, user_b_id), (user_b_id, user_a_id)):
+            if self.connection_manager.is_online(other_id):
+                await self.send_to_user(user_id, {
+                    "type": "presence_update", "user_id": other_id, "online": True})
+
     async def _send_presence_snapshot(
         self,
         user_id: int,
         websocket: WebSocket,
         *,
-        related_user_ids: set[int] | None = None,
+        audience_ids: set[int] | None = None,
     ) -> None:
-        """Send *websocket* the list of related users who are currently online."""
-        if related_user_ids is None:
-            related_user_ids = await self.get_related_user_ids(user_id)
+        """Send *websocket* the presence-audience users who are currently online."""
+        if audience_ids is None:
+            audience_ids = await self.get_presence_audience_ids(user_id)
         try:
             await websocket.send_json({
                 "type": "presence_init",
                 "user_ids": [
-                    uid for uid in related_user_ids
+                    uid for uid in audience_ids
                     if self.connection_manager.is_online(uid)
                 ],
             })
@@ -202,32 +220,34 @@ class Communication:
         When *online* is True (user just connected):
           1. Send the connecting socket its own presence_init snapshot,
              regardless of how many other sockets this user already has.
-          2. If this is the user's first socket (0 -> 1), notify related
-             online users that this user came online. A second tab connecting
-             must not re-announce someone who is already online.
+          2. If this is the user's first socket (0 -> 1), notify the online
+             users in the presence audience that this user came online. A
+             second tab connecting must not re-announce someone who is
+             already online.
 
         When *online* is False (user disconnected):
-          Notify related online users that this user went offline. The caller
-          only calls this once the user has no remaining sockets.
+          Notify the online users in the presence audience that this user
+          went offline. The caller only calls this once the user has no
+          remaining sockets.
         """
-        related_user_ids = await self.get_related_user_ids(user_id)
+        audience_ids = await self.get_presence_audience_ids(user_id)
 
         if online:
             if websocket is not None:
                 await self._send_presence_snapshot(
-                    user_id, websocket, related_user_ids=related_user_ids)
+                    user_id, websocket, audience_ids=audience_ids)
             if was_online:
                 return
 
-        # Broadcast the status change to related online users, on every
-        # socket they have open.
+        # Broadcast the status change to the audience, on every socket they
+        # have open.
         status_message = {
             "type": "presence_update",
             "user_id": user_id,
             "online": online,
         }
 
-        for uid in related_user_ids:
+        for uid in audience_ids:
             for ws in self.connection_manager.get_websockets(uid):
                 try:
                     await ws.send_json(status_message)
