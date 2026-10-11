@@ -39,4 +39,6 @@ class Message(models.Model):
             ("channel", "created_at", "id"),
             ("conversation", "created_at", "id"),
             ("edited_at",),
+            ("channel", "id"),
+            ("conversation", "id"),
         )
