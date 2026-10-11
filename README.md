@@ -57,6 +57,7 @@ The interactive API docs are then at http://localhost:8000/docs.
 | `TRUSTED_PROXY_KEY` | behind the Worker | *(empty)* | Secret shared with the Cloudflare Worker (`deploy/cloudflare/`). With it, rate limits use the client address the Worker sends; unset, the connecting address. |
 | `INVITE_USE_RATE_LIMIT` | no | `20/minute` | Per-IP + per-invite limit on `POST /invites/{id}/use`. |
 | `UNFURL_RATE_LIMIT` | no | `30/minute` | Per-user limit on `GET /unfurl`. |
+| `FRIEND_REQUEST_RATE_LIMIT` | no | `20/hour` | Per-user limit on `POST /friends/requests`. |
 | `LIVEKIT_*` | for voice | — | LiveKit API host/key/secret used to mint voice tokens. |
 | `LIVEKIT_API_URL` | no | `LIVEKIT_URL` with `ws`→`http` | Address the server uses to call LiveKit's API for voice presence. |
 | `VAPID_PUBLIC_KEY`, `VAPID_PRIVATE_KEY` | for push | — | Web Push signing keys. Push is off unless both are set. See "Web Push". |
