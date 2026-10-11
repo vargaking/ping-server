@@ -12,6 +12,7 @@ from app.services.activity import touch_last_active
 from app.services.permissions import permissions
 from app.services.connection_manager import ConnectionManager
 from app.services.chat_service import ChatService
+from app.services.friends import friend_ids, pending_counterpart_ids
 from app.ws_schemas import (
     ActivityFrame,
     PingFrame,
@@ -153,12 +154,14 @@ class Communication:
 
     async def get_presence_audience_ids(self, user_id: int) -> set[int]:
         """Return the IDs of users who see *user_id*'s presence and whose
-        presence *user_id* sees: server co-members and direct-message partners."""
-        related, partners = await asyncio.gather(
+        presence *user_id* sees: server co-members, direct-message partners and
+        friends."""
+        related, partners, friends = await asyncio.gather(
             self.get_related_user_ids(user_id),
             self.get_conversation_partner_ids(user_id),
+            friend_ids(user_id),
         )
-        return related | partners
+        return related | partners | friends
 
     async def announce_presence_between(self, user_a_id: int, user_b_id: int) -> None:
         """Tell each of two users who just became partners that the other is
@@ -305,15 +308,15 @@ class Communication:
     async def notify_user_invalidate(self, user_id: int):
         """Notify related users that a user's profile has changed.
 
-        Sends a lightweight invalidation message (just the user_id) to users
-        who share a server with the updated user, to users who have a direct
-        conversation with them, and to the user's own sockets so their other
-        tabs update too. Clients should fetch the updated profile via REST if
-        they need the new data.
+        Sends a lightweight invalidation message (just the user_id) to the
+        user's presence audience (server co-members, direct-message partners and
+        friends), to users with a pending friend request to or from them, and to
+        the user's own sockets so their other tabs update too. Clients should
+        fetch the updated profile via REST if they need the new data.
         """
         recipients = (
-            await self.get_related_user_ids(user_id)
-            | await self.get_conversation_partner_ids(user_id)
+            await self.get_presence_audience_ids(user_id)
+            | await pending_counterpart_ids(user_id)
             | {user_id}
         )
         await self.send_to_users(recipients, {"type": "user_invalidate", "user_id": user_id})
