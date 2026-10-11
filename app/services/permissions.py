@@ -360,10 +360,11 @@ def views_of(
     return views
 
 
-async def member_views(server: Server) -> dict[int, MemberView]:
-    """Every member's view of *server*. Used for fan-out and to compare what
-    members see before and after a change."""
-    rules = await load_rules(server)
+async def member_views(server: Server, rules: ServerRules | None = None) -> dict[int, MemberView]:
+    """Every member's view of *server*, from *rules* when the caller has them
+    loaded. Used for fan-out and to compare what members see before and after
+    a change."""
+    rules = rules or await load_rules(server)
     assigned = await role_assignments(rules.roles)
     member_ids = await UserToServer.filter(server_id=server.id).values_list("user_id", flat=True)
     return views_of(rules, member_ids, assigned)

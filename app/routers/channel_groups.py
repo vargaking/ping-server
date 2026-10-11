@@ -172,7 +172,7 @@ async def delete_group(
     shown_to = {user_id for user_id, view in (await member_views(server)).items()
                 if group_id in view.groups and user_id != current_user.id}
     async with visibility_change(
-            request.app.state, server, exclude_user_id=current_user.id):
+            request.app.state, server, exclude_user_id=current_user.id, private_flips=True):
         async with channel_layout.locked_server(server.id):
             group = await _group_in_server(server.id, group_id)
             orphans = await Channel.filter(group_id=group.id).order_by("position", "id")

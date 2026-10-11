@@ -2,6 +2,8 @@
 import pytest
 
 from tests.conftest import ORIGIN, create_channel, create_server, register, ws_ready
+from tests.test_channel_permissions import VIEW, crew, overwrite  # noqa: F401
+from tests.test_overwrite_fanout import channel_rule, group_rule, listening, of_type, types
 from tests.test_permissions import join, promote
 from tests.test_realtime_events import chat_frame
 from tests.test_server_requests import make_admin, submit
@@ -641,3 +643,32 @@ def test_failed_layout_sends_no_frame(client, team, sockets):
 
     assert res.status_code == 422
     assert_actor_excluded(sid, owner_ws, member_ws, channel["id"])
+
+
+def test_deleting_a_private_category_tells_who_kept_its_channels_they_are_public(crew, new_client):
+    owner, sid = crew.owner_client, crew.sid
+    group = new_group(owner, sid, "Staff")
+    plans, closed = (owner.post(f"/channels/{sid}/create", json={
+        "name": name, "group_id": group["id"]}).json()["id"] for name in ("plans", "closed"))
+    keeper_client, keeper = join(owner, new_client, sid)
+    everyone = crew.everyone["id"]
+    for path, bits in ((group_rule(group["id"], "members", keeper["id"]), {"allow": VIEW}),
+                       (group_rule(group["id"], "roles", everyone), {"deny": VIEW}),
+                       (channel_rule(closed, "roles", everyone), {"deny": VIEW}),
+                       (channel_rule(closed, "members", keeper["id"]), {"allow": VIEW})):
+        assert overwrite(owner, path, **bits).status_code == 200
+
+    with listening(owner, owner=owner, keeper=keeper_client, other=crew.member_client) as live:
+        assert owner.delete(f"/servers/{sid}/channel-groups/{group['id']}").status_code == 204
+        frames = live.settle()
+
+    listed = next(c for c in owner.get(f"/channels/{sid}").json() if c["id"] == plans)
+    expected = {k: v for k, v in listed.items() if k not in ("last_read_message_id", "last_message_id")}
+    assert (expected["private"], expected["group_id"]) == (False, None)
+    updated = {"type": "channel_updated", "server_id": sid, "channel": expected}
+    assert frames["owner"] == [updated]
+    assert types(frames["keeper"]) == ["channel_updated", "channel_group_deleted"]
+    assert of_type(frames["keeper"], "channel_updated") == [updated]
+    assert types(frames["other"]) == ["channel_created"]
+    created = frames["other"][0]["channel"]
+    assert (created["id"], created["private"], created["group_id"]) == (plans, False, None)

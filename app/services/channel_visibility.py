@@ -199,22 +199,34 @@ async def announce_visibility(
 class visibility_change:
     """``async with visibility_change(app_state, server):`` around a change
     that can move what members see. Masks are dropped and the difference is
-    announced when the block ends."""
+    announced when the block ends. With *private_flips*, those who keep seeing
+    a channel or category whose private flag changed get it updated."""
 
-    def __init__(self, app_state: Any, server: Server, *, exclude_user_id: int | None = None) -> None:
+    def __init__(self, app_state: Any, server: Server, *, exclude_user_id: int | None = None,
+                 private_flips: bool = False) -> None:
         self.app_state = app_state
         self.server = server
         self.exclude_user_id = exclude_user_id
+        self.private_flips = private_flips
 
     async def __aenter__(self) -> "visibility_change":
         await server_queue.idle(self.server.id)
-        self.before = await member_views(self.server)
+        rules = await load_rules(self.server)
+        self.before = await member_views(self.server, rules)
+        self.private_before = rules.private_flags()
         return self
 
     async def __aexit__(self, exc_type, exc, tb) -> None:
         if exc_type is not None:
             return
         permissions.invalidate(self.server.id)
+        state = await load_state(self.server)
+        flipped_channels: set[int] = set()
+        flipped_groups: set[int] = set()
+        if self.private_flips:
+            flipped_channels = self.private_before[0] ^ state.private_channels
+            flipped_groups = self.private_before[1] ^ state.private_groups
         await announce_visibility(
-            self.app_state, self.server.id, await load_state(self.server), self.before,
-            await member_views(self.server), exclude_user_id=self.exclude_user_id)
+            self.app_state, self.server.id, state, self.before, await member_views(self.server),
+            exclude_user_id=self.exclude_user_id,
+            flipped_channels=flipped_channels, flipped_groups=flipped_groups)
