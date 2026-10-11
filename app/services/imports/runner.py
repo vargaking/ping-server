@@ -25,9 +25,9 @@ from ..attachments import max_attachment_bytes
 from ..bundle import format as bundle_format
 from ..bundle.format import BundleError
 from ..bundle.importer import ImportAborted, ImportOptions, import_bundle
-from ..bundle.plan import plan_json
+from ..bundle.plan import offer_private, plan_json
 from . import storage
-from .serialize import import_json
+from .serialize import import_json, planned_messages
 from .unpack import UnpackError, unpack_bundle
 
 logger = logging.getLogger("app.services.imports")
@@ -246,11 +246,31 @@ class ImportRunner:
         report = await import_bundle(
             bundle, ImportOptions(server_id=row.server_id, authors=usernames, dry_run=True),
             report_progress)
+        private_report = None
+        private_ids = [c.id for c in server.channels if c.private]
+        if private_ids:
+            async def report_private(seen: int, channel: str | None) -> None:
+                await job.progress("checking", report.seen + seen, 0, channel)
+
+            try:
+                private_report = await import_bundle(
+                    bundle, ImportOptions(
+                        server_id=row.server_id, authors=usernames, dry_run=True,
+                        only=set(private_ids), private=dict.fromkeys(private_ids, "only_me")),
+                    report_private)
+            except ImportAborted as exc:
+                report.warnings.append(f"Private channels can't be offered: {exc}")
         plan = plan_json(report)
-        plan["authors"] = [
-            {"id": a.id, "name": a.name, "messages": a.messages} for a in report.authors]
+        offer_private(plan, private_report)
+        authors = {a.id: {"id": a.id, "name": a.name, "messages": a.messages} for a in report.authors}
+        for a in private_report.authors if private_report else []:
+            if a.id in authors:
+                authors[a.id]["messages"] += a.messages
+            else:
+                authors[a.id] = {"id": a.id, "name": a.name, "messages": a.messages}
+        plan["authors"] = sorted(authors.values(), key=lambda a: (-a["messages"], a["name"]))
         plan["seen"] = report.seen
-        known = {a.id for a in report.authors}
+        known = set(authors)
         await job.change(
             "unpacking", status="ready", progress=None, error=None, failed_step=None,
             plan=plan, authors={a: u for a, u in mapping.items() if a in known},
@@ -283,7 +303,7 @@ class ImportRunner:
         if row is None:
             return
         report = await self._run_importer(job, row, "importing", ImportOptions(
-            server_id=row.server_id, include_private=False))
+            server_id=row.server_id, private=dict((row.plan or {}).get("private_selection") or {})))
         await anyio.to_thread.run_sync(storage.remove_path, storage.bundle_path(row.id) / "files")
         await self._done(job, result=plan_json(report))
 
@@ -305,7 +325,7 @@ class ImportRunner:
         if kept != (row.authors or {}):
             await ServerImport.filter(id=row.id).update(authors=kept)
         options.authors = usernames
-        total = (row.plan or {}).get("seen", 0)
+        total = planned_messages(row.plan)
         await job.progress(phase, 0, total, force=True)
 
         async def report_progress(seen: int, channel: str | None) -> None:

@@ -29,6 +29,7 @@ class OverwriteChange:
     owner_id: int
     key: RowKey
     rows: OverwriteRows  # every row of the server right before the write
+    channel_ids: frozenset[int]  # the channels of the server at that moment
     bits: Bits  # the row's new (allow, deny); NO_ROW when it was removed
     token: int  # from permissions.drop_views, for the refill guard
 
@@ -90,7 +91,11 @@ async def announce_overwrite(app_state: Any, change: OverwriteChange) -> None:
     write dropped. Runs after the response, in the server's queue."""
     server_id = change.server_id
     roles = {role.id: role for role in await Role.filter(server_id=server_id)}
-    channels = await Channel.filter(server_id=server_id).order_by("position", "id")
+    # Only channels the write saw: one created since announces itself, and
+    # naming it here could show members a channel their rows never covered.
+    channels = [
+        channel for channel in await Channel.filter(server_id=server_id).order_by("position", "id")
+        if channel.id in change.channel_ids]
     groups = await ChannelGroup.filter(server_id=server_id).order_by("position", "id")
     member_ids = await UserToServer.filter(server_id=server_id).values_list("user_id", flat=True)
     assigned = await role_assignments(roles)

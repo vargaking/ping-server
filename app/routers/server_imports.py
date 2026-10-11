@@ -17,7 +17,8 @@ from ..permissions import server_from_path
 from ..services.attachments import attachments_root, sanitize_filename
 from ..services.imports import storage
 from ..services.imports.runner import ImportRunner
-from ..services.imports.serialize import import_json
+from ..services.bundle.importer import Visibility
+from ..services.imports.serialize import import_json, planned_messages
 from ..services.system_user import IMPORTED_USERNAME
 from ..settings import import_chunk_bytes, import_max_bytes
 from ..utils import require_owner
@@ -90,6 +91,11 @@ class ImportCreate(BaseModel):
 
 class AuthorsUpdate(BaseModel):
     authors: dict[str, int | None]
+
+
+class ImportStart(BaseModel):
+    # Absent or null keeps the stored selection; a dict, even an empty one, replaces it.
+    private_channels: dict[str, Visibility] | None = None
 
 
 @router.get("")
@@ -227,7 +233,7 @@ async def set_authors(
                 authors=mapping, updated_at=now):
             raise locked
     elif mapping != (row.authors or {}) or row.error:
-        total = (row.plan or {}).get("seen", 0)
+        total = planned_messages(row.plan)
         if not await ServerImport.filter(id=row.id, status="done").update(
                 authors=mapping, status="importing", progress=_progress("authors", total),
                 error=None, updated_at=now):
@@ -236,10 +242,31 @@ async def set_authors(
     return import_json(await ServerImport.get(id=row.id))
 
 
+def _checked_private(
+    plan: dict, requested: dict[str, Visibility], retrying: bool = False,
+) -> None:
+    offered = {
+        c["source_id"] for c in plan.get("channels", [])
+        if c.get("private") and c.get("private_action") is not None}
+    for source_id in requested:
+        if source_id not in offered:
+            raise HTTPException(
+                status_code=422, detail=f"{source_id} is not a private channel of this import")
+    if retrying:
+        stored = plan.get("private_selection") or {}
+        for source_id, visibility in requested.items():
+            if source_id in stored and stored[source_id] != visibility:
+                raise HTTPException(
+                    status_code=422,
+                    detail=f"{source_id}: the channel may already exist; "
+                           "its visibility can't change on a retry")
+
+
 @router.post("/{import_id}/start", status_code=status.HTTP_202_ACCEPTED)
 async def start_import(
     import_id: str,
     request: Request,
+    body: ImportStart | None = None,
     server: Server = Depends(owned_server),
 ):
     _require_enabled()
@@ -247,11 +274,19 @@ async def start_import(
     if not (row.status == "ready" or (row.status == "failed" and row.failed_step == "importing")):
         raise HTTPException(status_code=409, detail="The import isn't ready to start")
     plan = row.plan or {}
-    needed = plan.get("totals", {}).get("attachment_bytes", 0) + ATTACHMENT_SPACE_MARGIN
+    requested = body.private_channels if body else None
+    if requested is not None:
+        _checked_private(plan, requested, retrying=row.status == "failed")
+    selection = dict(plan.get("private_selection") or {}) if requested is None else dict(requested)
+    plan = {**plan, "private_selection": selection}
+    private_bytes = sum(
+        c["attachment_bytes"] for c in plan.get("channels", []) if c["source_id"] in selection)
+    needed = (plan.get("totals", {}).get("attachment_bytes", 0) + private_bytes
+              + ATTACHMENT_SPACE_MARGIN)
     if needed > shutil.disk_usage(attachments_root()).free:
         raise HTTPException(status_code=409, detail="Not enough disk space for the attachments")
     if not await ServerImport.filter(id=row.id, status=row.status).update(
-            status="importing", progress=_progress("importing", plan.get("seen", 0)),
+            plan=plan, status="importing", progress=_progress("importing", planned_messages(plan)),
             error=None, failed_step=None, updated_at=datetime.now(timezone.utc)):
         raise HTTPException(status_code=409, detail="The import isn't ready to start")
     await _delete_imports(

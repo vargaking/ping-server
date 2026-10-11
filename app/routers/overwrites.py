@@ -1,4 +1,5 @@
 from collections.abc import Mapping
+from copy import copy
 from dataclasses import dataclass, replace
 from functools import partial
 from typing import Literal
@@ -79,13 +80,15 @@ class Target:
             return RowKey("channel", self.channel.id, SUBJECTS[kind], subject_id)
         return RowKey("group", self.group.id, SUBJECTS[kind], subject_id)
 
-    async def current(self) -> "Target":
-        """This target with its channel's category as it is now."""
+    def current(self, groups: Mapping[int, int | None]) -> "Target":
+        """This target with its channel's category as it is now; *groups* maps
+        every channel of the server to its category."""
         if self.channel is None:
             return self
-        channel = await Channel.get_or_none(id=self.channel.id)
-        if channel is None:
+        if self.channel.id not in groups:
             raise HTTPException(status_code=404, detail="Channel not found")
+        channel = copy(self.channel)
+        channel.group_id = groups[channel.id]
         return replace(self, channel=channel)
 
     def rules(self, roles: Mapping[int, Role], rows: OverwriteRows) -> ServerRules:
@@ -213,11 +216,12 @@ async def _write(
     slot = None
     try:
         async with channel_layout.locked_server(server.id):
+            channel_groups = dict(await Channel.filter(server_id=server.id).values_list("id", "group_id"))
             rows = await load_rows(server.id)
             roles, standing = await _authorize(target, user, actor_mask, kind, subject_id)
             if not standing.is_owner:
                 _check_bits(
-                    await target.current(), user, roles, standing, rows, key, bits)
+                    target.current(channel_groups), user, roles, standing, rows, key, bits)
             if rows.bits(key) == bits:
                 return row_json(key, bits)
             await _save(server.id, key, rows.bits(key), bits)
@@ -231,7 +235,7 @@ async def _write(
         raise
     token = permissions.drop_views(server.id)
     slot.run(partial(announce_overwrite, request.app.state, OverwriteChange(
-        server.id, server.owner_id, key, rows, bits, token)))
+        server.id, server.owner_id, key, rows, frozenset(channel_groups), bits, token)))
     return row_json(key, bits)
 
 

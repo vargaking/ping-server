@@ -15,10 +15,14 @@ from app.models.ChannelGroup import ChannelGroup
 from app.models.ForumPost import ForumPost
 from app.models.ForumTag import ForumTag
 from app.models.Message import Message
+from app.models.PermissionOverwrite import PermissionOverwrite
 from app.models.ReadState import ReadState
+from app.models.Role import Role
 from app.models.Server import Server
 from app.models.User import User
 from app.models.UserToServer import UserToServer
+from app.permissions import Permission
+from app.scripts import import_bundle as import_cli
 from app.services.bundle import importer
 from app.services.bundle.format import BundleError, iter_channel_messages, load_server
 from app.services.bundle.plan import plan_json
@@ -59,6 +63,18 @@ def message(client, source_id, sid=None):
 
 def channel_named(client, sid, name):
     return run(client, Channel.get(server_id=sid, name=name))
+
+
+def mark_imported(client, channel_id, source_id, **marker):
+    """Make a channel look like an earlier run merged into it, with the single-id marker."""
+    channel = run(client, Channel.get(id=channel_id))
+    channel.channel_settings = {
+        **channel.channel_settings, "import": {"source": SOURCE, "id": source_id, **marker}}
+    run(client, channel.save())
+
+
+def channel_marker(client, channel_id):
+    return run(client, Channel.get(id=channel_id)).channel_settings["import"]
 
 
 def user_id(client, username):
@@ -139,7 +155,7 @@ def test_full_import(client, world, bundle):
     general = channel_named(client, world.sid, "general")
     assert general.topic == "Welcome to the sample server"
     assert general.channel_settings["import"] == {
-        "source": SOURCE, "id": "101", "created": True}
+        "source": SOURCE, "id": "101", "ids": ["101"], "created": True}
     text_group = run(client, ChannelGroup.get(server_id=world.sid, name="Text channels"))
     voice_group = run(client, ChannelGroup.get(server_id=world.sid, name="Voice channels"))
     assert general.group_id == text_group.id
@@ -250,35 +266,140 @@ def test_dry_run_writes_nothing_and_matches_a_real_run(client, world, bundle, at
 
 # Channel plan
 
-def test_channel_plan_map_same_name_and_new(client, world, bundle):
+def test_channel_plan_map_earlier_import_and_new(client, world, bundle):
     owner = world.owner
     general = create_channel(owner, world.sid, "general")
     other = create_channel(owner, world.sid, "somewhere-else")
-    create_channel(owner, world.sid, "ideas", "text")  # same name, wrong type
+    create_channel(owner, world.sid, "ideas", "text")  # same name, other type
 
     dry = do_import(
         client, bundle, world.sid, dry_run=True, channel_map={"106": other["id"]})
     assert plans(dry) == {
-        "general": "into existing #general", "staff": "skipped: private",
+        "general": "create", "staff": "skipped: private",
         "ideas": "create", "Lounge": "create",
         "off-topic": "into existing #somewhere-else", "archive": "skipped: unreadable"}
     by_name = {c.name: c for c in dry.channels}
-    assert by_name["general"].matched_by == "name"
+    assert all(c.matched_by is None for c in dry.channels if c.name != "off-topic")
     assert by_name["off-topic"].matched_by == "map"
+    assert {n: c.name_taken for n, c in by_name.items()} == {
+        "general": True, "staff": False, "ideas": True, "Lounge": False,
+        "off-topic": False, "archive": False}
 
     do_import(client, bundle, world.sid, channel_map={"106": other["id"]})
-    assert len(messages_of(client, channel_id=general["id"])) == 7
+    assert messages_of(client, channel_id=general["id"]) == []
+    assert run(client, Channel.get(id=general["id"])).channel_settings == {}
     assert len(messages_of(client, channel_id=other["id"])) == 1
-    existing = run(client, Channel.get(id=general["id"]))
-    assert existing.channel_settings["import"] == {"source": SOURCE, "id": "101"}
-    assert existing.topic is None
+    assert channel_marker(client, other["id"]) == {"source": SOURCE, "id": "106", "ids": ["106"]}
+    created = run(client, Channel.filter(server_id=world.sid, name="general").order_by("id"))
+    assert len(created) == 2
+    imported = created[1]
+    assert len(messages_of(client, channel_id=imported.id)) == 7
+    assert imported.topic == "Welcome to the sample server"
 
 
-def test_map_wins_over_same_name(client, world, bundle):
+def test_a_name_never_merges_into_an_existing_channel(client, world, bundle):
+    general = create_channel(world.owner, world.sid, "general")
+    before = run(client, Channel.filter(server_id=world.sid).count())
+
+    report = do_import(client, bundle, world.sid)
+
+    row = {c.name: c for c in report.channels}["general"]
+    assert (row.action, row.name_taken, row.channel_id != general["id"]) == ("create", True, True)
+    assert run(client, Channel.filter(server_id=world.sid).count()) == before + 4
+    assert messages_of(client, channel_id=general["id"]) == []
+    assert run(client, Channel.get(id=general["id"])).channel_settings == {}
+
+
+def test_name_taken_ignores_case_and_type_and_only_applies_to_creates(client, world, bundle):
+    create_channel(world.owner, world.sid, "GENERAL", "voice")
+    other = create_channel(world.owner, world.sid, "ideas", "forum")
+
+    dry = do_import(
+        client, bundle, world.sid, dry_run=True, channel_map={"105": other["id"]},
+        only={"101", "105"})
+    by_name = {c.name: c for c in dry.channels}
+    assert (by_name["general"].action, by_name["general"].name_taken) == ("create", True)
+    assert (by_name["ideas"].action, by_name["ideas"].name_taken) == ("existing", False)
+    assert (by_name["staff"].action, by_name["staff"].name_taken) == ("skipped", False)
+    assert "a channel with this name already exists" in format_report(dry)
+
+
+def test_rerun_continues_in_the_channel_it_created(client, world, bundle):
     create_channel(world.owner, world.sid, "general")
+    do_import(client, bundle, world.sid)
+    count = run(client, Channel.filter(server_id=world.sid).count())
+
+    again = do_import(client, bundle, world.sid)
+
+    row = {c.name: c for c in again.channels}["general"]
+    assert (row.action, row.name_taken, row.matched_by) == ("existing", False, "earlier import")
+    assert again.messages == 0
+    assert run(client, Channel.filter(server_id=world.sid).count()) == count
+    assert run(client, Channel.filter(server_id=world.sid, name="general").count()) == 2
+
+
+def test_map_wins_over_an_earlier_import(client, world, bundle):
+    do_import(client, bundle, world.sid)
     target = create_channel(world.owner, world.sid, "target")
     dry = do_import(client, bundle, world.sid, dry_run=True, channel_map={"101": target["id"]})
     assert plans(dry)["general"] == "into existing #target"
+
+
+def test_a_channel_an_old_run_merged_into_by_name_is_still_found(client, world, bundle):
+    general = create_channel(world.owner, world.sid, "general")
+    mark_imported(client, general["id"], "101")
+
+    report = do_import(client, bundle, world.sid)
+
+    row = {c.name: c for c in report.channels}["general"]
+    assert (row.action, row.matched_by, row.channel_id) == (
+        "existing", "earlier import", general["id"])
+    assert len(messages_of(client, channel_id=general["id"])) == 7
+    assert run(client, Channel.filter(server_id=world.sid, name="general").count()) == 1
+    assert channel_marker(client, general["id"]) == {"source": SOURCE, "id": "101"}
+
+
+def test_every_source_mapped_onto_one_channel_is_found_again(client, world, bundle):
+    target = create_channel(world.owner, world.sid, "together")
+
+    do_import(client, bundle, world.sid, only={"101", "106"},
+              channel_map={"101": target["id"], "106": target["id"]})
+    assert channel_marker(client, target["id"]) == {
+        "source": SOURCE, "id": "106", "ids": ["106", "101"]}
+    assert len(messages_of(client, channel_id=target["id"])) == 8
+    count = run(client, Channel.filter(server_id=world.sid).count())
+
+    again = do_import(client, bundle, world.sid, only={"101", "106"})
+
+    assert {c.name: (c.action, c.channel_id) for c in again.channels if c.action != "skipped"} == {
+        "general": ("existing", target["id"]), "off-topic": ("existing", target["id"])}
+    assert again.messages == 0
+    assert run(client, Channel.filter(server_id=world.sid).count()) == count
+
+
+def test_a_source_mapped_later_is_added_to_the_marker(client, world, bundle):
+    target = create_channel(world.owner, world.sid, "together")
+    do_import(client, bundle, world.sid, only={"101"}, channel_map={"101": target["id"]})
+    do_import(client, bundle, world.sid, only={"101", "106"}, channel_map={"106": target["id"]})
+    assert channel_marker(client, target["id"])["ids"] == ["101", "106"]
+
+
+def test_a_second_bundle_mapped_into_an_imported_channel_is_found_again(client, world, bundle, tmp_path):
+    first = do_import(client, bundle, world.sid, only={"101"})
+    general = next(c.channel_id for c in first.channels if c.name == "general")
+    other = tmp_path / "other"
+    shutil.copytree(bundle, other)
+    edit_server_json(other, lambda data: data["source"].update(server_id="9001"))
+
+    do_import(client, other, world.sid, only={"101"}, channel_map={"101": general})
+    assert channel_marker(client, general)["sources"] == {"discord:9001": ["101"]}
+    count = run(client, Channel.filter(server_id=world.sid).count())
+
+    again = do_import(client, other, world.sid, only={"101"})
+
+    row = next(c for c in again.channels if c.name == "general")
+    assert (row.action, row.channel_id) == ("existing", general)
+    assert run(client, Channel.filter(server_id=world.sid).count()) == count
 
 
 def test_map_target_must_be_a_channel_of_the_same_type_in_this_server(client, world, bundle, new_client):
@@ -303,7 +424,21 @@ def test_channel_from_an_earlier_run_is_found_even_when_renamed(client, world, b
 
     dry = do_import(client, bundle, world.sid, dry_run=True)
     assert plans(dry)["general"] == "into existing #renamed"
-    assert {c.name: c.matched_by for c in dry.channels}["general"] == "earlier import"
+    row = {c.name: c for c in dry.channels}["general"]
+    assert (row.matched_by, row.name_taken) == ("earlier import", False)
+
+    do_import(client, bundle, world.sid)
+    assert run(client, Channel.filter(server_id=world.sid, name="general").count()) == 1
+    assert run(client, Channel.filter(server_id=world.sid, name="renamed").count()) == 1
+
+
+def test_a_category_with_the_same_name_is_reused(client, world, bundle):
+    group = run(client, ChannelGroup.get(server_id=world.sid, name="Text channels"))
+
+    do_import(client, bundle, world.sid)
+
+    assert run(client, ChannelGroup.filter(server_id=world.sid, name="Text channels").count()) == 1
+    assert channel_named(client, world.sid, "general").group_id == group.id
 
 
 def test_only_limits_the_channels(client, world, bundle):
@@ -338,6 +473,7 @@ def test_a_missing_category_is_created(client, world, bundle):
 
 def test_forum_tags_match_by_name_and_stop_at_the_limit(client, world, bundle):
     ideas = create_channel(world.owner, world.sid, "ideas", "forum")
+    mark_imported(client, ideas["id"], "105")
     run(client, ForumTag.create(channel_id=ideas["id"], name="idea"))
     edit_server_json(bundle, lambda data: data["channels"][2]["tags"].extend(
         {"id": f"x{i}", "name": f"extra-{i}"} for i in range(30)))
@@ -415,6 +551,7 @@ def test_resume_after_a_failure_in_the_middle_of_a_channel(client, world, bundle
 
 def test_resume_does_not_leave_members_with_unread_imported_messages(client, world, bundle, monkeypatch):
     general = create_channel(world.owner, world.sid, "general")
+    mark_imported(client, general["id"], "101")
     seed = run(client, Message.create(
         uuid=uuid.uuid4(), content="{}", author_id=world.alice_user["id"], server_id=world.sid,
         channel_id=general["id"], timestamp=datetime.now(timezone.utc)))
@@ -688,7 +825,7 @@ def test_the_report_lists_every_author_seen(client, world, bundle):
 
 
 def test_channels_say_what_will_happen_and_why_not(client, world, bundle):
-    create_channel(client, world.sid, "general")
+    mark_imported(client, create_channel(client, world.sid, "general")["id"], "101")
     edit_server_json(bundle, lambda data: data["channels"][3].update(type="stage"))
 
     report = do_import(client, bundle, world.sid, dry_run=True)
@@ -716,9 +853,9 @@ def test_the_plan_is_the_reports_json_form(client, world, bundle):
         "messages": 13, "existing_messages": 0, "posts": 2,
         "attachments": report.attachments, "attachment_bytes": report.attachment_bytes}
     assert set(plan["channels"][0]) == {
-        "source_id", "name", "type", "action", "target_name", "reason", "category", "messages",
-        "existing_messages", "posts", "existing_posts", "attachments", "attachment_bytes",
-        "handed_over"}
+        "source_id", "name", "type", "action", "target_name", "name_taken", "reason", "category",
+        "messages", "existing_messages", "posts", "existing_posts", "attachments", "attachment_bytes",
+        "handed_over", "private", "private_action", "visibility"}
     assert plan["left_out"]["avatars"] == 2 and plan["left_out"]["private_channels"] == 1
     assert plan["missing"] == 1
     assert set(plan["left_out"]) == {
@@ -776,13 +913,173 @@ def test_existing_only_creates_the_import_account_when_an_author_is_unmapped_lat
 def test_private_channel_skipped_and_included(client, world, bundle):
     skipped = do_import(client, bundle, world.sid, only={"101", "103"})
     assert plans(skipped)["staff"] == "skipped: private"
+    assert skipped.left_out.private_channels == 1
     assert run(client, Channel.filter(server_id=world.sid, name="staff").exists()) is False
 
-    included = do_import(client, bundle, world.sid, only={"101", "103"}, include_private=True)
-    assert plans(included)["staff"] == "create"
+    included = do_import(
+        client, bundle, world.sid, only={"101", "103"}, private={"103": "everyone"})
+    assert plans(included)["staff"] == "create, everyone can see it"
     staff = channel_named(client, world.sid, "staff")
     assert len(messages_of(client, channel_id=staff.id)) == 1
     assert included.left_out.private_channels == 0
+
+
+def overwrites_of(client, channel_id):
+    rows = run(client, PermissionOverwrite.filter(channel_id=channel_id))
+    return sorted((r.role_id, r.user_id, r.allow, r.deny) for r in rows)
+
+
+def everyone_role(client, sid):
+    return run(client, Role.get(server_id=sid, is_default=True))
+
+
+def test_only_me_creates_one_overwrite_hiding_the_channel_from_everyone(client, world, bundle):
+    report = do_import(client, bundle, world.sid, only={"103"}, private={"103": "only_me"})
+
+    staff = channel_named(client, world.sid, "staff")
+    assert overwrites_of(client, staff.id) == [
+        (everyone_role(client, world.sid).id, None, 0, int(Permission.VIEW_CHANNEL))]
+    assert run(client, PermissionOverwrite.filter(server_id=world.sid).count()) == 1
+    row = next(c for c in report.channels if c.source_id == "103")
+    assert (row.private, row.visibility, row.action) == (True, "only_me", "create")
+    assert row.plan == "create, only the owner can see it"
+    assert row.channel_id == staff.id and row.messages == 1
+
+
+def test_everyone_creates_no_overwrite(client, world, bundle):
+    do_import(client, bundle, world.sid, only={"103"}, private={"103": "everyone"})
+
+    staff = channel_named(client, world.sid, "staff")
+    assert overwrites_of(client, staff.id) == []
+    assert run(client, PermissionOverwrite.filter(server_id=world.sid).count()) == 0
+
+
+def test_a_dry_run_with_private_channels_writes_no_overwrite(client, world, bundle):
+    report = do_import(
+        client, bundle, world.sid, private={"103": "only_me"}, dry_run=True)
+
+    staff = next(c for c in report.channels if c.source_id == "103")
+    assert (staff.private, staff.visibility, staff.messages) == (True, "only_me", 1)
+    assert run(client, PermissionOverwrite.filter(server_id=world.sid).count()) == 0
+    assert run(client, Channel.filter(server_id=world.sid).count()) == 0
+
+
+def test_public_rows_are_not_private(client, world, bundle):
+    report = do_import(client, bundle, world.sid, dry_run=True)
+    assert {c.source_id: c.private for c in report.channels} == {
+        "101": False, "103": True, "105": False, "104": False, "106": False, "107": False}
+    assert all(c.visibility is None for c in report.channels)
+
+
+def test_a_rerun_leaves_the_owners_edits_to_the_overwrites_alone(client, world, bundle):
+    do_import(client, bundle, world.sid, only={"103"}, private={"103": "only_me"})
+    staff = channel_named(client, world.sid, "staff")
+    run(client, PermissionOverwrite.filter(channel_id=staff.id).delete())
+    run(client, PermissionOverwrite.create(
+        server_id=world.sid, channel_id=staff.id, user_id=world.alice_user["id"],
+        allow=int(Permission.VIEW_CHANNEL), deny=0))
+    edited = overwrites_of(client, staff.id)
+
+    for visibility in ("only_me", "everyone"):
+        report = do_import(
+            client, bundle, world.sid, only={"103"}, private={"103": visibility})
+        row = next(c for c in report.channels if c.source_id == "103")
+        assert (row.action, row.visibility, row.private) == ("existing", None, True)
+        assert overwrites_of(client, staff.id) == edited
+    assert run(client, Channel.filter(server_id=world.sid, name="staff").count()) == 1
+
+
+def test_a_private_channel_that_is_not_selected_is_skipped_and_counted(client, world, bundle):
+    report = do_import(client, bundle, world.sid)
+    staff = next(c for c in report.channels if c.source_id == "103")
+    assert (staff.action, staff.reason, staff.private, staff.visibility) == (
+        "skipped", "private", True, None)
+    assert report.left_out.private_channels == 1
+
+
+@pytest.mark.parametrize("private, message", [
+    ({"999": "only_me"}, "Channel 999 is not in the bundle"),
+    ({"101": "only_me"}, "Channel 101 is not private"),
+])
+def test_private_options_must_name_private_channels_of_the_bundle(
+        client, world, bundle, private, message):
+    with pytest.raises(ImportAborted, match=message):
+        do_import(client, bundle, world.sid, private=private)
+    assert run(client, Channel.filter(server_id=world.sid).count()) == 0
+
+
+def test_a_private_channel_is_never_merged_into_an_existing_one(client, world, bundle):
+    target = create_channel(client, world.sid, "staff-room")
+    with pytest.raises(ImportAborted, match="--map 103=.*never merged"):
+        do_import(
+            client, bundle, world.sid, channel_map={"103": target["id"]},
+            private={"103": "only_me"})
+    assert run(client, Message.filter(channel_id=target["id"]).count()) == 0
+
+
+def test_a_missing_everyone_role_aborts_before_anything_is_written(client, world, bundle):
+    run(client, Role.filter(server_id=world.sid, is_default=True).update(is_default=False))
+    with pytest.raises(ImportAborted, match="no @everyone role"):
+        do_import(client, bundle, world.sid, private={"103": "only_me"})
+    assert run(client, Channel.filter(server_id=world.sid).count()) == 0
+    do_import(client, bundle, world.sid, private={"103": "everyone"})
+
+
+def test_existing_only_hands_over_messages_in_an_imported_private_channel(client, world, bundle):
+    do_import(client, bundle, world.sid, only={"103"}, private={"103": "only_me"})
+    staff = channel_named(client, world.sid, "staff")
+    system = run(client, User.get(username=IMPORTED_USERNAME))
+    assert messages_of(client, channel_id=staff.id)[0].author_id == system.id
+
+    report = do_import(
+        client, bundle, world.sid, authors=authors(world), existing_only=True)
+
+    row = next(c for c in report.channels if c.source_id == "103")
+    assert row.handed_over == 1 and row.private is True
+    assert messages_of(client, channel_id=staff.id)[0].author_id == world.alice_user["id"]
+
+
+def test_existing_only_does_not_create_private_channels(client, world, bundle):
+    do_import(client, bundle, world.sid, authors=authors(world), existing_only=True)
+    assert run(client, Channel.filter(server_id=world.sid).count()) == 0
+
+
+def test_messages_seen_per_channel_add_up_to_the_total(client, world, bundle):
+    report = do_import(
+        client, bundle, world.sid, authors=authors(world), private={"103": "only_me"})
+    assert sum(c.seen for c in report.channels) == report.seen
+    assert next(c for c in report.channels if c.source_id == "103").seen == 1
+
+    again = do_import(
+        client, bundle, world.sid, authors=authors(world), private={"103": "only_me"})
+    assert sum(c.seen for c in again.channels) == again.seen == report.seen
+
+
+# Command line
+
+def cli_args(bundle, *flags):
+    return import_cli.parse_args([str(bundle), "--server", "1", *flags])
+
+
+def test_the_command_line_leaves_private_channels_out_by_default(bundle):
+    assert import_cli.build_options(cli_args(bundle)).private == {}
+
+
+def test_include_private_makes_every_private_channel_only_me(bundle):
+    options = import_cli.build_options(cli_args(bundle, "--include-private"))
+    assert options.private == {"103": "only_me"}
+
+
+def test_private_visible_makes_them_visible_to_everyone(bundle):
+    options = import_cli.build_options(
+        cli_args(bundle, "--include-private", "--private-visible"))
+    assert options.private == {"103": "everyone"}
+
+
+def test_private_visible_needs_include_private(bundle, capsys):
+    with pytest.raises(SystemExit):
+        cli_args(bundle, "--private-visible")
+    assert "--include-private" in capsys.readouterr().err
 
 
 def test_unknown_format_version_is_refused(client, world, bundle):
@@ -814,6 +1111,7 @@ def test_chunks_are_read_in_numeric_order_one_at_a_time(bundle):
 
 def test_members_who_were_caught_up_stay_caught_up(client, world, bundle):
     general = create_channel(world.owner, world.sid, "general")
+    mark_imported(client, general["id"], "101")
     seed = run(client, Message.create(
         uuid=uuid.uuid4(), content="{}", author_id=world.alice_user["id"], server_id=world.sid,
         channel_id=general["id"], timestamp=datetime.now(timezone.utc)))
