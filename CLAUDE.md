@@ -22,6 +22,12 @@
 - Docs stay short and plain.
 - Run the repo's tests, lint, and type checks before pushing.
 
+## Tests
+- A behaviour is tested once, at the lowest layer that can prove it.
+- Server API tests own the rules: permissions, validation, limits. Frontend unit tests own client-only logic. e2e owns a small set of cross-stack flows, not rule matrices.
+- Variations of one behaviour use `pytest.mark.parametrize`.
+- A PR whose tests outweigh its code says why in the description.
+
 ## Cross-repo changes
 - If the frontend depends on a backend change, say so in both PRs. The backend merges and deploys (migrations run on the homelab) before the frontend merges.
 
