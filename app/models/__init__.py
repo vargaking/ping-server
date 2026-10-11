@@ -21,8 +21,9 @@ from .ServerImport import ServerImport
 from .StatSample import StatSample
 from .PermissionOverwrite import PermissionOverwrite
 from .Friendship import Friendship
+from .MessageTombstone import MessageTombstone
 
 __all__ = ["Role", "User", "Server", "RoleToUser", "UserToServer",
            "Channel", "ChannelGroup", "ForumPost", "ForumTag", "ForumPostTag", "Conversation", "Message", "Token", "Invite", "ReadState",
            "Attachment", "Reaction", "PushSubscription", "ServerRequest", "ServerImport", "StatSample",
-           "PermissionOverwrite", "Friendship"]
+           "PermissionOverwrite", "Friendship", "MessageTombstone"]
