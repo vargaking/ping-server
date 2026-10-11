@@ -165,6 +165,8 @@ def test_dm_typing_reaches_only_the_peer(client, new_client, now):
             carol_client.websocket_connect("/ws", headers=HEADERS) as carol_ws:
         for ws in (alice_ws, alice_tab, bob_ws, carol_ws):
             ws_ready(ws)
+        alice_ws.receive_json()  # bob online
+        alice_tab.receive_json()  # bob online
 
         alice_ws.send_json({"type": "typing", "conversation_id": convo["id"]})
         assert bob_ws.receive_json() == {

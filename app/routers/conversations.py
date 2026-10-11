@@ -129,6 +129,7 @@ async def _to_response(
 @router.post("/", response_model=ConversationResponse, status_code=status.HTTP_200_OK)
 async def get_or_create_conversation(
     body: ConversationCreate,
+    request: Request,
     current_user: User = Depends(get_current_user),
 ):
     """Open the 1:1 conversation with another user, creating it on first use.
@@ -145,9 +146,14 @@ async def get_or_create_conversation(
         raise HTTPException(status_code=404, detail="User not found")
 
     user_a_id, user_b_id = Conversation.normalize_pair(current_user.id, other.id)
-    conversation, _ = await Conversation.get_or_create(
+    conversation, created = await Conversation.get_or_create(
         user_a_id=user_a_id, user_b_id=user_b_id
     )
+
+    if created:
+        comms = getattr(request.app.state, "comms", None)
+        if comms is not None:
+            await comms.announce_presence_between(current_user.id, other.id)
 
     return await _to_response(conversation, current_user)
 

@@ -113,6 +113,51 @@ def test_presence_flows_between_members(two_members):
             "type": "presence_update", "user_id": bob["id"], "online": False}
 
 
+@pytest.fixture
+def strangers(client, new_client):
+    """alice and bob share no server."""
+    alice = register(client, "alice-dm")
+    bob_client = new_client()
+    bob = register(bob_client, "bob-dm")
+    return client, alice, bob_client, bob
+
+
+def test_presence_flows_between_dm_partners_without_shared_server(strangers):
+    alice_client, alice, bob_client, bob = strangers
+    assert bob_client.post("/conversations/", json={"user_id": alice["id"]}).status_code == 200
+
+    with alice_client.websocket_connect("/ws", headers=HEADERS) as alice_ws:
+        assert ws_ready(alice_ws) == {"type": "presence_init", "user_ids": []}
+
+        with bob_client.websocket_connect("/ws", headers=HEADERS) as bob_ws:
+            assert ws_ready(bob_ws) == {"type": "presence_init", "user_ids": [alice["id"]]}
+            assert alice_ws.receive_json() == {
+                "type": "presence_update", "user_id": bob["id"], "online": True}
+
+        assert alice_ws.receive_json() == {
+            "type": "presence_update", "user_id": bob["id"], "online": False}
+
+
+def test_new_conversation_announces_online_partners_once(strangers):
+    alice_client, alice, bob_client, bob = strangers
+
+    with alice_client.websocket_connect("/ws", headers=HEADERS) as alice_ws, \
+            bob_client.websocket_connect("/ws", headers=HEADERS) as bob_ws:
+        assert ws_ready(alice_ws) == {"type": "presence_init", "user_ids": []}
+        assert ws_ready(bob_ws) == {"type": "presence_init", "user_ids": []}
+
+        for _ in range(2):
+            res = alice_client.post("/conversations/", json={"user_id": bob["id"]})
+            assert res.status_code == 200, res.text
+
+        # Frames arrive in order, so a second announcement would precede this reply.
+        for ws, other in ((alice_ws, bob), (bob_ws, alice)):
+            assert ws.receive_json() == {
+                "type": "presence_update", "user_id": other["id"], "online": True}
+            ws.send_json({"type": "connection_init"})
+            assert ws.receive_json() == {"type": "presence_init", "user_ids": [other["id"]]}
+
+
 def test_legacy_connection_init_cannot_claim_another_identity(two_members):
     alice_client, alice, bob_client, bob, *_ = two_members
     with alice_client.websocket_connect("/ws", headers=HEADERS) as alice_ws:
