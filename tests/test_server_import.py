@@ -35,7 +35,7 @@ from app.services.imports import runner as runner_module
 from app.services.imports.runner import ImportRunner
 from app.services.system_user import IMPORTED_PASSWORD_HASH, IMPORTED_USERNAME
 from tests.conftest import ORIGIN, create_server, register, ws_ready
-from tests.test_channel_permissions import chat_frame
+from tests.test_channel_permissions import VIEW, chat_frame, overwrite
 from tests.test_permissions import join
 
 FIXTURE = Path(__file__).parent / "fixtures" / "bundle"
@@ -850,6 +850,40 @@ def updated(frames) -> list[dict]:
     return [f for f in frames if f["type"] == "server_import_updated"]
 
 
+def ids_of(client, sid, *names) -> list[int]:
+    return sorted(run(client, Channel.filter(
+        server_id=sid, name__in=names).values_list("id", flat=True)))
+
+
+def finished(ws) -> dict:
+    return frames_until(ws, lambda f: f["type"] == "server_import_finished")[-1]
+
+
+def quiet(ws) -> list[dict]:
+    """What the socket got up to a pong; no frame is sent while nothing happens."""
+    ws.send_json({"type": "ping", "t": 7})
+    return frames_until(ws, lambda f: f["type"] == "pong")[:-1]
+
+
+def hide(client, sid, channel_id) -> None:
+    everyone = run(client, Role.get(server_id=sid, is_default=True))
+    res = overwrite(
+        client, f"/channels/{channel_id}/permissions/roles/{everyone.id}", deny=VIEW)
+    assert res.status_code == 200, res.text
+
+
+def stop_after_first_batch(monkeypatch):
+    real = runner_module.import_bundle
+
+    async def stops(bundle, options, progress=None):
+        async def raises(seen, channel):
+            raise RuntimeError("disk exploded")
+
+        return await real(bundle, options, raises)
+
+    monkeypatch.setattr(runner_module, "import_bundle", stops)
+
+
 def test_progress_goes_to_the_owner_and_the_end_to_every_member(client, world, monkeypatch):
     monkeypatch.setattr(runner_module, "PROGRESS_INTERVAL", 0)
     monkeypatch.setattr(importer, "BATCH_SIZE", 2)
@@ -881,15 +915,167 @@ def test_progress_goes_to_the_owner_and_the_end_to_every_member(client, world, m
 
         assert start(client, world.sid, got["id"]).status_code == 202
         frames = frames_until(owner_ws, lambda f: f["type"] == "server_import_finished")
-        assert frames[-1] == {"type": "server_import_finished", "server_id": world.sid}
+        written = ids_of(client, world.sid, "general", "ideas", "off-topic")
+        assert frames[-1] == {
+            "type": "server_import_finished", "server_id": world.sid, "channel_ids": written}
         running = [f["import"]["progress"] for f in updated(frames)
                    if (f["import"]["progress"] or {}).get("phase") == "importing"]
         assert running and running[-1]["total"] == 13 and running[-1]["label"]
         assert [f["import"]["status"] for f in updated(frames)][-1] == "done"
 
         seen = frames_until(alice_ws, lambda f: f["type"] == "server_import_finished")
-        assert seen[-1] == {"type": "server_import_finished", "server_id": world.sid}
+        assert seen[-1] == {
+            "type": "server_import_finished", "server_id": world.sid, "channel_ids": written}
         assert not updated(seen)
+
+
+def test_the_end_lists_exactly_the_channels_that_were_written(client, world):
+    with client.websocket_connect("/ws", headers=HEADERS) as owner_ws, \
+            world.alice.websocket_connect("/ws", headers=HEADERS) as alice_ws:
+        ws_ready(owner_ws)
+        ws_ready(alice_ws)
+        got = ready_import(client, world.sid)
+        assert start(client, world.sid, got["id"]).status_code == 202
+
+        for ws in (owner_ws, alice_ws):
+            frame = finished(ws)
+            assert frame["channel_ids"] == ids_of(client, world.sid, "general", "ideas", "off-topic")
+            assert frame["channel_ids"] == sorted(frame["channel_ids"])
+
+
+def test_a_selected_private_channel_is_listed_for_those_who_can_see_it(client, world):
+    with client.websocket_connect("/ws", headers=HEADERS) as owner_ws, \
+            world.alice.websocket_connect("/ws", headers=HEADERS) as alice_ws:
+        ws_ready(owner_ws)
+        ws_ready(alice_ws)
+        got = ready_import(client, world.sid)
+        start(client, world.sid, got["id"], {"private_channels": {"103": "only_me"}})
+
+        mine = finished(owner_ws)["channel_ids"]
+        theirs = finished(alice_ws)["channel_ids"]
+
+    staff = staff_channel(client, world.sid).id
+    assert staff in mine and staff not in theirs
+    assert sorted(set(mine) - {staff}) == theirs == ids_of(
+        client, world.sid, "general", "ideas", "off-topic")
+
+
+def test_a_rerun_with_nothing_new_lists_no_channel(client, world):
+    done_import(world)
+
+    with client.websocket_connect("/ws", headers=HEADERS) as owner_ws, \
+            world.alice.websocket_connect("/ws", headers=HEADERS) as alice_ws:
+        ws_ready(owner_ws)
+        ws_ready(alice_ws)
+        second = ready_import(client, world.sid)
+        assert start(client, world.sid, second["id"]).status_code == 202
+
+        assert finished(owner_ws) == {
+            "type": "server_import_finished", "server_id": world.sid, "channel_ids": []}
+        assert finished(alice_ws)["channel_ids"] == []
+
+
+def test_a_remap_lists_only_the_channels_holding_the_authors_messages(client, world):
+    done = done_import(world)
+
+    with world.bob.websocket_connect("/ws", headers=HEADERS) as bob_ws:
+        ws_ready(bob_ws)
+        set_authors(client, world.sid, done["id"], {"a4": world.bob_user["id"]})
+
+        assert finished(bob_ws)["channel_ids"] == ids_of(client, world.sid, "ideas", "off-topic")
+
+
+def test_a_remap_lists_a_channel_only_to_those_who_can_view_it(client, world):
+    done = done_import(world)
+    general = ids_of(client, world.sid, "general")[0]
+    hide(client, world.sid, general)
+
+    with client.websocket_connect("/ws", headers=HEADERS) as owner_ws, \
+            world.alice.websocket_connect("/ws", headers=HEADERS) as alice_ws:
+        ws_ready(owner_ws)
+        ws_ready(alice_ws)
+        set_authors(client, world.sid, done["id"], {"a2": world.bob_user["id"]})
+
+        assert finished(owner_ws)["channel_ids"] == ids_of(client, world.sid, "general", "ideas")
+        assert finished(alice_ws)["channel_ids"] == ids_of(client, world.sid, "ideas")
+
+
+def test_a_deleted_channel_is_not_listed(client, world, monkeypatch):
+    done = done_import(world)
+    general = ids_of(client, world.sid, "general")[0]
+    real = runner_module.import_bundle
+
+    async def deletes_a_channel(bundle, options, progress=None):
+        report = await real(bundle, options, progress)
+        await Channel.filter(id=general).delete()
+        return report
+
+    monkeypatch.setattr(runner_module, "import_bundle", deletes_a_channel)
+    with client.websocket_connect("/ws", headers=HEADERS) as owner_ws:
+        ws_ready(owner_ws)
+        set_authors(client, world.sid, done["id"], {"a2": world.bob_user["id"]})
+
+        assert finished(owner_ws)["channel_ids"] == ids_of(client, world.sid, "ideas")
+
+
+def test_a_failed_import_that_wrote_rows_still_tells_what_changed(client, world, monkeypatch):
+    got = ready_import(client, world.sid)
+    stop_after_first_batch(monkeypatch)
+
+    with client.websocket_connect("/ws", headers=HEADERS) as owner_ws, \
+            world.alice.websocket_connect("/ws", headers=HEADERS) as alice_ws:
+        ws_ready(owner_ws)
+        ws_ready(alice_ws)
+        assert start(client, world.sid, got["id"]).status_code == 202
+
+        frames = frames_until(owner_ws, lambda f: f["type"] == "server_import_finished")
+        written = ids_of(client, world.sid, "off-topic")
+        assert frames[-1] == {
+            "type": "server_import_finished", "server_id": world.sid, "channel_ids": written}
+        assert updated(frames)[-1]["import"]["status"] == "failed"
+        assert finished(alice_ws)["channel_ids"] == written
+    assert settle(client, world.sid, got["id"])["status"] == "failed"
+
+
+def test_a_failed_import_that_wrote_nothing_sends_no_end(client, world, monkeypatch):
+    got = ready_import(client, world.sid)
+
+    async def aborts(*args, **kwargs):
+        raise ImportAborted("The import would create 9999 channels")
+
+    monkeypatch.setattr(runner_module, "import_bundle", aborts)
+    with client.websocket_connect("/ws", headers=HEADERS) as owner_ws:
+        ws_ready(owner_ws)
+        start(client, world.sid, got["id"])
+        settle(client, world.sid, got["id"])
+
+        frames = quiet(owner_ws)
+        assert [f["import"]["status"] for f in updated(frames)][-1] == "failed"
+        assert not [f for f in frames if f["type"] == "server_import_finished"]
+
+
+def test_a_remap_that_fails_after_a_handover_still_tells_what_changed(client, world, monkeypatch):
+    done = done_import(world)
+    stop_after_first_batch(monkeypatch)
+
+    with client.websocket_connect("/ws", headers=HEADERS) as owner_ws:
+        ws_ready(owner_ws)
+        set_authors(client, world.sid, done["id"], {"a4": world.bob_user["id"]})
+
+        frames = frames_until(owner_ws, lambda f: f["type"] == "server_import_finished")
+        assert frames[-1]["channel_ids"] == ids_of(client, world.sid, "off-topic")
+        assert updated(frames)[-1]["import"]["status"] == "done"
+    assert settle(client, world.sid, done["id"])["error"] == "The import failed unexpectedly"
+    assert message(client, "6001").author_id == world.bob_user["id"]
+
+
+def test_a_check_and_a_discard_send_no_end(client, world):
+    with client.websocket_connect("/ws", headers=HEADERS) as owner_ws:
+        ws_ready(owner_ws)
+        got = ready_import(client, world.sid)
+        assert client.delete(url(world.sid, got["id"])).status_code in (200, 204)
+
+        assert not [f for f in quiet(owner_ws) if f["type"] == "server_import_finished"]
 
 
 def test_a_remap_tells_the_members_when_it_is_done(client, world):
@@ -900,7 +1086,9 @@ def test_a_remap_tells_the_members_when_it_is_done(client, world):
         set_authors(client, world.sid, done["id"], {"a2": world.bob_user["id"]})
         settle(client, world.sid, done["id"])
         frame = frames_until(bob_ws, lambda f: f["type"] == "server_import_finished")[-1]
-        assert frame == {"type": "server_import_finished", "server_id": world.sid}
+        assert frame == {
+            "type": "server_import_finished", "server_id": world.sid,
+            "channel_ids": ids_of(client, world.sid, "general", "ideas")}
 
 
 # Queue and shutdown

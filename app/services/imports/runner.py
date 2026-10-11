@@ -26,6 +26,7 @@ from ..bundle import format as bundle_format
 from ..bundle.format import BundleError
 from ..bundle.importer import ImportAborted, ImportOptions, import_bundle
 from ..bundle.plan import offer_private, plan_json
+from ..channel_visibility import send_per_member
 from . import storage
 from .serialize import import_json, planned_messages
 from .unpack import UnpackError, unpack_bundle
@@ -57,6 +58,7 @@ class _Job:
         self.owner_id = owner_id
         self.status = status
         self._last = float("-inf")
+        self.touched: set[int] = set()
 
     async def progress(
         self, phase: str, done: int, total: int, label: str | None = None, *, force: bool = False,
@@ -303,7 +305,8 @@ class ImportRunner:
         if row is None:
             return
         report = await self._run_importer(job, row, "importing", ImportOptions(
-            server_id=row.server_id, private=dict((row.plan or {}).get("private_selection") or {})))
+            server_id=row.server_id, touched=job.touched,
+            private=dict((row.plan or {}).get("private_selection") or {})))
         await anyio.to_thread.run_sync(storage.remove_path, storage.bundle_path(row.id) / "files")
         await self._done(job, result=plan_json(report))
 
@@ -312,7 +315,7 @@ class ImportRunner:
         if row is None:
             return
         await self._run_importer(job, row, "authors", ImportOptions(
-            server_id=row.server_id, existing_only=True))
+            server_id=row.server_id, existing_only=True, touched=job.touched))
         await self._done(job)
 
     @staticmethod
@@ -336,9 +339,24 @@ class ImportRunner:
     async def _done(self, job: _Job, **fields) -> None:
         changed = await job.change(
             "importing", status="done", progress=None, error=None, failed_step=None, **fields)
-        if changed and self.comms is not None:
-            await self.comms.broadcast_to_server(
-                job.server_id, {"type": "server_import_finished", "server_id": job.server_id})
+        if changed:
+            await self._announce_finished(job)
+
+    async def _announce_finished(self, job: _Job) -> None:
+        """Tell each member which of the channels this run wrote to they can
+        view, so clients refetch their history of them."""
+        if self.comms is None:
+            return
+        try:
+            server = await Server.get_or_none(id=job.server_id)
+            if server is None:
+                return
+            touched = sorted(job.touched)
+            await send_per_member(self.comms, server, lambda user_id, view: {
+                "type": "server_import_finished", "server_id": job.server_id,
+                "channel_ids": [c for c in touched if view.can_view(c)]})
+        except Exception:
+            logger.warning("Couldn't announce the end of import %s", job.import_id, exc_info=True)
 
     async def _fail(self, job: _Job, kind: str, exc: Exception) -> None:
         if isinstance(exc, (UnpackError, BundleError, ImportAborted)):
@@ -357,6 +375,8 @@ class ImportRunner:
                 await anyio.to_thread.run_sync(storage.remove_import_dir, job.import_id)
         except Exception:
             logger.warning("Couldn't record the failure of import %s", job.import_id, exc_info=True)
+        if job.touched:
+            await self._announce_finished(job)
 
     @staticmethod
     def _scrub(message: str, import_id: UUID) -> str:

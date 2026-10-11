@@ -155,7 +155,7 @@ def test_full_import(client, world, bundle):
     general = channel_named(client, world.sid, "general")
     assert general.topic == "Welcome to the sample server"
     assert general.channel_settings["import"] == {
-        "source": SOURCE, "id": "101", "ids": ["101"], "created": True}
+        "source": SOURCE, "id": "101", "ids": ["101"], "created": True, "rev": 1}
     text_group = run(client, ChannelGroup.get(server_id=world.sid, name="Text channels"))
     voice_group = run(client, ChannelGroup.get(server_id=world.sid, name="Voice channels"))
     assert general.group_id == text_group.id
@@ -289,7 +289,8 @@ def test_channel_plan_map_earlier_import_and_new(client, world, bundle):
     assert messages_of(client, channel_id=general["id"]) == []
     assert run(client, Channel.get(id=general["id"])).channel_settings == {}
     assert len(messages_of(client, channel_id=other["id"])) == 1
-    assert channel_marker(client, other["id"]) == {"source": SOURCE, "id": "106", "ids": ["106"]}
+    assert channel_marker(client, other["id"]) == {
+        "source": SOURCE, "id": "106", "ids": ["106"], "rev": 1}
     created = run(client, Channel.filter(server_id=world.sid, name="general").order_by("id"))
     assert len(created) == 2
     imported = created[1]
@@ -356,7 +357,8 @@ def test_a_channel_an_old_run_merged_into_by_name_is_still_found(client, world, 
         "existing", "earlier import", general["id"])
     assert len(messages_of(client, channel_id=general["id"])) == 7
     assert run(client, Channel.filter(server_id=world.sid, name="general").count()) == 1
-    assert channel_marker(client, general["id"]) == {"source": SOURCE, "id": "101"}
+    assert channel_marker(client, general["id"]) == {
+        "source": SOURCE, "id": "101", "rev": 1}
 
 
 def test_every_source_mapped_onto_one_channel_is_found_again(client, world, bundle):
@@ -365,7 +367,7 @@ def test_every_source_mapped_onto_one_channel_is_found_again(client, world, bund
     do_import(client, bundle, world.sid, only={"101", "106"},
               channel_map={"101": target["id"], "106": target["id"]})
     assert channel_marker(client, target["id"]) == {
-        "source": SOURCE, "id": "106", "ids": ["106", "101"]}
+        "source": SOURCE, "id": "106", "ids": ["106", "101"], "rev": 2}
     assert len(messages_of(client, channel_id=target["id"])) == 8
     count = run(client, Channel.filter(server_id=world.sid).count())
 
@@ -1280,3 +1282,169 @@ def test_no_conversation_can_be_opened_with_the_import_account(client, world, bu
     system = run(client, User.get(username=IMPORTED_USERNAME))
     res = world.alice.post("/conversations/", json={"user_id": system.id})
     assert res.status_code == 404
+
+
+# Revisions and touched channels
+
+def revs(client, sid) -> dict[str, int | None]:
+    channels = run(client, Channel.filter(server_id=sid))
+    return {c.name: (c.channel_settings.get("import") or {}).get("rev") for c in channels}
+
+
+def touched_names(client, options) -> set[str]:
+    return {run(client, Channel.get(id=i)).name for i in options.touched}
+
+
+def run_import(client, bundle, sid, **options):
+    opts = ImportOptions(server_id=sid, **options)
+    report = run(client, import_bundle(bundle, opts))
+    return report, opts
+
+
+def test_every_written_channel_gets_a_rev_and_keeps_the_rest_of_its_marker(client, world, bundle):
+    _, options = run_import(client, bundle, world.sid, authors=authors(world))
+
+    assert revs(client, world.sid) == {"general": 1, "ideas": 2, "Lounge": None, "off-topic": 1}
+    general = channel_named(client, world.sid, "general")
+    assert general.channel_settings["import"] == {
+        "source": SOURCE, "id": "101", "ids": ["101"], "created": True, "rev": 1}
+    assert touched_names(client, options) == {"general", "ideas", "off-topic"}
+
+
+def test_a_rev_counts_every_batch_of_a_channel(client, world, bundle, monkeypatch):
+    monkeypatch.setattr(importer, "BATCH_SIZE", 2)
+
+    run_import(client, bundle, world.sid, authors=authors(world))
+
+    assert revs(client, world.sid)["general"] == 4
+
+
+def test_a_dry_run_leaves_no_rev_and_touches_nothing(client, world, bundle):
+    _, options = run_import(client, bundle, world.sid, dry_run=True)
+    assert options.touched == set()
+    assert revs(client, world.sid) == {}
+
+    run_import(client, bundle, world.sid, authors=authors(world))
+    before = revs(client, world.sid)
+    _, options = run_import(
+        client, bundle, world.sid, dry_run=True, authors=authors(world, a2=world.bob_user["username"]))
+    assert revs(client, world.sid) == before and options.touched == set()
+
+
+def test_a_rerun_with_nothing_new_leaves_the_rev_alone(client, world, bundle):
+    run_import(client, bundle, world.sid, authors=authors(world))
+    before = revs(client, world.sid)
+
+    _, options = run_import(client, bundle, world.sid, authors=authors(world))
+
+    assert revs(client, world.sid) == before
+    assert options.touched == set()
+
+
+def test_a_refreshed_bundle_bumps_only_the_channels_that_got_rows(client, world, bundle):
+    run_import(client, bundle, world.sid, authors=authors(world))
+    (bundle / "channels/101/messages/3.json").write_text(json.dumps([{
+        "id": "1008", "author_id": "a1", "timestamp": "2024-03-09T09:00:00Z", "edited_at": None,
+        "content": "A new message", "reply_to_id": None, "pinned": False,
+        "attachments": [], "embeds": [], "reactions": []}]))
+
+    _, options = run_import(client, bundle, world.sid, authors=authors(world))
+
+    assert revs(client, world.sid) == {"general": 2, "ideas": 2, "Lounge": None, "off-topic": 1}
+    assert touched_names(client, options) == {"general"}
+
+
+def test_a_new_post_without_messages_bumps_the_forum(client, world, bundle):
+    run_import(client, bundle, world.sid, authors=authors(world))
+    template = json.loads((bundle / "channels/105/threads/8001.json").read_text())
+    template.update(id="8003", title="Empty", messages=[])
+    (bundle / "channels/105/threads/8003.json").write_text(json.dumps(template))
+
+    _, options = run_import(client, bundle, world.sid, authors=authors(world))
+
+    assert run(client, ForumPost.filter(title="Empty").exists())
+    assert revs(client, world.sid)["ideas"] == 3
+    assert touched_names(client, options) == {"ideas"}
+
+
+def test_existing_only_bumps_the_channels_with_handovers(client, world, bundle):
+    run_import(client, bundle, world.sid, authors=authors(world))
+
+    report, options = run_import(
+        client, bundle, world.sid, existing_only=True,
+        authors=authors(world, a2=world.bob_user["username"]))
+
+    assert {c.name for c in report.channels if c.handed_over} == {"general", "ideas"}
+    assert revs(client, world.sid) == {"general": 2, "ideas": 3, "Lounge": None, "off-topic": 1}
+    assert touched_names(client, options) == {"general", "ideas"}
+
+
+def test_existing_only_without_handovers_bumps_nothing(client, world, bundle):
+    run_import(client, bundle, world.sid, authors=authors(world))
+    before = revs(client, world.sid)
+
+    _, options = run_import(client, bundle, world.sid, existing_only=True, authors=authors(world))
+
+    assert revs(client, world.sid) == before and options.touched == set()
+
+
+def test_a_handover_into_a_mapped_channel_without_a_marker_records_the_source(
+        client, world, bundle):
+    general = create_channel(client, world.sid, "general")
+    run_import(client, bundle, world.sid, only={"101"}, channel_map={"101": general["id"]})
+    run(client, Channel.filter(id=general["id"]).update(channel_settings={}))
+
+    run_import(
+        client, bundle, world.sid, existing_only=True, only={"101"},
+        channel_map={"101": general["id"]}, authors={"a2": world.bob_user["username"]})
+
+    assert channel_marker(client, general["id"]) == {
+        "source": SOURCE, "id": "101", "ids": ["101"], "rev": 1}
+
+
+def test_a_failure_midway_leaves_the_rev_of_the_partly_written_channel(
+        client, world, bundle, monkeypatch):
+    monkeypatch.setattr(importer, "BATCH_SIZE", 2)
+    original = Message.bulk_create
+    calls = []
+
+    async def failing(objects, *args, **kwargs):
+        calls.append(len(objects))
+        if len(calls) == 3:
+            raise RuntimeError("disk on fire")
+        return await original(objects, *args, **kwargs)
+
+    monkeypatch.setattr(Message, "bulk_create", failing)
+    options = ImportOptions(server_id=world.sid, authors=authors(world))
+    with pytest.raises(RuntimeError):
+        run(client, import_bundle(bundle, options))
+
+    general = channel_named(client, world.sid, "general")
+    off_topic = channel_named(client, world.sid, "off-topic")
+    assert run(client, Message.filter(channel_id=general.id).count()) == 2
+    assert general.channel_settings["import"]["rev"] == 1
+    assert options.touched == {off_topic.id, general.id}
+
+
+def test_recording_a_source_keeps_a_rev_another_writer_bumped(client, world, bundle):
+    run_import(client, bundle, world.sid, authors=authors(world))
+    general = channel_named(client, world.sid, "general")
+    stale = general.channel_settings["import"]
+    run(client, Channel.filter(id=general.id).update(
+        channel_settings={"import": {**stale, "rev": 7}}))
+
+    state = importer._Import(bundle, ImportOptions(server_id=world.sid))
+    run(client, state._record_source(general, "102"))
+
+    marker = channel_marker(client, general.id)
+    assert marker["rev"] == 7 and marker["ids"] == ["101", "102"]
+    assert general.channel_settings["import"]["rev"] == 7
+
+
+def test_the_rev_shows_in_the_channel_list(client, world, bundle):
+    run_import(client, bundle, world.sid, authors=authors(world))
+
+    listed = {c["name"]: c for c in world.owner.get(f"/channels/{world.sid}").json()}
+
+    assert listed["general"]["channel_settings"]["import"]["rev"] == 1
+    assert "rev" not in listed["Lounge"]["channel_settings"]["import"]

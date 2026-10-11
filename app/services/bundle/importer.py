@@ -79,6 +79,8 @@ class ImportOptions:
     dry_run: bool = False
     # Only hand existing messages to mapped authors. Creates nothing but the import account.
     existing_only: bool = False
+    # Filled by the run: ids of the channels it has written to, as each write commits.
+    touched: set[int] = field(default_factory=set)
 
 
 Progress = Callable[[int, str | None], Awaitable[None]]
@@ -496,20 +498,41 @@ class _Import:
         plan.report.channel_id = plan.channel.id
         return plan.channel
 
-    async def _record_source(self, channel: Channel, source_id: str) -> None:
-        marker = _channel_marker(channel)
+    def _marker_with_source(self, marker: dict, source_id: str) -> dict | None:
+        """*marker* with *source_id* recorded; None when it already is."""
         if not marker:
-            updated = {"source": self.source, "id": source_id, "ids": [source_id]}
-        elif source_id in _source_ids(marker, self.source):
-            return
-        elif marker.get("source") == self.source:
-            updated = {**marker, "ids": [*_marker_ids(marker), source_id]}
-        else:
-            others = marker.get("sources") if isinstance(marker.get("sources"), dict) else {}
-            updated = {**marker, "sources": {
-                **others, self.source: [*_source_ids(marker, self.source), source_id]}}
-        channel.channel_settings = {**channel.channel_settings, "import": updated}
-        await channel.save(update_fields=["channel_settings"])
+            return {"source": self.source, "id": source_id, "ids": [source_id]}
+        if source_id in _source_ids(marker, self.source):
+            return None
+        if marker.get("source") == self.source:
+            return {**marker, "ids": [*_marker_ids(marker), source_id]}
+        others = marker.get("sources") if isinstance(marker.get("sources"), dict) else {}
+        return {**marker, "sources": {
+            **others, self.source: [*_source_ids(marker, self.source), source_id]}}
+
+    async def _record_source(self, channel: Channel, source_id: str) -> None:
+        async with in_transaction():
+            locked = await Channel.select_for_update().get(id=channel.id)
+            settings = dict(locked.channel_settings or {})
+            updated = self._marker_with_source(_marker(settings), source_id)
+            if updated is None:
+                return
+            settings["import"] = updated
+            await Channel.filter(id=channel.id).update(channel_settings=settings)
+        channel.channel_settings = settings
+
+    async def _bump_rev(self, channel: Channel, source_id: str) -> None:
+        """Count a write to *channel* in its marker's rev. Call inside the
+        transaction of the write, so a client that read the rev sees every
+        row up to it."""
+        locked = await Channel.select_for_update().get(id=channel.id)
+        settings = dict(locked.channel_settings or {})
+        marker = dict(_marker(settings)) or self._marker_with_source({}, source_id)
+        rev = marker.get("rev")
+        marker["rev"] = (rev if type(rev) is int else 0) + 1
+        settings["import"] = marker
+        await Channel.filter(id=channel.id).update(channel_settings=settings)
+        channel.channel_settings = settings
 
     async def _group(self, name: str | None) -> ChannelGroup | None:
         if name is None:
@@ -637,6 +660,8 @@ class _Import:
         if post.post_id is None:
             async with in_transaction():
                 await self._create_post(channel, post)
+                await self._bump_rev(channel, plan.info.id)
+            self.options.touched.add(channel.id)
         await self._refresh_post(post)
 
     async def _create_post(self, channel: Channel, post: _PostState) -> None:
@@ -711,6 +736,8 @@ class _Import:
             if handovers and not self.dry:
                 async with in_transaction():
                     await self._hand_over(handovers)
+                    await self._bump_rev(channel, plan.info.id)
+                self.options.touched.add(channel.id)
             return
 
         opening_source = post.thread.messages[0].id if post and post.thread.messages else None
@@ -724,8 +751,9 @@ class _Import:
             return
 
         await self._resolve_replies(prepared, existing, channel)
+        created_post = post is not None and post.post_id is None
         async with in_transaction():
-            if post is not None and post.post_id is None:
+            if created_post:
                 await self._create_post(channel, post)
             rows = [self._message_row(item, plan, channel, post) for item in prepared]
             if rows:
@@ -740,6 +768,11 @@ class _Import:
                 if opening is not None:
                     post.opening_id = opening
                     await ForumPost.filter(id=post.post_id).update(opening_message_id=opening)
+            wrote = bool(rows or handovers or created_post)
+            if wrote:
+                await self._bump_rev(channel, plan.info.id)
+        if wrote:
+            self.options.touched.add(channel.id)
 
     def _count_left_out(self, messages: list) -> None:
         for message in messages:
