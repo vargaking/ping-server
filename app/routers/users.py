@@ -23,7 +23,7 @@ _BANNER_COLOR = re.compile(r"^#[0-9a-fA-F]{6}$")
 
 
 def _check_banner_color(value: str) -> str:
-    if not _BANNER_COLOR.match(value):
+    if not _BANNER_COLOR.fullmatch(value):
         raise PydanticCustomError("banner_color", "Use a colour like #1a2b3c.")
     return value.lower()
 

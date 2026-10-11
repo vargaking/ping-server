@@ -46,7 +46,7 @@ def test_banner_color_is_stored_lowercase(client, sent):
 
 
 @pytest.mark.parametrize(
-    "value", ["red", "#abc", "#12345g", "#1234567", "", " #123456", 123, ["#123456"]]
+    "value", ["red", "#abc", "#12345g", "#1234567", "#123456\n", "", " #123456", 123, ["#123456"]]
 )
 def test_invalid_banner_colors_are_refused_on_the_field(client, value):
     me = register(client)
