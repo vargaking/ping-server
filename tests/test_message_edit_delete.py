@@ -7,7 +7,12 @@ message_deleted frame, while the actor is excluded (they have the REST reply).
 import uuid
 from datetime import datetime, timezone
 
+import pytest
+
+from app.permissions import Permission
 from tests.conftest import ORIGIN, create_channel, create_server, register, ws_ready
+from tests.test_channel_permissions import overwrite, post_message as post_as
+from tests.test_permissions import promote
 
 HEADERS = {"origin": ORIGIN}
 DOC = {"type": "doc", "content": [{"type": "paragraph",
@@ -154,6 +159,28 @@ def test_non_owner_cannot_delete_others_message(client, new_client):
 
         res = bob_client.delete(f"/messages/{message_id}")
         assert res.status_code == 403, res.text
+
+
+@pytest.mark.parametrize("moderator, rule, in_that_channel, elsewhere", [
+    pytest.param(False, {"allow": int(Permission.MANAGE_MESSAGES)}, 204, 403, id="granted by the rule"),
+    pytest.param(True, {"deny": int(Permission.MANAGE_MESSAGES)}, 403, 204, id="taken by the rule"),
+])
+def test_a_channel_rule_grants_or_takes_manage_messages(
+        client, new_client, moderator, rule, in_that_channel, elsewhere):
+    server, channel, bob_client = setup_server_with_two_members(client, new_client)
+    carol_client = new_client()
+    carol = register(carol_client, "carol-med")
+    invite_and_join(client, carol_client, server["id"])
+    other = create_channel(client, server["id"], "other")
+    if moderator:
+        promote(client, server["id"], carol["id"])
+    path = f"/channels/{channel['id']}/permissions/members/{carol['id']}"
+    assert overwrite(client, path, **rule).status_code == 200
+    here = post_as(bob_client, server["id"], channel["id"])
+    there = post_as(bob_client, server["id"], other["id"])
+
+    assert carol_client.delete(f"/messages/{here}").status_code == in_that_channel
+    assert carol_client.delete(f"/messages/{there}").status_code == elsewhere
 
 
 def test_non_member_cannot_edit_or_delete(client, new_client):

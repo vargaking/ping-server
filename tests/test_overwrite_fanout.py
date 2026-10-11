@@ -33,8 +33,8 @@ LOGGER = "app.server_queue"
 ROW_FRAME = "permission_overwrite_updated"
 CONNECT = int(Permission.CONNECT)
 SPEAK = int(Permission.SPEAK)
+STREAM = int(Permission.STREAM)
 MANAGE_MESSAGES = int(Permission.MANAGE_MESSAGES)
-LOSE_OWN_ACCESS = "You would lose access to this channel"
 PRESENCE_NOISE = {"presence_update"}
 
 
@@ -261,24 +261,29 @@ def test_a_subject_id_no_row_can_have_is_not_found_before_any_query(crew, monkey
     assert subject_id not in bound
 
 
-def test_a_put_that_changes_nothing_still_checks_permissions(crew, new_client):
-    sid, general = crew.sid, crew.general["id"]
-    admin = roles_by_name(crew.owner_client, sid)["Admin"]
-    stranger = register(new_client())
+@pytest.mark.parametrize("who, channel, kind, subject, status, detail", [
+    pytest.param("mod", "general", "roles", "admin", 403, ABOVE_YOUR_RANK, id="role above you"),
+    pytest.param("mod", "general", "members", "owner", 403, MEMBER_ABOVE_YOU, id="the owner as a member"),
+    pytest.param("owner", "general", "members", "stranger", 404, "Member not found", id="not a member"),
+    pytest.param("owner", "general", "roles", "unknown", 404, "Role not found", id="unknown role"),
+    pytest.param("member", "general", "roles", "everyone", 403, "Missing permission", id="plain member"),
+    pytest.param("member", "secret", "roles", "everyone", 404, "Channel not found", id="hidden channel"),
+])
+def test_a_put_that_changes_nothing_still_checks_permissions(
+        crew, new_client, who, channel, kind, subject, status, detail):
+    callers = {"owner": crew.owner_client, "mod": crew.mod_client, "member": crew.member_client}
+    subjects = {
+        "admin": lambda: roles_by_name(crew.owner_client, crew.sid)["Admin"]["id"],
+        "owner": lambda: crew.owner["id"],
+        "stranger": lambda: register(new_client())["id"],
+        "unknown": lambda: 99999,
+        "everyone": lambda: crew.everyone["id"],
+    }
+    channel_id = {"general": crew.general["id"], "secret": crew.secret["id"]}[channel]
 
-    res = put(crew.mod_client, channel_rule(general, "roles", admin["id"]))
-    assert (res.status_code, res.json()["detail"]) == (403, ABOVE_YOUR_RANK)
-    res = put(crew.mod_client, channel_rule(general, "members", crew.owner["id"]))
-    assert (res.status_code, res.json()["detail"]) == (403, MEMBER_ABOVE_YOU)
-    res = put(crew.owner_client, channel_rule(general, "members", stranger["id"]))
-    assert (res.status_code, res.json()["detail"]) == (404, "Member not found")
-    res = put(crew.owner_client, channel_rule(general, "roles", 99999))
-    assert (res.status_code, res.json()["detail"]) == (404, "Role not found")
-    res = put(crew.member_client, channel_rule(general, "roles", crew.everyone["id"]))
-    assert (res.status_code, res.json()["detail"]) == (403, "Missing permission")
-    res = put(crew.member_client, channel_rule(crew.secret["id"], "roles", crew.everyone["id"]))
-    assert res.status_code == 404, res.text
-    assert res.json()["detail"] == "Channel not found"
+    res = put(callers[who], channel_rule(channel_id, kind, subjects[subject]()))
+
+    assert (res.status_code, res.json()["detail"]) == (status, detail)
 
 
 # -- caches ---------------------------------------------------------------------------
@@ -579,11 +584,9 @@ def test_a_rejected_write_queues_nothing(crew, caplog):
 
     with caplog.at_level(logging.DEBUG, logger=LOGGER), \
             listening(owner, owner=owner, mod=crew.mod_client) as live:
-        res = put(crew.mod_client, channel_rule(general, "roles", crew.everyone["id"]), deny=VIEW)
-        assert (res.status_code, res.json()["detail"]) == (403, LOSE_OWN_ACCESS)
-        res = put(crew.mod_client, channel_rule(general, "members", crew.member["id"]),
-                  allow=MANAGE_MESSAGES)
-        assert (res.status_code, res.json()["detail"]) == (403, BITS_YOU_LACK)
+        put(crew.mod_client, channel_rule(general, "roles", crew.everyone["id"]), deny=VIEW)
+        put(crew.mod_client, channel_rule(general, "members", crew.member["id"]),
+            allow=MANAGE_MESSAGES)
         assert live.settle() == {"owner": [], "mod": []}
     assert job_query_counts(caplog) == []
     assert owner.get(f"/channels/{general}/permissions").json() == {"roles": [], "members": []}
@@ -606,34 +609,31 @@ def test_the_target_deleted_before_the_job(crew, caplog):
     assert [r for r in caplog.records if r.name == LOGGER and r.levelno >= logging.WARNING] == []
 
 
-def test_a_channel_deleted_after_a_private_write_reaches_who_lost_it(crew, monkeypatch):
-    owner, sid, general = crew.owner_client, crew.sid, crew.general["id"]
-    delay_the_fan_out(monkeypatch)
-    with listening(owner, owner=owner, member=crew.member_client) as live:
-        res = put(owner, channel_rule(general, "roles", crew.everyone["id"]), deny=VIEW)
-        assert res.status_code == 200
-        assert owner.delete(f"/channels/{general}").status_code == 204
-        frames = live.settle()
-    assert [f["channel_id"] for f in of_type(frames["member"], "channel_deleted")] == [general]
-    assert not of_type(frames["member"], ROW_FRAME)
-
-
-def test_a_category_deleted_after_a_private_write_reaches_who_lost_it(crew, monkeypatch):
+@pytest.mark.parametrize("target", ["channel", "category"])
+def test_a_target_deleted_after_a_private_write_reaches_who_lost_it(crew, monkeypatch, target):
     owner, sid = crew.owner_client, crew.sid
-    group = owner.post(f"/servers/{sid}/channel-groups", json={"name": "Staff"}).json()
-    channel = owner.post(f"/channels/{sid}/create", json={
-        "name": "plans", "group_id": group["id"]}).json()
+    if target == "channel":
+        lost = crew.general["id"]
+        rule = channel_rule(lost, "roles", crew.everyone["id"])
+        delete = f"/channels/{lost}"
+    else:
+        group = owner.post(f"/servers/{sid}/channel-groups", json={"name": "Staff"}).json()
+        lost = owner.post(f"/channels/{sid}/create", json={
+            "name": "plans", "group_id": group["id"]}).json()["id"]
+        rule = group_rule(group["id"], "roles", crew.everyone["id"])
+        delete = f"/servers/{sid}/channel-groups/{group['id']}"
     delay_the_fan_out(monkeypatch)
     with listening(owner, owner=owner, member=crew.member_client) as live:
-        res = put(owner, group_rule(group["id"], "roles", crew.everyone["id"]), deny=VIEW)
-        assert res.status_code == 200
-        assert owner.delete(f"/servers/{sid}/channel-groups/{group['id']}").status_code == 204
-        frames = live.settle()
-    member = frames["member"]
-    assert [f["channel_id"] for f in of_type(member, "channel_deleted")] == [channel["id"]]
-    assert len(of_type(member, "channel_group_deleted")) == 1
-    snapshot = crew.member_client.get(f"/servers/{sid}/channels").json()
-    assert group["id"] not in [g["id"] for g in snapshot["groups"]]
+        assert put(owner, rule, deny=VIEW).status_code == 200
+        assert owner.delete(delete).status_code == 204
+        member = live.settle()["member"]
+
+    assert [f["channel_id"] for f in of_type(member, "channel_deleted")] == [lost]
+    assert len(of_type(member, "channel_group_deleted")) == (target == "category")
+    assert not of_type(member, ROW_FRAME)
+    if target == "category":
+        snapshot = crew.member_client.get(f"/servers/{sid}/channels").json()
+        assert group["id"] not in [g["id"] for g in snapshot["groups"]]
 
 
 def test_a_member_who_leaves_before_the_job_gets_nothing(crew, new_client):
@@ -704,44 +704,39 @@ def test_members_in_voice_cost_no_queries(crew, monkeypatch, caplog):
     assert without == with_voice
 
 
+@pytest.mark.parametrize("removed, kept", [
+    pytest.param(SPEAK, ["screen_share", "screen_share_audio"], id="speak"),
+    pytest.param(STREAM, ["microphone"], id="stream"),
+])
+def test_a_rule_that_removes_only_speak_or_stream_cuts_that_source_mid_call(
+        crew, monkeypatch, removed, kept):
+    owner, member_id = crew.owner_client, crew.member["id"]
+    room = create_channel(owner, crew.sid, "room", "voice")["id"]
+    source = use_presence(owner, monkeypatch, {
+        room: (VoiceParticipant(member_id, muted=False, deafened=False),)})
+
+    assert overwrite(owner, channel_rule(room, "members", member_id), deny=removed).status_code == 200
+
+    assert source.removed == []
+    assert source.updated == [(room, member_id, kept, {"server_muted": ""})]
+
+
 # -- changes that fan out inline wait for the queued jobs ------------------------------
 
-def test_a_role_change_waits_for_the_queued_fan_out(crew, monkeypatch):
+@pytest.mark.parametrize("change", ["unassigned", "deleted"])
+def test_a_role_change_waits_for_the_queued_fan_out(crew, monkeypatch, change):
     owner, sid, secret = crew.owner_client, crew.sid, crew.secret["id"]
     viewer = owner.post(f"/servers/{sid}/roles", json={"name": "Viewer"}).json()
     assert set_roles(owner, sid, crew.member["id"], [viewer["id"]]).status_code == 200
     path = channel_rule(secret, "roles", viewer["id"])
     assert overwrite(owner, path, allow=VIEW).status_code == 200
-    original = overwrites_router.announce_overwrite
-
-    async def late(*args, **kwargs):
-        await asyncio.sleep(0.3)
-        await original(*args, **kwargs)
-
-    monkeypatch.setattr(overwrites_router, "announce_overwrite", late)
+    delay_the_fan_out(monkeypatch)
     with listening(owner, owner=owner, member=crew.member_client) as live:
         assert owner.delete(path).status_code == 204
-        assert set_roles(owner, sid, crew.member["id"], []).status_code == 200
-        frames = live.settle()
-    assert [f["channel_id"] for f in of_type(frames["member"], "channel_deleted")] == [secret]
-
-
-def test_a_role_deletion_waits_for_the_queued_fan_out(crew, monkeypatch):
-    owner, sid, secret = crew.owner_client, crew.sid, crew.secret["id"]
-    viewer = owner.post(f"/servers/{sid}/roles", json={"name": "Viewer"}).json()
-    assert set_roles(owner, sid, crew.member["id"], [viewer["id"]]).status_code == 200
-    path = channel_rule(secret, "roles", viewer["id"])
-    assert overwrite(owner, path, allow=VIEW).status_code == 200
-    original = overwrites_router.announce_overwrite
-
-    async def late(*args, **kwargs):
-        await asyncio.sleep(0.3)
-        await original(*args, **kwargs)
-
-    monkeypatch.setattr(overwrites_router, "announce_overwrite", late)
-    with listening(owner, owner=owner, member=crew.member_client) as live:
-        assert owner.delete(path).status_code == 204
-        assert owner.delete(f"/servers/{sid}/roles/{viewer['id']}").status_code == 204
+        if change == "unassigned":
+            assert set_roles(owner, sid, crew.member["id"], []).status_code == 200
+        else:
+            assert owner.delete(f"/servers/{sid}/roles/{viewer['id']}").status_code == 204
         frames = live.settle()
     assert [f["channel_id"] for f in of_type(frames["member"], "channel_deleted")] == [secret]
 

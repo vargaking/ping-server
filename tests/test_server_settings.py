@@ -1,5 +1,7 @@
 """Server name validation and the server_updated / server_deleted frames."""
+from app.permissions import Permission
 from tests.conftest import ORIGIN, create_channel, create_server, register, ws_ready
+from tests.test_permissions import join, set_roles
 
 HEADERS = {"origin": ORIGIN}
 PNG_1PX = bytes.fromhex(
@@ -177,6 +179,26 @@ def test_icon_changes_need_manage_server(client, new_client):
     assert _put_icon(bob, server["id"], icon_text="AB").status_code == 403
     assert bob.delete(f"/servers/{server['id']}/icon").status_code == 403
     assert client.get(f"/servers/{server['id']}").json()["icon_text"] is None
+
+
+def test_a_member_with_manage_server_manages_the_server_but_cannot_delete_it(client, new_client):
+    register(client)
+    sid = create_server(client)["id"]
+    manager, user = join(client, new_client, sid)
+    role = client.post(f"/servers/{sid}/roles", json={
+        "name": "Manager", "allow": str(int(Permission.MANAGE_SERVER))}).json()
+    assert set_roles(client, sid, user["id"], [role["id"]]).status_code == 200
+
+    assert manager.put(f"/servers/{sid}", json={"name": "Renamed"}).json()["name"] == "Renamed"
+    res = manager.put(f"/servers/{sid}", json={"server_profile": {"welcome_message": "hi"}})
+    assert res.json()["server_profile"]["welcome_message"] == "hi"
+    assert _put_icon(manager, sid, icon_text="AB").json()["icon_text"] == "AB"
+    uploaded = manager.post(f"/servers/{sid}/icon", files={"file": ("icon.png", PNG_1PX, "image/png")})
+    assert uploaded.status_code == 200, uploaded.text
+    assert "icon" not in manager.delete(f"/servers/{sid}/icon").json()["server_profile"]
+
+    assert manager.delete(f"/servers/{sid}").status_code == 403
+    assert client.get(f"/servers/{sid}").json()["name"] == "Renamed"
 
 
 def test_delete_image_keeps_text_icon(client):
