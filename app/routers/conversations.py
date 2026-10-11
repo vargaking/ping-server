@@ -16,12 +16,7 @@ from ..services.attachments import attachments_by_message
 from ..services.reactions import reactions_by_message
 from ..services.replies import reply_json, reply_refs
 from ..services.system_user import IMPORTED_USERNAME
-from .channels import (
-    HISTORY_PAGE_SIZE,
-    MAX_HISTORY_PAGE_SIZE,
-    _decode_cursor,
-    _encode_cursor,
-)
+from .channels import HISTORY_PAGE_SIZE, MAX_HISTORY_PAGE_SIZE, history_page
 from .users import UserResponse
 
 logger = logging.getLogger("app.routers.conversations")
@@ -227,56 +222,51 @@ async def mark_conversation_read(
     }
 
 
+CONVERSATION_FIELDS = (
+    "id",
+    "uuid",
+    "content",
+    "author_id",
+    "conversation_id",
+    "timestamp",
+    "created_at",
+    "edited_at",
+    "reply_to_uuid",
+    "metadata",
+)
+
+
 @router.get("/{conversation_id}/messages")
 async def get_conversation_messages(
     conversation_id: int,
     before: Optional[str] = None,
+    around: Optional[str] = None,
+    after: Optional[str] = None,
     limit: int = HISTORY_PAGE_SIZE,
     current_user: User = Depends(get_current_user),
 ):
     """Newest-first page of a conversation's history.
 
-    Same cursor pagination as channel history: pass the previous page's
-    next_cursor as before to walk further back.
+    Same paging as channel history: before walks further back from a
+    next_cursor, around centres a window on a message, after loads the
+    messages newer than one. Use at most one of them.
     """
     limit = max(1, min(limit, MAX_HISTORY_PAGE_SIZE))
 
     await _load_participant_conversation(conversation_id, current_user)
 
-    query = Message.filter(conversation_id=conversation_id)
-    if before:
-        cursor_created_at, cursor_id = _decode_cursor(before)
-        query = query.filter(
-            Q(created_at__lt=cursor_created_at)
-            | Q(created_at=cursor_created_at, id__lt=cursor_id)
-        )
-
-    # Fetch one extra row to tell whether an older page exists.
-    rows = await query.order_by("-created_at", "-id").limit(limit + 1).values(
-        "id",
-        "uuid",
-        "content",
-        "author_id",
-        "conversation_id",
-        "timestamp",
+    page = await history_page(
+        Message.filter(conversation_id=conversation_id),
         "created_at",
-        "edited_at",
-        "reply_to_uuid",
-        "metadata",
+        CONVERSATION_FIELDS,
+        before=before, around=around, after=after, limit=limit,
     )
 
-    has_more = len(rows) > limit
-    rows = rows[:limit]
-
-    next_cursor = None
-    if has_more and rows:
-        last = rows[-1]
-        next_cursor = _encode_cursor(last["created_at"], last["id"])
-
     return {
-        "messages": await _serialize_all(rows),
-        "next_cursor": next_cursor,
-        "has_more": has_more,
+        "messages": await _serialize_all(page.rows),
+        "next_cursor": page.next_cursor,
+        "has_more": page.has_more,
+        "has_newer": page.has_newer,
     }
 
 
