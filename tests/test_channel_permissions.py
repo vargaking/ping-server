@@ -8,10 +8,13 @@ from types import SimpleNamespace
 import pytest
 
 from app.models.PermissionOverwrite import PermissionOverwrite
+from app.models.Server import Server
 from app.permissions import ALL_PERMISSIONS, MEMBER_PERMISSIONS, Permission
 from app.routers import voice
+from app.routers.overwrites import CATEGORY_UNSEEN, LOSE_OWN_ACCESS, MEMBER_ABOVE_YOU
 from app.services import role_resolution
 from app.services.permissions import member_views, permissions, server_masks
+from app.services.roles import BITS_YOU_LACK
 from tests.conftest import ORIGIN, create_channel, create_server, drain_jobs, register, ws_ready
 from tests.test_attachments import upload
 from tests.test_permissions import join, roles_by_name, run, set_roles
@@ -233,19 +236,161 @@ def test_a_manager_cant_grant_a_bit_they_dont_hold_there(crew):
     assert overwrite(crew.owner_client, path, allow=manage).status_code == 200
 
 
-def test_a_manager_cant_take_away_their_own_view(crew):
-    path = f"/channels/{crew.secret['id']}/permissions/roles/{crew.everyone['id']}"
-    # Clearing @everyone's deny is fine; Mod still sees it.
-    assert overwrite(crew.mod_client, path).status_code == 204
-    member_path = f"/channels/{crew.general['id']}/permissions/members/{crew.mod['id']}"
-    # A member row for yourself is above your own rank.
-    assert overwrite(crew.mod_client, member_path, deny=VIEW).status_code == 403
-    everyone_general = f"/channels/{crew.general['id']}/permissions/roles/{crew.everyone['id']}"
-    res = overwrite(crew.mod_client, everyone_general, deny=VIEW)
-    assert res.status_code == 403
-    assert res.json()["detail"] == "You would lose access to this channel"
-    assert run(crew.owner_client, PermissionOverwrite.filter(
-        channel_id=crew.general["id"]).count) == 0
+def rows_on(crew, **target):
+    return run(crew.owner_client, PermissionOverwrite.filter(**target).count)
+
+
+def channel_masks_of(crew, user_id):
+    async def masks():
+        return await permissions.channel_masks(user_id, await Server.get(id=crew.sid))
+
+    return run(crew.owner_client, masks)
+
+
+def can_read(client, channel_id):
+    return client.get(f"/channels/{channel_id}/messages").status_code == 200
+
+
+def private_target(crew, target, write):
+    """The rules path and a channel on it, and the write that would take the
+    mod's View: @everyone denied, or a lower role the mod holds, which is all
+    that gave them View."""
+    owner = crew.owner_client
+    if target == "channel":
+        rules, channel = f"/channels/{crew.general['id']}/permissions", crew.general["id"]
+    else:
+        staff = category_with_a_channel(crew, private=False)
+        rules, channel = staff.rules, staff.channel["id"]
+    everyone = f"{rules}/roles/{crew.everyone['id']}"
+    if write == "everyone":
+        return rules, channel, everyone
+    low = owner.post(f"/servers/{crew.sid}/roles", json={"name": "Low"}).json()
+    assert set_roles(owner, crew.sid, crew.mod["id"], [crew.mod_role["id"], low["id"]]).status_code == 200
+    assert overwrite(owner, f"{rules}/roles/{low['id']}", allow=VIEW).status_code == 200
+    assert overwrite(owner, everyone, deny=VIEW).status_code == 200
+    return rules, channel, f"{rules}/roles/{low['id']}"
+
+
+@pytest.mark.parametrize("target", ["channel", "category"])
+@pytest.mark.parametrize("write", ["everyone", "lower role"])
+def test_making_something_private_keeps_the_manager_in(crew, target, write):
+    rules, channel, path = private_target(crew, target, write)
+    mod = crew.mod_client
+    assert can_read(mod, channel) and can_read(crew.member_client, channel) is (write == "everyone")
+
+    res = overwrite(mod, path, deny=VIEW)
+
+    assert res.status_code == 200, res.text
+    assert res.json()["deny"] == str(VIEW) and res.json()["allow"] == "0"
+    listing = crew.owner_client.get(rules).json()
+    assert listing["members"] == [{"user_id": crew.mod["id"], "allow": str(VIEW), "deny": "0"}]
+    assert res.json() in listing["roles"]
+    assert can_read(mod, channel)
+    assert crew.member_client.get(f"/channels/{channel}/messages").status_code == 404
+
+
+def test_a_manager_cant_write_their_own_row(crew):
+    path = f"/channels/{crew.general['id']}/permissions/members/{crew.mod['id']}"
+    for bits in ({"deny": VIEW}, {"allow": SEND}, {"deny": SEND}):
+        res = overwrite(crew.mod_client, path, **bits)
+        assert res.status_code == 403 and res.json()["detail"] == MEMBER_ABOVE_YOU
+    assert rows_on(crew, channel_id=crew.general["id"]) == 0
+
+
+def test_an_existing_own_row_keeps_its_other_bits(crew):
+    general = crew.general["id"]
+    own = f"/channels/{general}/permissions/members/{crew.mod['id']}"
+    assert overwrite(crew.owner_client, own, deny=SEND).status_code == 200
+
+    everyone = f"/channels/{general}/permissions/roles/{crew.everyone['id']}"
+    assert overwrite(crew.mod_client, everyone, deny=VIEW).status_code == 200
+
+    members = crew.owner_client.get(f"/channels/{general}/permissions").json()["members"]
+    assert members == [{"user_id": crew.mod["id"], "allow": str(VIEW), "deny": str(SEND)}]
+    assert can_read(crew.mod_client, general)
+
+
+@pytest.mark.parametrize("case, rows, repeats", [
+    ("owner", 1, 1),
+    ("kept by own role", 1, 1),
+    ("repeated write", 2, 2),
+])
+def test_no_extra_row_when_nothing_is_lost(crew, case, rows, repeats):
+    owner, mod = crew.owner_client, crew.mod_client
+    low = owner.post(f"/servers/{crew.sid}/roles", json={"name": "Low"}).json()
+    if case == "kept by own role":
+        channel, path = crew.secret["id"], f"/channels/{crew.secret['id']}/permissions/roles/{low['id']}"
+    else:
+        channel, path = crew.general["id"], (
+            f"/channels/{crew.general['id']}/permissions/roles/{crew.everyone['id']}")
+    client = owner if case == "owner" else mod
+    base = rows_on(crew, channel_id=channel)
+
+    for _ in range(repeats):
+        assert overwrite(client, path, deny=VIEW).status_code == 200
+
+    assert rows_on(crew, channel_id=channel) == base + rows
+    assert can_read(mod, channel) is (case != "owner")
+
+
+def test_the_kept_row_grants_nothing(crew):
+    general = crew.general["id"]
+    everyone = f"/channels/{general}/permissions/roles/{crew.everyone['id']}"
+    res = overwrite(crew.mod_client, everyone, allow=int(Permission.MANAGE_MESSAGES), deny=VIEW)
+    assert res.status_code == 403 and res.json()["detail"] == BITS_YOU_LACK
+    assert rows_on(crew, channel_id=general) == 0
+
+    owner, sid = crew.owner_client, crew.sid
+    staff = category_with_a_channel(crew, private=False)
+    vault = owner.post(f"/channels/{sid}/create", json={
+        "name": "vault", "group_id": staff.group["id"]}).json()["id"]
+    assert overwrite(owner, f"/channels/{vault}/permissions/roles/{crew.mod_role['id']}",
+                     deny=VIEW).status_code == 200
+    before = channel_masks_of(crew, crew.mod["id"])
+    assert can_read(crew.mod_client, staff.channel["id"]) and not can_read(crew.mod_client, vault)
+
+    group_everyone = f"{staff.rules}/roles/{crew.everyone['id']}"
+    assert overwrite(crew.mod_client, group_everyone, deny=VIEW).status_code == 200
+
+    assert rows_on(crew, group_id=staff.group["id"]) == 2
+    assert channel_masks_of(crew, crew.mod["id"]) == before
+    assert can_read(crew.mod_client, staff.channel["id"]) and not can_read(crew.mod_client, vault)
+
+
+@pytest.mark.parametrize("private, existing, status, detail", [
+    (False, (VIEW, 0), 204, None),
+    (True, (VIEW, 0), 403, LOSE_OWN_ACCESS),
+    (False, (VIEW, SEND), 403, MEMBER_ABOVE_YOU),
+], ids=["public channel", "private channel", "row with other bits"])
+def test_removing_your_own_row(crew, private, existing, status, detail):
+    general = crew.general["id"]
+    rules = f"/channels/{general}/permissions"
+    if private:
+        assert overwrite(crew.owner_client, f"{rules}/roles/{crew.everyone['id']}",
+                         deny=VIEW).status_code == 200
+    own = f"{rules}/members/{crew.mod['id']}"
+    assert overwrite(crew.owner_client, own, allow=existing[0], deny=existing[1]).status_code == 200
+
+    res = crew.mod_client.delete(own)
+    drain_jobs(crew.mod_client)
+
+    assert res.status_code == status
+    if detail:
+        assert res.json()["detail"] == detail
+    assert can_read(crew.mod_client, general)
+    assert crew.owner_client.get(rules).json()["members"] == (
+        [] if status == 204 else [{"user_id": crew.mod["id"], "allow": str(existing[0]),
+                                   "deny": str(existing[1])}])
+
+
+def test_adding_to_your_own_kept_row_is_refused(crew):
+    general = crew.general["id"]
+    own = f"/channels/{general}/permissions/members/{crew.mod['id']}"
+    assert overwrite(crew.owner_client, own, allow=VIEW).status_code == 200
+
+    res = overwrite(crew.mod_client, own, allow=VIEW | SEND)
+
+    assert res.status_code == 403 and res.json()["detail"] == MEMBER_ABOVE_YOU
 
 
 def test_a_hidden_channel_is_404_for_its_overwrite_routes(crew):
@@ -608,14 +753,34 @@ def test_a_manager_who_cant_view_a_private_category_reads_its_rules_but_cant_wri
     assert staff.channel["id"] not in [c["id"] for c in manager.get(f"/channels/{sid}").json()]
 
     assert manager.get(staff.rules).status_code == 200
-    assert overwrite(manager, low_rule, deny=SEND | SPEAK).status_code == 403
-    assert overwrite(manager, low_rule, deny=SEND).status_code == 403
-    assert manager.delete(low_rule).status_code == 403
+    writes = [overwrite(manager, low_rule, deny=SEND | SPEAK), overwrite(manager, low_rule, deny=SEND),
+              manager.delete(low_rule)]
+    assert [(res.status_code, res.json()["detail"]) for res in writes] == [(403, CATEGORY_UNSEEN)] * 3
     assert owner.get(staff.rules).json()["roles"][-1] == {
         "role_id": low["id"], "allow": "0", "deny": str(SEND)}
     channel_rules = f"/channels/{staff.channel['id']}/permissions"
     assert manager.get(channel_rules).status_code == 404
     assert overwrite(manager, f"{channel_rules}/roles/{low['id']}", deny=SEND).status_code == 404
+
+
+def test_a_manager_who_sees_a_category_only_through_a_channel_cant_write_its_rules(crew):
+    owner = crew.owner_client
+    staff = category_with_a_channel(crew, private=False)
+    everyone = f"{staff.rules}/roles/{crew.everyone['id']}"
+    assert overwrite(owner, everyone, deny=VIEW).status_code == 200
+    plans = f"/channels/{staff.channel['id']}/permissions/roles/{crew.mod_role['id']}"
+    assert overwrite(owner, plans, allow=VIEW).status_code == 200
+    mod = crew.mod_client
+    assert can_read(mod, staff.channel["id"])
+
+    assert mod.get(staff.rules).status_code == 200
+    writes = [
+        overwrite(mod, f"{staff.rules}/members/{crew.member['id']}", deny=SEND),
+        overwrite(mod, everyone, deny=VIEW),
+        mod.delete(everyone),
+    ]
+    assert [(res.status_code, res.json()["detail"]) for res in writes] == [(403, CATEGORY_UNSEEN)] * 3
+    assert rows_on(crew, group_id=staff.group["id"]) == 1
 
 
 @pytest.mark.parametrize("allow", [
