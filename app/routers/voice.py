@@ -110,6 +110,9 @@ async def create_voice_token(
     if presence is not None:
         other_channels = [c for c in presence.channels_of(current_user.id) if c != channel.id]
         await remove_from_voice(presence, other_channels, current_user.id)
+    calls = getattr(request.app.state, "calls", None)
+    if calls is not None:
+        await calls.leave_rooms(current_user.id)
 
     moderation = getattr(request.app.state, "voice_moderation", None)
     server_muted = moderation is not None and moderation.is_muted(
