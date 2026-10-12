@@ -143,24 +143,24 @@ async def edit_message(
         raise HTTPException(status_code=422, detail="Invalid message content")
     message.content = serialize(content)
     message.edited_at = datetime.now(timezone.utc)
-    removed: set[int] = set()
-    added: set[int] = set()
-    if message.channel_id is not None:
-        wanted = mentioned_user_ids(content) - {message.author_id}
-        existing = set(await MessageMention.filter(message_id=message.id)
-                       .values_list("user_id", flat=True))
-        removed = existing - wanted
-        added = wanted - existing
-        if added:
-            added &= await permissions.viewers(server.id, message.channel_id)
+    wanted = (mentioned_user_ids(content) - {message.author_id}
+              if message.channel_id is not None else set())
     async with in_transaction():
         await message.save()
-        if removed:
-            await MessageMention.filter(message_id=message.id, user_id__in=removed).delete()
-        if added:
-            await MessageMention.bulk_create([MessageMention(
-                message_id=message.id, user_id=uid, channel_id=message.channel_id)
-                for uid in sorted(added)], ignore_conflicts=True)
+        if message.channel_id is not None:
+            # Read after the save: its row lock makes a concurrent edit wait for ours.
+            existing = set(await MessageMention.filter(message_id=message.id)
+                           .values_list("user_id", flat=True))
+            removed = existing - wanted
+            added = wanted - existing
+            if added:
+                added &= await permissions.viewers(server.id, message.channel_id)
+            if removed:
+                await MessageMention.filter(message_id=message.id, user_id__in=removed).delete()
+            if added:
+                await MessageMention.bulk_create([MessageMention(
+                    message_id=message.id, user_id=uid, channel_id=message.channel_id)
+                    for uid in sorted(added)], ignore_conflicts=True)
 
     reactions = (await reactions_by_message([message.id])).get(message.id, [])
     refs = await reply_refs([message.reply_to_uuid])
