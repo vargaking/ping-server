@@ -1,9 +1,10 @@
 import asyncio
 import logging
 import os
-from collections.abc import Awaitable, Callable, Mapping
+from collections.abc import Awaitable, Callable, Iterable, Mapping
 from dataclasses import dataclass
 
+import aiohttp
 from livekit import api
 from livekit.protocol import models
 
@@ -12,6 +13,10 @@ from app.models.Channel import Channel
 logger = logging.getLogger("app.voice_presence")
 
 POLL_INTERVAL_SECONDS = 3.0
+LIVEKIT_TIMEOUT_SECONDS = 3.0  # per HTTP call
+# One participant read, from the first byte sent to a result. Read at call
+# time so tests can shorten it.
+READ_TIMEOUT_SECONDS = 5.0
 MAX_BACKOFF_SECONDS = 60.0
 ROOM_PREFIX = "channel_"
 
@@ -34,7 +39,15 @@ class VoiceParticipant:
         }
 
 
-Snapshot = dict[int, tuple[VoiceParticipant, ...]]
+class Snapshot(dict[int, tuple[VoiceParticipant, ...]]):
+    """Who is in each occupied channel. ``unreadable`` lists channels that
+    could not be read this time; their previous state stands."""
+
+    def __init__(self, *args, unreadable: Iterable[int] = (), **kwargs) -> None:
+        super().__init__(*args, **kwargs)
+        self.unreadable: set[int] = set(unreadable)
+
+
 Notify = Callable[[int, tuple[VoiceParticipant, ...]], Awaitable[None]]
 
 
@@ -71,21 +84,37 @@ class LiveKitRoomSource:
     def _api(self) -> api.LiveKitAPI:
         # Built on first use so the HTTP session is created inside the running loop.
         if self._client is None:
-            self._client = api.LiveKitAPI(*self._credentials)
+            self._client = api.LiveKitAPI(
+                *self._credentials,
+                timeout=aiohttp.ClientTimeout(total=LIVEKIT_TIMEOUT_SECONDS))
         return self._client
 
     async def fetch(self) -> Snapshot:
-        rooms = await self._api().room.list_rooms(api.ListRoomsRequest())
-        snapshot: Snapshot = {}
-        for room in rooms.rooms:
-            channel_id = _channel_id_from_room(room.name)
-            # num_participants lags behind joins by several seconds, so every
-            # channel room is listed rather than trusting it.
-            if channel_id is None:
-                continue
-            if participants := await self.fetch_channel(channel_id):
+        async with asyncio.timeout(READ_TIMEOUT_SECONDS):
+            rooms = await self._api().room.list_rooms(api.ListRoomsRequest())
+        # num_participants lags behind joins by several seconds, so every
+        # channel room is read rather than trusting it.
+        channel_ids = [
+            channel_id for room in rooms.rooms
+            if (channel_id := _channel_id_from_room(room.name)) is not None
+        ]
+        reads = await asyncio.gather(*map(self._read_channel, channel_ids))
+        snapshot = Snapshot()
+        for channel_id, participants in zip(channel_ids, reads):
+            if participants is None:
+                snapshot.unreadable.add(channel_id)
+            elif participants:
                 snapshot[channel_id] = participants
         return snapshot
+
+    async def _read_channel(self, channel_id: int) -> tuple[VoiceParticipant, ...] | None:
+        """One channel's participants, or None if LiveKit failed or took too long."""
+        try:
+            async with asyncio.timeout(READ_TIMEOUT_SECONDS):
+                return await self.fetch_channel(channel_id)
+        except Exception:
+            logger.debug("Voice channel %s read failed", channel_id, exc_info=True)
+            return None
 
     async def fetch_channel(self, channel_id: int) -> tuple[VoiceParticipant, ...]:
         listed = await self._api().room.list_participants(
@@ -184,7 +213,8 @@ class VoicePresence:
 
     async def apply_snapshot(self, snapshot: Snapshot, read: int | None = None) -> None:
         read = self._next_read() if read is None else read
-        for channel_id in self._snapshot.keys() | snapshot.keys():
+        unreadable = getattr(snapshot, "unreadable", frozenset())
+        for channel_id in (self._snapshot.keys() | snapshot.keys()) - unreadable:
             await self._apply_channel(channel_id, snapshot.get(channel_id, ()), read)
 
     async def _apply_channel(
@@ -226,7 +256,8 @@ class VoicePresence:
                 self._refresh_again.discard(channel_id)
                 read = self._next_read()
                 try:
-                    participants = await self._source.fetch_channel(channel_id)
+                    async with asyncio.timeout(READ_TIMEOUT_SECONDS):
+                        participants = await self._source.fetch_channel(channel_id)
                 except Exception:
                     logger.debug("Voice channel %s refresh failed", channel_id, exc_info=True)
                     return

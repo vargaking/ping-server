@@ -22,6 +22,7 @@ from app.services.permissions import permissions
 from app.services.push import (
     channel_tag, dm_payload, dm_tag, mention_payload, mentioned_user_ids, plain_text, push)
 from app.services.replies import reply_json, reply_refs
+from app.services.socket_send import OnStalled, send_frame, send_frame_to_all
 from app.ws_schemas import DirectMessageFrame, MessageFrame, TypingFrame
 
 logger = logging.getLogger("app.services.chat_service")
@@ -64,8 +65,13 @@ class ChatService:
 
     clock = staticmethod(time.monotonic)
 
-    def __init__(self, connection_manager: ConnectionManager) -> None:
+    def __init__(
+        self,
+        connection_manager: ConnectionManager,
+        on_stalled: OnStalled | None = None,
+    ) -> None:
         self.connection_manager = connection_manager
+        self._on_stalled = on_stalled
         self._typing_accepted: dict[tuple[int, tuple], float] = {}
 
     async def handle_message(
@@ -613,17 +619,15 @@ class ChatService:
         One dead recipient must not take down the sender's socket or stop
         delivery to everyone after them.
         """
-        for uid in recipient_ids:
-            if uid == exclude_user_id:
-                continue
-            for websocket in self.connection_manager.get_websockets(uid):
-                if websocket is sender_ws:
-                    continue
-                try:
-                    await websocket.send_json(outgoing)
-                except Exception:
-                    logger.warning(
-                        "Failed to deliver message to user %s", uid, exc_info=True)
+        await send_frame_to_all(
+            self.connection_manager.websockets_of(
+                recipient_ids,
+                exclude_user_id=exclude_user_id,
+                exclude_websocket=sender_ws,
+            ),
+            outgoing,
+            self._on_stalled,
+        )
 
     async def _answer_duplicate(
         self,
@@ -656,16 +660,12 @@ class ChatService:
             await self._send_error(sender_ws, "duplicate_id", message_id)
         return True
 
-    @staticmethod
-    async def _send_ack(websocket: WebSocket, message_id: str) -> None:
-        try:
-            await websocket.send_json({"type": "message_ack", "id": message_id})
-        except Exception:
-            logger.warning("Failed to send message ack", exc_info=True)
+    async def _send_ack(self, websocket: WebSocket, message_id: str) -> None:
+        await send_frame(
+            websocket, {"type": "message_ack", "id": message_id}, self._on_stalled)
 
-    @staticmethod
-    async def _send_error(websocket: WebSocket, code: str, ref: str | None) -> None:
-        try:
-            await websocket.send_json({"type": "error", "code": code, "ref": ref})
-        except Exception:
-            logger.warning("Failed to send error frame", exc_info=True)
+    async def _send_error(
+        self, websocket: WebSocket, code: str, ref: str | None
+    ) -> None:
+        await send_frame(
+            websocket, {"type": "error", "code": code, "ref": ref}, self._on_stalled)
