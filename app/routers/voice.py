@@ -31,6 +31,40 @@ LIVEKIT_API_SECRET = os.getenv("LIVEKIT_API_SECRET", "")
 TOKEN_TTL_SECONDS = 300
 
 
+def livekit_configured() -> bool:
+    return bool(LIVEKIT_API_KEY and LIVEKIT_API_SECRET and LIVEKIT_URL)
+
+
+def mint_token(
+    user: User, room: str, sources: list[str], *, attributes: dict[str, str] | None = None,
+) -> str:
+    """A LiveKit join token for *user* scoped to one room and the sources they may publish."""
+    grant = api.VideoGrants(
+        room_join=True,
+        room=room,
+        # An empty source list means "any source" to LiveKit, so no sources
+        # has to be can_publish=False.
+        can_publish=bool(sources),
+        can_publish_sources=sources,
+        can_subscribe=True,
+        # Lets the client set participant attributes, which is how it shares
+        # deafen state with the room (mute travels as track mute events).
+        can_update_own_metadata=True,
+    )
+    token = (
+        api.AccessToken(LIVEKIT_API_KEY, LIVEKIT_API_SECRET)
+        .with_identity(str(user.id))
+        .with_name(user.username)
+        # Carry the user's profile so peers can render avatars without a lookup.
+        .with_metadata(json.dumps(user.profile or {}))
+        .with_ttl(timedelta(seconds=TOKEN_TTL_SECONDS))
+        .with_grants(grant)
+    )
+    if attributes:
+        token = token.with_attributes(attributes)
+    return token.to_jwt()
+
+
 class VoiceTokenRequest(BaseModel):
     channel_id: int
 
@@ -52,7 +86,7 @@ async def create_voice_token(
     Verifies the user may connect to voice in the channel's server before
     issuing a token scoped to that one room. LiveKit itself never touches our DB.
     """
-    if not (LIVEKIT_API_KEY and LIVEKIT_API_SECRET and LIVEKIT_URL):
+    if not livekit_configured():
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
             detail="Voice service is not configured",
@@ -83,31 +117,9 @@ async def create_voice_token(
     sources = publish_sources(effective, server_muted)
 
     room = f"channel_{channel.id}"
-
-    grant = api.VideoGrants(
-        room_join=True,
-        room=room,
-        # An empty source list means "any source" to LiveKit, so no sources
-        # has to be can_publish=False.
-        can_publish=bool(sources),
-        can_publish_sources=sources,
-        can_subscribe=True,
-        # Lets the client set participant attributes, which is how it shares
-        # deafen state with the room (mute travels as track mute events).
-        can_update_own_metadata=True,
-    )
-    token = (
-        api.AccessToken(LIVEKIT_API_KEY, LIVEKIT_API_SECRET)
-        .with_identity(str(current_user.id))
-        .with_name(current_user.username)
-        # Carry the user's profile so peers can render avatars without a lookup.
-        .with_metadata(json.dumps(current_user.profile or {}))
-        .with_ttl(timedelta(seconds=TOKEN_TTL_SECONDS))
-        .with_grants(grant)
-    )
-    if server_muted:
-        token = token.with_attributes({SERVER_MUTED_ATTRIBUTE: "true"})
-    token = token.to_jwt()
+    token = mint_token(
+        current_user, room, sources,
+        attributes={SERVER_MUTED_ATTRIBUTE: "true"} if server_muted else None)
 
     return VoiceTokenResponse(token=token, url=LIVEKIT_URL, room=room)
 
