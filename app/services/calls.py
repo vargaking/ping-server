@@ -587,6 +587,7 @@ class CallService:
             # Cascaded away with its conversation or a user.
             self._watch.pop(gone, None)
             self._applied.pop(gone, None)
+            self._locks.pop(gone, None)
             self._spawn(self._delete_room(gone))
         await asyncio.gather(*(self.check(row[0]) for row in rows))
         now = self._now()
