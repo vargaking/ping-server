@@ -100,7 +100,7 @@ def test_create_rejects_bad_input(admin, overrides):
 
 def test_create_returns_the_admin_object(admin):
     me = admin.get("/auth/me").json()
-    expires = future(hours=1)
+    expires = (datetime.now(timezone(timedelta(hours=2))) + timedelta(hours=1)).isoformat()
     res = create(admin, text="  Heads up  ", level="info", expires_at=expires)
     assert res.status_code == 201, res.text
     body = res.json()

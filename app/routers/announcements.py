@@ -48,7 +48,7 @@ class AnnouncementCreate(BaseModel):
             raise ValueError("Expiry must include a timezone")
         if value <= datetime.now(timezone.utc):
             raise ValueError("Expiry must be in the future")
-        return value
+        return value.astimezone(timezone.utc)
 
 
 class AnnouncementResponse(BaseModel):
