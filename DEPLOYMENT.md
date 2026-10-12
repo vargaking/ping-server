@@ -281,8 +281,8 @@ What it listens on:
 - A runner user that can write to both checkouts and run the `sudo systemctl`
   commands from step 6.
 
-The workflow uses no repository secrets and no deploy key. Leftovers from the
-earlier setup are unused.
+The workflow uses no repository secrets and no deploy key. Any left from the
+earlier setup can be removed.
 
 > **To be confirmed:** how the runner was installed (the user it runs as, its
 > labels, and whether one runner serves both environments).
