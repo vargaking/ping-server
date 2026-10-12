@@ -7,12 +7,15 @@ and devices stay in step.
 """
 import uuid
 from datetime import datetime, timezone
+from urllib.parse import quote
 
 import pytest
 
 from app.permissions import Permission
 from tests.conftest import ORIGIN, create_channel, create_server, register, ws_ready
 from tests.test_channel_permissions import overwrite, post_message as post_as
+from tests.test_calls import (  # noqa: F401
+    calls, clock, livekit_env, pair, rooms, started, stored, stored_message, text_of)
 from tests.test_permissions import promote
 
 HEADERS = {"origin": ORIGIN}
@@ -241,3 +244,34 @@ def test_edit_missing_message_returns_404(client):
     register(client, "alice-404")
     res = client.patch(f"/messages/{uuid.uuid4()}", json={"content": EDITED})
     assert res.status_code == 404, res.text
+
+
+THUMBS_UP = quote("👍", safe="")
+
+
+@pytest.mark.parametrize("who", ["caller", "callee"])
+@pytest.mark.parametrize("act, expected", [
+    (lambda c, url: c.patch(url, json={"content": "x"}), 403),
+    (lambda c, url: c.delete(url), 403),
+    (lambda c, url: c.put(f"{url}/reactions/{THUMBS_UP}"), 400),
+    (lambda c, url: c.delete(f"{url}/reactions/{THUMBS_UP}"), 400),
+], ids=["edit", "delete", "react", "unreact"])
+def test_call_rows_cannot_be_changed(calls, pair, who, act, expected):  # noqa: F811
+    call = started(pair.a_client, pair.convo)
+
+    res = act(pair.client_of[who], f"/messages/{call['message_id']}")
+
+    assert res.status_code == expected
+    assert stored(pair.a_client, call["id"]).state == "ringing"
+    assert text_of(stored_message(pair.a_client, call).content) == "Started a call"
+
+
+def test_outsiders_still_get_404_on_a_call_row(calls, pair, new_client):  # noqa: F811
+    call = started(pair.a_client, pair.convo)
+    carol = new_client()
+    register(carol, "carol-row")
+    url = f"/messages/{call['message_id']}"
+
+    assert carol.patch(url, json={"content": "x"}).status_code == 404
+    assert carol.delete(url).status_code == 404
+    assert carol.put(f"{url}/reactions/{THUMBS_UP}").status_code == 404
