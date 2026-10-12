@@ -78,6 +78,11 @@ def unfurl_rate_limit() -> str:
     return os.getenv("UNFURL_RATE_LIMIT", "30/minute")
 
 
+def start_call_rate_limit() -> str:
+    """Per-user limit for starting calls."""
+    return os.getenv("START_CALL_RATE_LIMIT", "10/minute")
+
+
 def friend_request_rate_limit() -> str:
     """Per-user limit for POST /friends/requests."""
     return os.getenv("FRIEND_REQUEST_RATE_LIMIT", "20/hour")
