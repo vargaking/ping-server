@@ -40,9 +40,10 @@ async def _seed(server_id, channel_id, members):
     override = await role("Override", 13, parent_id=blocked.id, allow=MANAGE)
     stale = await role("Stale", 14, allow=DELETE)
     clash = await role("Clash", 15, allow=DELETE, deny=MANAGE)
+    stale_deny = await role("StaleDeny", 16, deny=DELETE)
     held = [
         [], [manager], [child], [manager, blocked], [override],
-        [stale], [clash, manager], [stale, override],
+        [stale], [clash, manager], [stale, override], [manager, stale_deny],
     ]
     for user_id, roles in zip(members, held):
         await RoleToUser.bulk_create([RoleToUser(role_id=r.id, user_id=user_id) for r in roles])
@@ -67,7 +68,7 @@ def test_every_member_keeps_their_mask_and_delete_follows_manage(client, new_cli
     register(client)
     server = create_server(client, "Legacy")
     channel = create_channel(client, server["id"])
-    members = [join(client, new_client, server["id"])[1]["id"] for _ in range(8)]
+    members = [join(client, new_client, server["id"])[1]["id"] for _ in range(9)]
 
     async def upgrade():
         db = connections.get("default")
