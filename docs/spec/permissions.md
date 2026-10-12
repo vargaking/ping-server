@@ -9,8 +9,8 @@ Test names are short: server tests are `file::test` under `tests/` in this repo;
 
 ## Roles
 
-- **PERM-01** A new server has two roles: @everyone (View, Send, Connect, Speak, Stream, Create Invite) and Admin (adds Manage Messages, Manage Invites, Manage Channels, Kick, Mute, Move). Admin has no Manage Server or Manage Roles. *(open: built-in admin role, presets, danger-zone permissions)*
-  - permissions::test_new_server_has_exactly_default_and_admin_roles
+- **PERM-01** A new server has one role, @everyone (View, Send, Connect, Speak, Stream, Create Invite).
+  - permissions::test_a_new_server_has_only_everyone
 - **PERM-02** Any member can read the role list and the member list (owner first, assigned role ids, never @everyone). Outsiders get 404 or 403, never data.
   - permissions::test_roles_are_hidden_from_non_members, test_non_members_get_403_or_404_never_data, test_members_list_shows_assigned_roles_only; members::test_list_members_returns_owner_first_with_join_dates
 - **PERM-03** A new role lands just above @everyone and pushes the others up. Names are trimmed, 1–50 characters, unique in the server. A server holds at most 100 roles.
@@ -19,8 +19,8 @@ Test names are short: server tests are `file::test` under `tests/` in this repo;
   - roles_api::test_create_rejects_a_bad_body, test_create_accepts_integer_permissions_too, test_parent_from_another_server_is_rejected, test_patch_changes_each_field, test_patch_rejects_a_bad_body, test_patch_refuses_a_taken_name_and_an_unknown_role
 - **PERM-05** A role can inherit from one parent. A loop is refused ("That would make X inherit from itself"). Deleting a parent keeps its children with their own bits.
   - roles_api::test_a_cycle_is_rejected_with_a_message, test_deleting_a_parent_leaves_children_with_their_own_bits; fe: roles.test (wouldCycle, mirror)
-- **PERM-06** @everyone can't be renamed, deleted, given a parent or a deny; editing its allow changes everyone at once. Admin is an ordinary role. *(open: built-in admin role)*
-  - roles_api::test_everyone_rules, test_editing_everyone_changes_every_members_mask, test_admin_is_an_ordinary_role
+- **PERM-06** @everyone can't be renamed, deleted, given a parent or a deny; editing its allow changes everyone at once.
+  - roles_api::test_everyone_rules, test_editing_everyone_changes_every_members_mask
 - **PERM-07** Reordering lists every role except @everyone once, highest first, or nothing moves.
   - roles_api::test_reorder_sets_positions_top_first, test_reorder_needs_every_non_default_role_exactly_once; fe: roles.test (ordering)
 - **PERM-08** Deleting a role takes it from everyone who had it, deletes the channel rules naming it, and closes the gap in ranks.
@@ -39,7 +39,7 @@ Test names are short: server tests are `file::test` under `tests/` in this repo;
 
 - **PERM-12** Role changes need Manage Roles. The owner skips every rule. Anyone else can only touch roles strictly below their highest role ("That role is at or above your highest role").
   - roles_api::test_roles_need_manage_roles, test_a_member_below_a_role_cannot_touch_it, test_a_member_can_create_and_manage_a_role_below_their_rank, test_a_member_cannot_move_a_role_to_or_above_their_rank, test_a_member_can_reorder_roles_below_their_rank, test_the_owner_skips_every_rule, test_a_member_without_a_role_cannot_create_one, test_assigning_a_role_at_or_above_your_rank_is_refused; fe: roles.test (rankOf, canTouchRole, canAssignRole — editor guards)
-- **PERM-13** A non-owner can't grant, edit or inherit from a role holding bits they lack ("You can't change permissions you don't have"). *(open: built-in admin role)*
+- **PERM-13** A non-owner can't grant, edit or inherit from a role holding bits they lack ("You can't change permissions you don't have"). This keeps the danger-zone bits (Delete Channels, Match Imported Authors, Manage Server) from anyone who lacks them. Someone who holds one can give it to @everyone.
   - roles_api::test_a_member_cannot_switch_on_a_bit_they_do_not_hold, test_a_member_cannot_rename_a_role_holding_bits_they_lack, test_a_member_cannot_inherit_from_admin, test_assigning_a_role_that_inherits_admin_needs_admins_bits
 - **PERM-14** To edit or delete a role a non-owner must outrank everything that inherits from it.
   - roles_api::test_editing_a_role_needs_to_outrank_everything_that_inherits_from_it
@@ -50,9 +50,9 @@ Test names are short: server tests are `file::test` under `tests/` in this repo;
   - permissions::test_creating_a_server_returns_owner_permissions, test_admin_cannot_kick_another_admin_or_the_owner; channel_permissions::test_the_owner_sees_everything; voice_moderation::test_nobody_can_moderate_the_owner
 - **PERM-16** Importing history, including matching authors to members, is owner only. *(open: a permission for matching imported authors)*
   - server_import::test_only_the_owner_can_use_the_routes
-- **PERM-17** Manage Channels lets a member create, edit, move and delete channels and categories.
-  - permissions::test_admin_manages_channels; channel_groups::test_plain_member_cannot_write_categories_or_layout; channel_crud::test_non_owner_cannot_update_or_delete
-- **PERM-18** Server name, settings and icon need Manage Server, which no default role has. *(open: built-in admin role)*
+- **PERM-17** Manage Channels lets a member create, edit and move channels and categories and manage forum tags. Deleting a channel or a category needs Delete Channels, without Manage Channels.
+  - permissions::test_admin_manages_channels; channel_groups::test_plain_member_cannot_write_categories_or_layout; channel_crud::test_non_owner_cannot_update_or_delete; channel_permissions::test_manage_and_delete_channels_are_separate_bits
+- **PERM-18** Server name, settings and icon need Manage Server, which @everyone doesn't have by default.
   - permissions::test_admin_cannot_manage_the_server_or_roles, test_channel_order_update_needs_only_manage_channels; server_settings::test_a_member_with_manage_server_manages_the_server_but_cannot_delete_it
 - **PERM-19** Kick removes a member, not the owner or someone else who can kick. The kicked member is told and loses the server, their roles and their channel rules.
   - permissions::test_admin_kicks_a_member, test_owner_can_kick_an_admin; members::test_owner_kicks_member_and_everyone_is_told
@@ -92,8 +92,8 @@ Test names are short: server tests are `file::test` under `tests/` in this repo;
   - channel_permissions::test_a_private_category_hides_its_channels_until_one_moves_out; overwrite_fanout::test_a_category_write_leaves_channels_with_their_own_rule_alone; channel_permissions::test_a_manager_who_cant_view_a_private_category_reads_its_rules_but_cant_write_them (the Manage Channels clause)
 - **PERM-33** Moving a channel out of a private category shows it; creating one inside shows it only to viewers. Moving a channel into a private category hides it.
   - channel_permissions::test_a_private_category_hides_its_channels_until_one_moves_out, test_a_new_channel_in_a_private_category_goes_only_to_its_viewers, test_moving_a_channel_into_a_private_category_hides_it_from_who_cant_view_the_category
-- **PERM-34** Deleting a category keeps its channels and removes its rules, so a formerly private category's channels become visible, and members who keep a channel are told it is public. Manage Channels is enough, even for a private category you can't see into. *(open: deleting a private category opens its channels to everyone)*
-  - channel_groups::test_delete_group_keeps_channels_and_messages_and_appends_them_to_ungrouped (layout only); channel_permissions::test_deleting_a_private_category_opens_its_channels_to_everyone, test_a_manage_channels_holder_can_delete_a_private_category_they_cant_see_into; channel_groups::test_deleting_a_private_category_tells_who_kept_its_channels_they_are_public
+- **PERM-34** Deleting a category keeps its channels and removes its rules, so a formerly private category's channels become visible, and members who keep a channel are told it is public. Delete Channels is enough, even for a private category you can't see into.
+  - channel_groups::test_delete_group_keeps_channels_and_messages_and_appends_them_to_ungrouped (layout only); channel_permissions::test_deleting_a_private_category_opens_its_channels_to_everyone, test_a_delete_channels_holder_can_delete_a_private_category_they_cant_see_into; channel_groups::test_deleting_a_private_category_tells_who_kept_its_channels_they_are_public
 
 ## Live updates
 

@@ -521,7 +521,7 @@ async def delete_channel(
     request: Request,
     current_user: User = Depends(get_current_user),
     channel: Channel = Depends(channel_from_path),
-    server: Server = Depends(check_channel(Permission.MANAGE_CHANNELS)),
+    server: Server = Depends(check_channel(Permission.DELETE_CHANNELS)),
 ):
     """Delete a channel and all of its messages."""
 
