@@ -251,6 +251,14 @@ async def _checked_mapping(
     return mapping
 
 
+async def _require_latest(server_id: int, row: ServerImport) -> None:
+    """Refuse a holder while another import is newer than *row* or not finished."""
+    others = ServerImport.filter(server_id=server_id).exclude(id=row.id)
+    if (await others.filter(created_at__gt=row.created_at).exists()
+            or await others.exclude(status="done").exists()):
+        raise HTTPException(status_code=409, detail="A newer import is in progress")
+
+
 async def _change_rows(
     server_id: int, row: ServerImport, stored: dict, mapping: dict, actor_id: int, now: datetime,
 ) -> list[ServerImportAuthorChange]:
@@ -291,10 +299,7 @@ async def set_authors(
     if not owner:
         if row.result is None:
             raise HTTPException(status_code=403, detail="Only the server owner can do this")
-        others = ServerImport.filter(server_id=server.id).exclude(id=row.id)
-        if (await others.filter(created_at__gt=row.created_at).exists()
-                or await others.exclude(status="done").exists()):
-            raise HTTPException(status_code=409, detail="A newer import is in progress")
+        await _require_latest(server.id, row)
     locked = HTTPException(status_code=409, detail="The import can't be changed right now")
     if row.status not in ("ready", "done"):
         raise locked
@@ -311,7 +316,11 @@ async def set_authors(
                 id=row.id, status="done").select_for_update().first()
             if current is None:
                 raise locked
+            if not owner:
+                await _require_latest(server.id, current)
             stored = current.authors or {}
+            if stored != (row.authors or {}):
+                mapping = await _checked_mapping(server, current, body.authors)
             if mapping != stored or current.error:
                 rows = await _change_rows(
                     server.id, current, stored, mapping, current_user.id, now)

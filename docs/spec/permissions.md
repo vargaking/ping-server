@@ -111,7 +111,7 @@ Test names are short: server tests are `file::test` under `tests/` in this repo;
 ## Matching imported authors
 
 - **PERM-45** Every mapping change on a finished import is logged (who, author, from, to). The log outlives the import, and the last 50 entries are listed. Two changes at once log once.
-  - server_import::test_a_change_is_logged_per_author, test_the_log_lists_the_newest_first_and_keeps_the_name_of_the_author, test_the_owners_draft_in_ready_is_not_logged, test_a_failed_hand_over_logs_once_and_a_retry_adds_nothing, test_a_mapped_user_who_is_gone_is_logged_as_not_mapped, test_the_log_outlives_the_import, test_two_changes_at_once_log_once, test_only_the_last_50_changes_are_listed
+  - server_import::test_a_change_is_logged_per_author, test_the_log_lists_the_newest_first_and_keeps_the_name_of_the_author, test_the_owners_draft_in_ready_is_not_logged, test_a_failed_hand_over_logs_once_and_a_retry_adds_nothing, test_a_mapped_user_who_is_gone_is_logged_as_not_mapped, test_the_log_outlives_the_import, test_a_change_that_loses_a_race_logs_and_starts_nothing, test_only_the_last_50_changes_are_listed
 - **PERM-46** A hand-over tells holders its status in a narrow frame (no file name, plan, result, channel names or error text); other members get only the end.
   - server_import::test_holders_get_the_narrow_frames_of_a_hand_over_and_no_one_else, test_a_holder_gets_the_end_of_a_hand_over_resumed_after_a_restart, test_a_failed_hand_over_tells_holders_a_fixed_text_and_the_owner_the_reason
 

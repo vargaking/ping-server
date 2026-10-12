@@ -29,6 +29,7 @@ from app.models.ServerImportAuthorChange import ServerImportAuthorChange
 from app.models.User import User
 from app.models.UserToServer import UserToServer
 from app.permissions import Permission
+from app.routers import server_imports
 from app.routers.server_imports import ATTACHMENT_SPACE_MARGIN
 from app.services.bundle import importer
 from app.services.bundle.importer import ImportAborted, ImportOptions, import_bundle, message_uuid
@@ -2103,21 +2104,66 @@ def test_the_log_outlives_the_import(client, world, matcher):
     assert matcher.get(authors_url(world.sid)).status_code == 404
 
 
-def test_two_changes_at_once_log_once(client, world, matcher):
-    done = done_import(world)
-    hold_the_runner(client)
-    try:
-        first = set_authors(matcher, world.sid, done["id"], {"a2": world.alice_user["id"]})
-        second = set_authors(client, world.sid, done["id"], {"a2": world.bob_user["id"]})
-    finally:
-        release_the_runner(client)
+def after_the_first_check(monkeypatch, action) -> None:
+    """Run *action* once, right after the PUT has validated its mapping and
+    before its transaction starts: what another request could do in between."""
+    real = server_imports._checked_mapping
+    calls = []
 
-    assert first.status_code == 200 and first.json()["status"] == "importing"
-    assert (second.status_code, second.json()["detail"]) == (
-        409, "The import can't be changed right now")
-    settle(client, world.sid, done["id"])
-    assert logged(client, world.sid) == [
-        ("a2", None, world.alice_user["id"], world.bob_user["id"])]
+    async def checked(*args, **kwargs):
+        mapping = await real(*args, **kwargs)
+        if not calls:
+            calls.append(1)
+            await action()
+        return mapping
+
+    monkeypatch.setattr(server_imports, "_checked_mapping", checked)
+
+
+@pytest.mark.parametrize("rival, detail", [
+    ("hand_over", "The import can't be changed right now"),
+    ("new_upload", "A newer import is in progress"),
+])
+def test_a_change_that_loses_a_race_logs_and_starts_nothing(
+        client, world, matcher, monkeypatch, rival, detail):
+    done = done_import(world)
+    started = []
+    monkeypatch.setattr(ImportRunner, "start_handover", lambda self, i: started.append(i))
+
+    async def hand_over():
+        await ServerImport.filter(id=done["id"]).update(status="importing")
+
+    async def new_upload():
+        await ServerImport.create(
+            server_id=world.sid, created_by_id=world.owner_user["id"], status="uploading",
+            filename="later.zip", size=1)
+
+    after_the_first_check(monkeypatch, {"hand_over": hand_over, "new_upload": new_upload}[rival])
+
+    res = set_authors(matcher, world.sid, done["id"], {"a2": world.alice_user["id"]})
+
+    assert (res.status_code, res.json()["detail"]) == (409, detail)
+    assert logged(client, world.sid) == [] and started == []
+    assert import_row(client, done["id"]).authors == {}
+
+
+def test_a_member_who_left_is_refused_when_the_stored_mapping_changed_meanwhile(
+        client, world, matcher, monkeypatch):
+    done = done_import(world, {"a1": world.alice_user["id"]})
+    run(client, UserToServer.filter(
+        server_id=world.sid, user_id=world.alice_user["id"]).delete())
+
+    async def owner_remaps():
+        await ServerImport.filter(id=done["id"]).update(authors={"a1": world.owner_user["id"]})
+
+    after_the_first_check(monkeypatch, owner_remaps)
+
+    res = set_authors(matcher, world.sid, done["id"], {"a1": world.alice_user["id"]})
+
+    assert (res.status_code, res.json()["detail"]) == (
+        422, f"User {world.alice_user['id']} is not a member of this server")
+    assert logged(client, world.sid) == []
+    assert import_row(client, done["id"]).authors == {"a1": world.owner_user["id"]}
 
 
 def test_an_author_id_over_255_characters_is_refused(client, world):
