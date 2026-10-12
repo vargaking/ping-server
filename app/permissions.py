@@ -39,13 +39,7 @@ MEMBER_PERMISSIONS = (
     Permission.VIEW_CHANNEL | Permission.SEND_MESSAGES | Permission.CONNECT
     | Permission.SPEAK | Permission.STREAM | Permission.CREATE_INVITE
 )
-ADMIN_PERMISSIONS = (
-    MEMBER_PERMISSIONS | Permission.MANAGE_MESSAGES | Permission.MANAGE_INVITES
-    | Permission.MANAGE_CHANNELS | Permission.KICK_MEMBERS
-    | Permission.MUTE_MEMBERS | Permission.MOVE_MEMBERS
-)
 DEFAULT_ROLE_NAME = "@everyone"
-ADMIN_ROLE_NAME = "Admin"
 
 
 async def require_permission(

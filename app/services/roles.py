@@ -9,8 +9,6 @@ from ..models.RoleToUser import RoleToUser
 from ..models.Server import Server
 from ..models.User import User
 from ..permissions import (
-    ADMIN_PERMISSIONS,
-    ADMIN_ROLE_NAME,
     ALL_PERMISSIONS,
     DEFAULT_ROLE_NAME,
     MEMBER_PERMISSIONS,
@@ -30,12 +28,10 @@ T = TypeVar("T")
 
 
 async def seed_server_roles(server: Server) -> None:
-    """Give a new server its default @everyone role and the Admin role."""
+    """Give a new server its default @everyone role."""
     await Role.create(
         server=server, name=DEFAULT_ROLE_NAME, is_default=True, position=0,
         allow=int(MEMBER_PERMISSIONS))
-    await Role.create(
-        server=server, name=ADMIN_ROLE_NAME, position=1, allow=int(ADMIN_PERMISSIONS))
 
 
 @dataclass(frozen=True)

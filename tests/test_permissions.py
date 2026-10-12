@@ -3,14 +3,13 @@ import pytest
 
 from app.models.Role import Role
 from app.permissions import (
-    ADMIN_PERMISSIONS,
     ALL_PERMISSIONS,
     MEMBER_PERMISSIONS,
     Permission,
 )
 from app.routers import voice
 from app.services.permissions import permissions
-from tests.conftest import ORIGIN, create_channel, create_server, register, ws_ready
+from tests.conftest import ADMIN_ROLE_PERMISSIONS, ORIGIN, create_channel, create_server, register, ws_ready
 from tests.test_realtime_events import chat_frame, invite_and_join
 
 HEADERS = {"origin": ORIGIN}
@@ -66,19 +65,18 @@ def team(client, new_client):
 
 # -- new servers and the roles endpoint ----------------------------------
 
-def test_new_server_has_exactly_default_and_admin_roles(client):
+def test_a_new_server_has_only_everyone(client):
     register(client)
-    server = create_server(client)
+    server = client.post("/servers/", json={"name": "Fresh"}).json()
 
     roles = client.get(f"/servers/{server['id']}/roles").json()
     assert [
         (r["name"], r["is_default"], r["allow"], r["deny"], r["parent_id"], r["position"], r["color"])
         for r in roles
     ] == [
-        ("Admin", False, str(int(ADMIN_PERMISSIONS)), "0", None, 1, None),
         ("@everyone", True, str(int(MEMBER_PERMISSIONS)), "0", None, 0, None),
     ]
-    assert (int(MEMBER_PERMISSIONS), int(ADMIN_PERMISSIONS), int(ALL_PERMISSIONS)) == (123, 13311, 65535)
+    assert (int(MEMBER_PERMISSIONS), int(ALL_PERMISSIONS)) == (123, 65535)
 
 
 def test_roles_are_hidden_from_non_members(client, new_client):
@@ -94,7 +92,7 @@ def test_roles_are_hidden_from_non_members(client, new_client):
 def test_server_responses_carry_the_callers_permissions(team):
     sid = team["server"]["id"]
     assert team["member_client"].get(f"/servers/{sid}").json()["permissions"] == "123"
-    assert team["admin_client"].get(f"/servers/{sid}").json()["permissions"] == "13311"
+    assert team["admin_client"].get(f"/servers/{sid}").json()["permissions"] == "29695"
 
     mine = team["member_client"].get("/servers/me").json()
     assert [(s["id"], s["permissions"]) for s in mine] == [(sid, "123")]
@@ -130,7 +128,7 @@ def test_resolver_cache_follows_assignment_removal_and_joining(client, new_clien
     assert run(client, permissions.effective, user["id"], sid) == MEMBER_PERMISSIONS
 
     promote(client, sid, user["id"])
-    assert run(client, permissions.effective, user["id"], sid) == ADMIN_PERMISSIONS
+    assert run(client, permissions.effective, user["id"], sid) == ADMIN_ROLE_PERMISSIONS
 
     assert set_roles(client, sid, user["id"], []).status_code == 200
     assert run(client, permissions.effective, user["id"], sid) == MEMBER_PERMISSIONS
@@ -536,7 +534,7 @@ def test_promote_and_demote_notify_the_target_and_the_rest(team, client):
         got = {f["type"]: f for f in (member_ws.receive_json(), member_ws.receive_json())}
         assert got["member_roles_updated"] == roles_updated
         assert got["permissions_updated"] == {
-            "type": "permissions_updated", "server_id": sid, "permissions": "13311",
+            "type": "permissions_updated", "server_id": sid, "permissions": "29695",
             "channels": {}}
 
         assert set_roles(client, sid, member["id"], []).status_code == 200

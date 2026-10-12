@@ -44,6 +44,7 @@ from fastapi.testclient import TestClient  # noqa: E402
 from starlette.testclient import WebSocketTestSession  # noqa: E402
 
 from app.app import app  # noqa: E402
+from app.permissions import MEMBER_PERMISSIONS, Permission  # noqa: E402
 from app.services import activity  # noqa: E402
 from app.services.permissions import permissions  # noqa: E402
 from app.services.server_queue import server_queue  # noqa: E402
@@ -103,11 +104,23 @@ def register(client: TestClient, username: str | None = None) -> dict:
     return me.json()
 
 
+ADMIN_ROLE_PERMISSIONS = int(
+    MEMBER_PERMISSIONS | Permission.MANAGE_MESSAGES | Permission.MANAGE_INVITES
+    | Permission.MANAGE_CHANNELS | Permission.DELETE_CHANNELS | Permission.KICK_MEMBERS
+    | Permission.MUTE_MEMBERS | Permission.MOVE_MEMBERS)
+assert ADMIN_ROLE_PERMISSIONS == 29695
+
+
 def create_server(client: TestClient, name: str = "Test server") -> dict:
     """Create a server and return it without the default channels."""
     res = client.post("/servers/", json={"name": name})
     assert res.status_code == 201, res.text
     server = res.json()
+    admin = client.post(
+        f"/servers/{server['id']}/roles",
+        json={"name": "Admin", "allow": str(ADMIN_ROLE_PERMISSIONS)})
+    assert admin.status_code == 201, admin.text
+    assert admin.json()["position"] == 1
     for channel in client.get(f"/servers/{server['id']}/channels").json()["channels"]:
         assert client.delete(f"/channels/{channel['id']}").status_code == 204
     return client.get(f"/servers/{server['id']}").json()

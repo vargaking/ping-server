@@ -5,11 +5,11 @@ import json
 import pytest
 
 from app.models.Role import Role
-from app.permissions import ADMIN_PERMISSIONS, MEMBER_PERMISSIONS, Permission
+from app.permissions import MEMBER_PERMISSIONS, Permission
 from app.routers import voice
 from app.services.permissions import permissions
 from app.services.voice_presence import VoiceParticipant, VoicePresence
-from tests.conftest import create_channel, create_server, register
+from tests.conftest import ADMIN_ROLE_PERMISSIONS, create_channel, create_server, register
 from tests.test_permissions import join, promote, run
 
 
@@ -91,21 +91,6 @@ def _claims(token: str) -> dict:
     payload = token.split(".")[1]
     payload += "=" * (-len(payload) % 4)
     return json.loads(base64.urlsafe_b64decode(payload))
-
-
-def test_admin_permissions_include_the_moderation_bits():
-    assert Permission.MUTE_MEMBERS == 1 << 12
-    assert Permission.MOVE_MEMBERS == 1 << 13
-    assert ADMIN_PERMISSIONS & Permission.MUTE_MEMBERS
-    assert ADMIN_PERMISSIONS & Permission.MOVE_MEMBERS
-    assert not MEMBER_PERMISSIONS & (Permission.MUTE_MEMBERS | Permission.MOVE_MEMBERS)
-
-
-def test_new_servers_admin_role_has_the_moderation_bits(team, client):
-    admin_role = next(
-        r for r in client.get(f"/servers/{team['server']['id']}/roles").json()
-        if r["name"] == "Admin")
-    assert int(admin_role["allow"]) & (Permission.MUTE_MEMBERS | Permission.MOVE_MEMBERS)
 
 
 @pytest.mark.parametrize("method,url", [
@@ -291,7 +276,7 @@ def test_migration_grants_the_bits_to_roles_that_can_kick(team, client):
     async def run_migration():
         from tortoise import Tortoise
 
-        legacy = int(ADMIN_PERMISSIONS & ~Permission.MUTE_MEMBERS & ~Permission.MOVE_MEMBERS)
+        legacy = int(ADMIN_ROLE_PERMISSIONS & ~Permission.MUTE_MEMBERS & ~Permission.MOVE_MEMBERS)
         await Role.filter(server_id=sid, name="Admin").update(allow=legacy)
         conn = Tortoise.get_connection("default")
         sql = await __import__(
@@ -301,5 +286,5 @@ def test_migration_grants_the_bits_to_roles_that_can_kick(team, client):
         return {r.name: r.allow for r in await Role.filter(server_id=sid)}
 
     allow = run(client, run_migration)
-    assert allow["Admin"] == int(ADMIN_PERMISSIONS)
+    assert allow["Admin"] == int(ADMIN_ROLE_PERMISSIONS)
     assert allow["@everyone"] == int(MEMBER_PERMISSIONS)
