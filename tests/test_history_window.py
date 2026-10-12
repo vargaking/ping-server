@@ -201,6 +201,28 @@ def test_window_breaks_ties_on_id(thread):
     assert ids_of(page) == window(thread, [10, 9, 8, 7, 6])
 
 
+def test_pages_that_cross_equal_times_have_no_gap_or_repeat(thread):
+    update_rows(thread.client, thread.row_ids[3:9], created_at=at(3), timestamp=at(3))
+
+    walked, cursor = [], None
+    while True:
+        page = get(thread, before=cursor, limit=2)
+        walked += ids_of(page)
+        if not page["has_more"]:
+            break
+        cursor = page["next_cursor"]
+    assert walked == window(thread, range(COUNT - 1, -1, -1))
+
+    walked, anchor = [], thread.ids[0]
+    while True:
+        page = get(thread, after=anchor, limit=2)
+        if not page["messages"]:
+            break
+        walked += ids_of(page)[::-1]
+        anchor = ids_of(page)[0]
+    assert walked == window(thread, range(1, COUNT))
+
+
 def test_post_window_follows_timestamp_not_arrival(world):
     thread = world.threads["post"]
     update_rows(thread.client, [thread.row_ids[3]], timestamp=at(8))

@@ -71,11 +71,15 @@ def _decode_cursor(cursor: str) -> tuple[datetime, int]:
 
 
 def _older_than(order_field: str, at: datetime, row_id: int) -> Q:
-    return Q(**{f"{order_field}__lt": at}) | Q(**{order_field: at, "id__lt": row_id})
+    # The plain range on order_field is what lets the database seek into an
+    # index; the NOT trims the ties at `at` down to ids below row_id.
+    return Q(**{f"{order_field}__lte": at}) \
+        & ~(Q(**{order_field: at}) & Q(id__gte=row_id))
 
 
 def _newer_than(order_field: str, at: datetime, row_id: int) -> Q:
-    return Q(**{f"{order_field}__gt": at}) | Q(**{order_field: at, "id__gt": row_id})
+    return Q(**{f"{order_field}__gte": at}) \
+        & ~(Q(**{order_field: at}) & Q(id__lte=row_id))
 
 
 @dataclass
