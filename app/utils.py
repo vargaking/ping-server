@@ -58,6 +58,14 @@ async def lifespan(app: FastAPI):
         logger.warning("Failed to prune attachments on startup", exc_info=True)
 
     try:
+        from .services.message_changes import prune_tombstones
+        pruned_tombstones = await prune_tombstones()
+        if pruned_tombstones:
+            logger.info("Pruned %s expired message tombstone(s) on startup", pruned_tombstones)
+    except Exception:
+        logger.warning("Failed to prune message tombstones on startup", exc_info=True)
+
+    try:
         presence = create_voice_presence(getattr(app.state, "comms", None))
         if presence is not None:
             presence_task = asyncio.create_task(presence.run())

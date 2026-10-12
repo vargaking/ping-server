@@ -30,6 +30,8 @@ class Permission(IntFlag):
     MANAGE_ROLES = 1 << 11
     MUTE_MEMBERS = 1 << 12
     MOVE_MEMBERS = 1 << 13
+    DELETE_CHANNELS = 1 << 14
+    MAP_IMPORTED_AUTHORS = 1 << 15
 
 
 ALL_PERMISSIONS = reduce(or_, Permission)

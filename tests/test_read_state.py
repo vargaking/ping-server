@@ -7,11 +7,13 @@ from datetime import datetime, timezone
 import pytest
 
 from app.db_timing import own_query_stats
+from app.models.Conversation import Conversation
 from app.models.Message import Message
 from app.models.ReadState import ReadState
 from app.models.User import User
 from app.models.UserToServer import UserToServer
-from app.services.read_state import batch_channel_state, batch_channel_states
+from app.services.read_state import (
+    batch_channel_state, batch_channel_states, batch_conversation_state)
 from tests.conftest import ORIGIN, create_channel, create_server, register, ws_ready
 
 HEADERS = {"origin": ORIGIN}
@@ -482,7 +484,7 @@ def test_batch_channel_states_matches_one_user_at_a_time(two_members):
     assert all(s[channel["id"]]["last_message_id"] == uuids[2] for s in states)
     assert all(s[other["id"]] == {"last_read_message_id": None, "last_message_id": None}
                for s in states)
-    assert queries == 5
+    assert queries == 4
 
 
 def test_batch_channel_states_queries_do_not_grow_with_deleted_markers(two_members):
@@ -522,3 +524,91 @@ def test_batch_channel_states_queries_do_not_grow_with_deleted_markers(two_membe
             for channel_id, (read, last, _) in channels.items():
                 assert per_channel[channel_id] == {
                     "last_read_message_id": read, "last_message_id": last}
+
+
+# --- direct message unread counts, many conversations at once --------------
+
+# Messages are listed oldest first: "o" from the other person, "u" from the
+# user being counted. `marker` is the index of the message the user has read
+# up to; `deleted` removes that message afterwards, leaving the marker behind.
+UNREAD_CASES = [
+    pytest.param("ooouo", None, False, 4, id="no-marker"),
+    pytest.param("oouoo", 1, False, 2, id="mid-marker"),
+    pytest.param("oouoo", 1, True, 2, id="deleted-marker-message"),
+    pytest.param("ouuuo", 0, False, 1, id="own-messages-after-marker"),
+    pytest.param("ouuuu", 0, False, 0, id="only-own-messages-after-marker"),
+    pytest.param("ooo", 2, False, 0, id="marker-at-newest"),
+    pytest.param("ooou", 2, True, 0, id="deleted-marker-then-own-message"),
+    pytest.param("", None, False, 0, id="no-messages"),
+]
+
+
+async def _seed_conversation(user, partner, sequence, marker, deleted):
+    low, high = sorted((user.id, partner.id))
+    conversation = await Conversation.create(user_a_id=low, user_b_id=high)
+    messages = [
+        await Message.create(
+            uuid=uuid.uuid4(), content="x", conversation_id=conversation.id,
+            author_id=user.id if who == "u" else partner.id,
+            timestamp=datetime.now(timezone.utc))
+        for who in sequence]
+    if messages:
+        # The partner's own marker must never leak into the user's count.
+        await ReadState.create(user=partner, conversation_id=conversation.id,
+                               last_read_message_id=messages[-1].id)
+    if marker is not None:
+        await ReadState.create(user=user, conversation_id=conversation.id,
+                               last_read_message_id=messages[marker].id)
+        if deleted:
+            await messages[marker].delete()
+    return conversation.id
+
+
+@pytest.mark.parametrize("sequence, marker, deleted, expected", UNREAD_CASES)
+def test_conversation_unread_count_follows_the_marker(
+        client, sequence, marker, deleted, expected):
+    async def scenario():
+        user = await User.create(username="single-user", password_hash="x")
+        partner = await User.create(username="single-partner", password_hash="x")
+        cid = await _seed_conversation(user, partner, sequence, marker, deleted)
+        return cid, await batch_conversation_state(user.id, [cid])
+
+    cid, states = client.portal.call(scenario)
+    assert states[cid]["unread_count"] == expected
+
+
+def test_conversation_unread_counts_of_many_conversations_in_one_batch(client):
+    async def scenario():
+        user = await User.create(username="batch-user", password_hash="x")
+        expected = {}
+        for i, case in enumerate(UNREAD_CASES):
+            sequence, marker, deleted, count = case.values
+            partner = await User.create(username=f"batch-partner{i}", password_hash="x")
+            cid = await _seed_conversation(user, partner, sequence, marker, deleted)
+            expected[cid] = count
+        states = await batch_conversation_state(user.id, list(expected))
+        return expected, {cid: state["unread_count"] for cid, state in states.items()}
+
+    expected, counted = client.portal.call(scenario)
+    assert counted == expected
+
+
+def test_conversation_unread_queries_do_not_grow_with_conversations(client):
+    async def scenario():
+        user = await User.create(username="growth-user", password_hash="x")
+        queries, counts = {}, {}
+        for total in (2, 20):
+            cids = []
+            for i in range(total):
+                partner = await User.create(
+                    username=f"growth{total}-partner{i}", password_hash="x")
+                cids.append(await _seed_conversation(user, partner, "o" * (i + 1), None, False))
+            with own_query_stats() as stats:
+                states = await batch_conversation_state(user.id, cids)
+            queries[total] = stats.count
+            counts[total] = [states[cid]["unread_count"] for cid in cids]
+        return queries, counts
+
+    queries, counts = client.portal.call(scenario)
+    assert queries[2] == queries[20]
+    assert counts[20] == list(range(1, 21))

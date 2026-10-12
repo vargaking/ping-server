@@ -13,7 +13,7 @@ from app.communication import WS_CLOSE_UNAUTHENTICATED, Communication
 from app.db import TORTOISE_CONFIG
 from app.db_timing import ServerTimingMiddleware, instrument_db_clients
 from app.rate_limit import limiter
-from app.routers import admin, attachments, auth, channel_groups, channels, client_errors, conversations, forum, friends, invites, messages, overwrites, push, roles, server_imports, server_requests, servers, unfurl, users, voice, whats_new
+from app.routers import admin, attachments, auth, channel_groups, channels, client_errors, conversations, forum, friends, invites, message_changes, messages, overwrites, push, roles, server_imports, server_requests, servers, unfurl, users, voice, whats_new, announcements, calls
 from app.services.socket_send import accept_within_timeout, close_quietly
 from app.settings import ALLOWED_ORIGINS, ALLOWED_ORIGIN_REGEX, is_origin_allowed
 from app.utils import lifespan
@@ -70,6 +70,7 @@ app.include_router(channel_groups.router)
 app.include_router(forum.router)
 app.include_router(conversations.router)
 app.include_router(friends.router)
+app.include_router(message_changes.router)
 app.include_router(messages.router)
 app.include_router(invites.router)
 app.include_router(voice.router)
@@ -78,6 +79,8 @@ app.include_router(push.router)
 app.include_router(unfurl.router)
 app.include_router(client_errors.router)
 app.include_router(whats_new.router)
+app.include_router(announcements.router)
+app.include_router(calls.router)
 
 # Serve uploaded media from local disk (avatars, server icons).
 # storage.py writes into MEDIA_ROOT and returns URLs prefixed with MEDIA_BASE_URL;
