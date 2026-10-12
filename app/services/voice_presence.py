@@ -105,6 +105,8 @@ class LiveKitRoomSource:
                 snapshot.unreadable.add(channel_id)
             elif participants:
                 snapshot[channel_id] = participants
+        if channel_ids and len(snapshot.unreadable) == len(channel_ids):
+            raise RuntimeError("No voice room could be read")
         return snapshot
 
     async def _read_channel(self, channel_id: int) -> tuple[VoiceParticipant, ...] | None:

@@ -654,6 +654,17 @@ def test_source_reports_a_room_it_could_not_read_as_unreadable(short_read_timeou
     assert snapshot.unreadable == {6}
 
 
+def test_a_poll_that_reads_no_room_fails(short_read_timeout):
+    async def list_rooms(_request):
+        return SimpleNamespace(rooms=[models.Room(name="channel_5"), models.Room(name="channel_6")])
+
+    async def list_participants(_request):
+        raise RuntimeError("permission denied")
+
+    with pytest.raises(RuntimeError, match="No voice room"):
+        asyncio.run(_source_with(list_rooms, list_participants).fetch())
+
+
 def test_source_reads_with_nothing_unreadable_by_default():
     assert Snapshot({1: (alice(),)}).unreadable == set()
 
