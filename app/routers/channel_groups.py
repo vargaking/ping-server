@@ -90,6 +90,7 @@ async def get_channels_snapshot(
     visible = [cid for cid in channel_layout.flatten(
         await channel_layout.get_layout(server.id)) if view.can_view(cid)]
     state = await read_state.batch_channel_state(current_user.id, visible)
+    mentions = await read_state.mention_counts(current_user.id, visible)
     private_channels, private_groups = await private_flags(server.id)
     return ChannelsSnapshot(
         groups=[
@@ -100,6 +101,7 @@ async def get_channels_snapshot(
                 channels[channel_id],
                 last_read_message_id=state.get(channel_id, {}).get("last_read_message_id"),
                 last_message_id=state.get(channel_id, {}).get("last_message_id"),
+                mention_count=mentions.get(channel_id, 0),
                 private=channel_id in private_channels,
             )
             for channel_id in visible

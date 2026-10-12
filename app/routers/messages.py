@@ -15,6 +15,7 @@ from ..models.Channel import Channel
 from ..models.Conversation import Conversation
 from ..models.ForumPost import ForumPost
 from ..models.Message import Message
+from ..models.MessageMention import MessageMention
 from ..models.Reaction import Reaction
 from ..models.Server import Server
 from ..models.User import User
@@ -23,6 +24,8 @@ from ..services import forum
 from ..services.attachments import attachments_by_message, delete_file
 from ..services.message_changes import write_tombstone
 from ..services.message_content import InvalidContent, normalize_content, serialize
+from ..services.message_text import mentioned_user_ids
+from ..services.permissions import permissions
 from ..services.reactions import (
     MAX_DISTINCT_EMOJIS_PER_MESSAGE,
     normalize_emoji,
@@ -140,7 +143,24 @@ async def edit_message(
         raise HTTPException(status_code=422, detail="Invalid message content")
     message.content = serialize(content)
     message.edited_at = datetime.now(timezone.utc)
-    await message.save()
+    removed: set[int] = set()
+    added: set[int] = set()
+    if message.channel_id is not None:
+        wanted = mentioned_user_ids(content) - {message.author_id}
+        existing = set(await MessageMention.filter(message_id=message.id)
+                       .values_list("user_id", flat=True))
+        removed = existing - wanted
+        added = wanted - existing
+        if added:
+            added &= await permissions.viewers(server.id, message.channel_id)
+    async with in_transaction():
+        await message.save()
+        if removed:
+            await MessageMention.filter(message_id=message.id, user_id__in=removed).delete()
+        if added:
+            await MessageMention.bulk_create([MessageMention(
+                message_id=message.id, user_id=uid, channel_id=message.channel_id)
+                for uid in sorted(added)], ignore_conflicts=True)
 
     reactions = (await reactions_by_message([message.id])).get(message.id, [])
     refs = await reply_refs([message.reply_to_uuid])

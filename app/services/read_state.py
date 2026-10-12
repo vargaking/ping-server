@@ -5,11 +5,13 @@ from uuid import UUID
 from pypika_tortoise import Order
 from tortoise.exceptions import IntegrityError
 from tortoise.expressions import Expression, Q, ResolveContext, ResolveResult
+from pypika_tortoise.functions import Coalesce
 from tortoise.functions import Count
 
 from app.models.Channel import Channel
 from app.models.Conversation import Conversation
 from app.models.Message import Message
+from app.models.MessageMention import MessageMention
 from app.models.ReadState import ReadState
 from app.services.push import push
 
@@ -285,3 +287,40 @@ async def batch_conversation_state(user_id: int, conversation_ids: list[int]) ->
             "unread_count": unread_counts.get(cid, 0),
         }
     return result
+
+
+class _ReadMarker(Expression):
+    """For a mention row, its user's read marker in its channel (0 when never
+    read), as a subquery correlated to the row."""
+
+    def resolve(self, resolve_context: ResolveContext) -> ResolveResult:
+        mention, state = resolve_context.table, ReadState._meta.basetable
+        marker = (
+            state.select(state.last_read_message_id)
+            .where(state.user_id == mention.user_id)
+            .where(state.channel_id == mention.channel_id))
+        return ResolveResult(term=Coalesce(marker, 0))
+
+
+async def batch_mention_counts(
+    wanted: Mapping[int, Collection[int]]
+) -> dict[int, dict[int, int]]:
+    """{user_id: {channel_id: mentions of the user after their read marker}}
+    for every wanted pair, from one query however many users and channels."""
+    channel_ids = sorted({channel_id for ids in wanted.values() for channel_id in ids})
+    if not channel_ids:
+        return {}
+    rows = await MessageMention.filter(
+        user_id__in=list(wanted), channel_id__in=channel_ids,
+        message_id__gt=_ReadMarker(),
+    ).group_by("user_id", "channel_id").annotate(count=Count("id")) \
+     .values_list("user_id", "channel_id", "count")
+    result = {user_id: dict.fromkeys(ids, 0) for user_id, ids in wanted.items()}
+    for user_id, channel_id, count in rows:
+        if channel_id in result[user_id]:
+            result[user_id][channel_id] = count
+    return result
+
+
+async def mention_counts(user_id: int, channel_ids: Collection[int]) -> dict[int, int]:
+    return (await batch_mention_counts({user_id: channel_ids})).get(user_id, {})
