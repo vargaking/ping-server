@@ -1,4 +1,5 @@
 import time
+from collections.abc import Iterable
 
 from fastapi import WebSocket
 
@@ -46,6 +47,24 @@ class ConnectionManager:
 
     def get_websockets(self, user_id: int) -> list[WebSocket]:
         return list(self.user_to_websockets.get(user_id, ()))
+
+    def websockets_of(
+        self,
+        user_ids: Iterable[int],
+        *,
+        exclude_user_id: int | None = None,
+        exclude_websocket: WebSocket | None = None,
+    ) -> list[WebSocket]:
+        """Every socket of each of *user_ids*, once, minus the excluded user's
+        sockets and the excluded socket."""
+        sockets = dict.fromkeys(
+            ws
+            for user_id in user_ids
+            if user_id != exclude_user_id
+            for ws in self.user_to_websockets.get(user_id, ())
+            if ws is not exclude_websocket
+        )
+        return list(sockets)
 
     def get_websockets_for_token(self, token: str) -> list[WebSocket]:
         return [ws for ws, t in self.websocket_to_token.items() if t == token]

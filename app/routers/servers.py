@@ -30,7 +30,9 @@ from ..services.server_icon import clean_icon_text, clean_icon_tone
 from ..services.server_name import clean_server_name
 from ..services.server_queue import server_queue
 from ..services.storage import ImageValidationError, storage_service
-from ..services.voice_presence import close_voice_channels, remove_from_voice
+from ..services.voice_presence import (
+    close_voice_channels, remove_from_voice, voice_channels_of,
+)
 from ..settings import server_creation_mode
 from ..utils import require_owner
 from .users import UserResponse
@@ -536,8 +538,8 @@ async def remove_member(
             "reason": "left" if leaving else "kicked",
         })
 
-    voice_channel_ids = await Channel.filter(server=server, type="voice").values_list("id", flat=True)
+    presence = getattr(request.app.state, "voice_presence", None)
     await remove_from_voice(
-        getattr(request.app.state, "voice_presence", None), voice_channel_ids, user_id)
+        presence, await voice_channels_of(presence, server.id, user_id), user_id)
     if moderation := getattr(request.app.state, "voice_moderation", None):
         moderation.set_muted(server.id, user_id, False)

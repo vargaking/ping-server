@@ -7,7 +7,9 @@ from types import SimpleNamespace
 import pytest
 from livekit.protocol import models
 
+from app.services import voice_presence
 from app.services.voice_presence import (
+    Snapshot,
     VoiceParticipant,
     LiveKitRoomSource,
     VoicePresence,
@@ -621,3 +623,92 @@ def test_refresh_endpoint_is_a_noop_without_livekit(client):
     assert client.app.state.voice_presence is None
     res = client.post(f"/api/voice/presence/channels/{voice['id']}/refresh", headers=HEADERS)
     assert res.status_code == 204, res.text
+
+
+# Bounded LiveKit reads
+
+@pytest.fixture
+def short_read_timeout(monkeypatch):
+    monkeypatch.setattr(voice_presence, "READ_TIMEOUT_SECONDS", 0.05)
+
+
+def _source_with(list_rooms, list_participants):
+    source = LiveKitRoomSource("http://livekit.test", "key", "secret")
+    source._client = SimpleNamespace(
+        room=SimpleNamespace(list_rooms=list_rooms, list_participants=list_participants))
+    return source
+
+
+def test_source_reports_a_room_it_could_not_read_as_unreadable(short_read_timeout):
+    async def list_rooms(_request):
+        return SimpleNamespace(rooms=[models.Room(name="channel_5"), models.Room(name="channel_6")])
+
+    async def list_participants(request):
+        if request.room == "channel_6":
+            await asyncio.Event().wait()
+        return SimpleNamespace(participants=[_info("3", [_mic(False)])])
+
+    snapshot = asyncio.run(_source_with(list_rooms, list_participants).fetch())
+
+    assert snapshot == {5: (VoiceParticipant(3, False, False),)}
+    assert snapshot.unreadable == {6}
+
+
+def test_a_poll_that_reads_no_room_fails(short_read_timeout):
+    async def list_rooms(_request):
+        return SimpleNamespace(rooms=[models.Room(name="channel_5"), models.Room(name="channel_6")])
+
+    async def list_participants(_request):
+        raise RuntimeError("permission denied")
+
+    with pytest.raises(RuntimeError, match="No voice room"):
+        asyncio.run(_source_with(list_rooms, list_participants).fetch())
+
+
+def test_source_reads_with_nothing_unreadable_by_default():
+    assert Snapshot({1: (alice(),)}).unreadable == set()
+
+
+def test_a_room_list_that_never_answers_fails_the_whole_poll(short_read_timeout):
+    async def list_rooms(_request):
+        await asyncio.Event().wait()
+
+    source = _source_with(list_rooms, None)
+
+    with pytest.raises(TimeoutError):
+        asyncio.run(source.fetch())
+
+
+def test_poll_keeps_the_previous_state_of_channels_it_could_not_read():
+    recorder = Recorder()
+    unreadable = Snapshot({1: (alice(muted=True),)}, unreadable={2})
+    presence = VoicePresence(FakeSource(unreadable), recorder)
+
+    async def scenario():
+        await presence.apply_snapshot({1: (alice(),), 2: (bob(),)})
+        recorder.calls.clear()
+        await presence.poll_once()
+
+    asyncio.run(scenario())
+    assert recorder.calls == [(1, (alice(muted=True),))]
+    assert presence.channel_participants(2) == (bob(),)
+
+
+def test_refresh_gives_up_on_a_read_that_never_answers(short_read_timeout):
+    never = asyncio.Event()
+
+    async def hang():
+        await never.wait()
+
+    recorder = Recorder()
+    presence = VoicePresence(FakeSource(channels={1: hang}), recorder)
+
+    async def scenario():
+        await presence.apply_snapshot({1: (alice(),)})
+        recorder.calls.clear()
+        presence.refresh(1)
+        await _settle(presence)
+
+    asyncio.run(scenario())
+    assert recorder.calls == []
+    assert presence.channel_participants(1) == (alice(),)

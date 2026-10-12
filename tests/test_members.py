@@ -1,5 +1,5 @@
 """Server members: listing, kicking and leaving."""
-from app.services.voice_presence import VoicePresence
+from app.services.voice_presence import VoiceParticipant, VoicePresence
 from tests.conftest import ORIGIN, create_channel, create_server, register, ws_ready
 from tests.test_realtime_events import chat_frame, invite_and_join
 
@@ -142,6 +142,7 @@ def test_removed_member_stops_receiving_server_messages(client, new_client):
 class VoiceSource:
     def __init__(self, occupied):
         self.occupied = occupied
+        self.attempted = []
         self.removed = []
         self.deleted = []
 
@@ -152,6 +153,7 @@ class VoiceSource:
         return ()
 
     async def remove_participant(self, channel_id, user_id):
+        self.attempted.append((channel_id, user_id))
         if (channel_id, user_id) not in self.occupied:
             raise RuntimeError("participant not found")
         self.removed.append((channel_id, user_id))
@@ -183,9 +185,13 @@ def test_kick_disconnects_the_member_from_voice(client, new_client, monkeypatch)
     async def notify(channel_id, participants):
         pass
 
-    monkeypatch.setattr(client.app.state, "voice_presence", VoicePresence(source, notify))
+    presence = VoicePresence(source, notify)
+    monkeypatch.setattr(client.app.state, "voice_presence", presence)
+    client.portal.call(presence.apply_snapshot, {
+        lounge["id"]: (VoiceParticipant(bob["id"], muted=False, deafened=False),)})
 
     assert client.delete(f"/servers/{server['id']}/members/{bob['id']}").status_code == 204
+    assert source.attempted == [(lounge["id"], bob["id"])]
     assert source.removed == [(lounge["id"], bob["id"])]
 
 

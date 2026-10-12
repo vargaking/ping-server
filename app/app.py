@@ -14,6 +14,7 @@ from app.db import TORTOISE_CONFIG
 from app.db_timing import ServerTimingMiddleware, instrument_db_clients
 from app.rate_limit import limiter
 from app.routers import admin, attachments, auth, channel_groups, channels, client_errors, conversations, forum, friends, invites, message_changes, messages, overwrites, push, roles, server_imports, server_requests, servers, unfurl, users, voice, whats_new, announcements, calls
+from app.services.socket_send import accept_within_timeout, close_quietly
 from app.settings import ALLOWED_ORIGINS, ALLOWED_ORIGIN_REGEX, is_origin_allowed
 from app.utils import lifespan
 from app.ws_schemas import FrameDecodeError, decode_frame
@@ -119,7 +120,7 @@ async def websocket_endpoint(websocket: WebSocket):
     origin = websocket.headers.get("origin")
     if origin is not None and not is_origin_allowed(origin):
         logger.warning("Rejected WebSocket from disallowed origin %s", origin)
-        await websocket.close(code=1008)  # before accept() -> HTTP 403
+        await close_quietly(websocket, 1008)  # before accept() -> HTTP 403
         return
 
     token = websocket.cookies.get("access_token")
@@ -127,9 +128,10 @@ async def websocket_endpoint(websocket: WebSocket):
 
     # Accept first even when unauthenticated: a close code only reaches the
     # browser after the handshake completed.
-    await websocket.accept()
+    if not await accept_within_timeout(websocket):
+        return
     if user is None:
-        await websocket.close(code=WS_CLOSE_UNAUTHENTICATED)
+        await close_quietly(websocket, WS_CLOSE_UNAUTHENTICATED)
         return
 
     try:
