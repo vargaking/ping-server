@@ -91,7 +91,8 @@ async def _notify(
 
 
 def _is_call_row(message: Message) -> bool:
-    return "call" in (message.metadata or {})
+    # Only DMs hold call rows; a channel message may carry a forged key from before it was blocked.
+    return message.conversation_id is not None and "call" in (message.metadata or {})
 
 
 def _wire_message(
