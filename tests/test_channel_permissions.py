@@ -319,6 +319,8 @@ def test_no_extra_row_when_nothing_is_lost(crew, case, rows, repeats):
     owner, mod = crew.owner_client, crew.mod_client
     low = owner.post(f"/servers/{crew.sid}/roles", json={"name": "Low"}).json()
     if case == "kept by own role":
+        assert set_roles(
+            owner, crew.sid, crew.mod["id"], [crew.mod_role["id"], low["id"]]).status_code == 200
         channel, path = crew.secret["id"], f"/channels/{crew.secret['id']}/permissions/roles/{low['id']}"
     else:
         channel, path = crew.general["id"], (
@@ -381,6 +383,22 @@ def test_removing_your_own_row(crew, private, existing, status, detail):
     assert crew.owner_client.get(rules).json()["members"] == (
         [] if status == 204 else [{"user_id": crew.mod["id"], "allow": str(existing[0]),
                                    "deny": str(existing[1])}])
+
+
+def test_only_your_own_view_row_can_be_removed_without_outranking(crew):
+    owner, general = crew.owner_client, crew.general["id"]
+    rules = f"/channels/{general}/permissions"
+    assert set_roles(owner, crew.sid, crew.member["id"], [crew.mod_role["id"]]).status_code == 200
+    assert overwrite(owner, f"{rules}/roles/{crew.everyone['id']}", deny=VIEW).status_code == 200
+    assert overwrite(owner, f"{rules}/roles/{crew.mod_role['id']}", allow=VIEW).status_code == 200
+    peer = f"{rules}/members/{crew.member['id']}"
+    assert overwrite(owner, peer, allow=VIEW).status_code == 200
+
+    res = crew.mod_client.delete(peer)
+
+    assert res.status_code == 403 and res.json()["detail"] == MEMBER_ABOVE_YOU
+    assert owner.get(rules).json()["members"] == [
+        {"user_id": crew.member["id"], "allow": str(VIEW), "deny": "0"}]
 
 
 def test_adding_to_your_own_kept_row_is_refused(crew):
