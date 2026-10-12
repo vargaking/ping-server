@@ -10,6 +10,7 @@ from tortoise.transactions import in_transaction
 
 from ..middleware import get_current_user
 from ..models.User import User
+from ..services.message_changes import tombstone_channel_messages_of
 from ..services.system_user import IMPORTED_USERNAME
 from ..services.storage import ImageValidationError, storage_service
 from ..services.usernames import Username
@@ -180,7 +181,9 @@ async def delete_user(user_id: int, current_user: User = Depends(get_current_use
     user = await User.get_or_none(id=user_id)
     if not user:
         raise HTTPException(status_code=404, detail="User not found")
-    await user.delete()
+    async with in_transaction() as conn:
+        await tombstone_channel_messages_of(conn, user.id)
+        await user.delete(using_db=conn)
 
 
 @router.post("/{user_id}/avatar", response_model=UserResponse)

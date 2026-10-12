@@ -35,6 +35,7 @@ os.environ.setdefault("PUSH_TEST_RATE_LIMIT", "10000/minute")
 os.environ.setdefault("CLIENT_ERROR_GLOBAL_RATE_LIMIT", "10000/hour")
 os.environ.setdefault("UNFURL_RATE_LIMIT", "10000/minute")
 os.environ.setdefault("FRIEND_REQUEST_RATE_LIMIT", "10000/minute")
+os.environ.setdefault("START_CALL_RATE_LIMIT", "10000/minute")
 
 import anyio  # noqa: E402
 import bcrypt  # noqa: E402

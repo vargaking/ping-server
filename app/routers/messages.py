@@ -21,6 +21,7 @@ from ..models.User import User
 from ..permissions import Permission, require_channel
 from ..services import forum
 from ..services.attachments import attachments_by_message, delete_file
+from ..services.message_changes import write_tombstone
 from ..services.message_content import InvalidContent, normalize_content, serialize
 from ..services.reactions import (
     MAX_DISTINCT_EMOJIS_PER_MESSAGE,
@@ -78,20 +79,15 @@ async def _notify(
     server: Server | None,
     conversation: Conversation | None,
     frame: dict,
-    exclude_user_id: int | None,
 ) -> None:
     """Fan *frame* out to the server's members or the DM's participants."""
     comms = getattr(request.app.state, "comms", None)
     if comms is None:
         return
     if conversation is not None:
-        await comms.send_to_users(
-            [conversation.user_a_id, conversation.user_b_id],
-            frame, exclude_user_id=exclude_user_id,
-        )
+        await comms.send_to_users([conversation.user_a_id, conversation.user_b_id], frame)
     else:
-        await comms.broadcast_to_channel(
-            server.id, frame["channel_id"], frame, exclude_user_id=exclude_user_id)
+        await comms.broadcast_to_channel(server.id, frame["channel_id"], frame)
 
 
 def _wire_message(
@@ -153,7 +149,7 @@ async def edit_message(
         reply_json(message.reply_to_uuid, refs))
     await _notify(
         request, server, conversation,
-        {"type": "message_updated", **payload}, current_user.id,
+        {"type": "message_updated", **payload},
     )
 
     return payload
@@ -193,18 +189,19 @@ async def delete_message(
         message_id=message.id).values_list("storage_path", flat=True)
     async with in_transaction():
         await message.delete()
+        await write_tombstone(message)
         if post is not None:
             await ForumPost.filter(id=post.id, reply_count__gt=0).update(
                 reply_count=F("reply_count") - 1)
     for storage_path in storage_paths:
         delete_file(storage_path)
 
-    await _notify(request, server, conversation, frame, current_user.id)
+    await _notify(request, server, conversation, frame)
     if post is not None:
         await post.refresh_from_db()
         await _notify(
             request, server, None,
-            forum.updated_frame(server.id, (await forum.rows([post]))[0]), None)
+            forum.updated_frame(server.id, (await forum.rows([post]))[0]))
 
 
 async def _load_reactable_message(
@@ -261,7 +258,7 @@ async def add_reaction(
 
     await _notify(
         request, server, conversation,
-        _reaction_frame("reaction_added", message, emoji, current_user.id), None,
+        _reaction_frame("reaction_added", message, emoji, current_user.id),
     )
 
 
@@ -283,5 +280,5 @@ async def remove_reaction(
 
     await _notify(
         request, server, conversation,
-        _reaction_frame("reaction_removed", message, emoji, current_user.id), None,
+        _reaction_frame("reaction_removed", message, emoji, current_user.id),
     )

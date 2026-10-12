@@ -1,8 +1,9 @@
 """Editing and deleting messages over REST, with realtime fan-out.
 
 The author may edit their own message; the author or the server owner may delete
-one. Every other online member of the server sees a message_updated /
-message_deleted frame, while the actor is excluded (they have the REST reply).
+one. Every online member of the server sees a message_updated /
+message_deleted frame, the actor's own sockets included, so their other tabs
+and devices stay in step.
 """
 import uuid
 from datetime import datetime, timezone
@@ -50,6 +51,14 @@ def setup_server_with_two_members(client, new_client):
     return server, channel, bob_client
 
 
+def next_of_type(ws, frame_type):
+    for _ in range(10):
+        frame = ws.receive_json()
+        if frame["type"] == frame_type:
+            return frame
+    raise AssertionError(f"no {frame_type} frame arrived")
+
+
 def post_message(sender_ws, receiver_ws, server_id, channel_id):
     """Post a message from sender and wait for receiver to see it, which
     guarantees it is persisted before the test moves on. Returns its id."""
@@ -85,10 +94,33 @@ def test_author_edits_and_members_receive_update(client, new_client):
         assert frame["content"] == EDITED
         assert frame["edited_at"] is not None
 
-        # The editor is excluded: alice's next frame is bob's new message, not
-        # the message_updated she triggered.
-        bob_id = post_message(bob_ws, alice_ws, server["id"], channel["id"])
-        assert bob_id  # alice received a plain message frame, nothing queued before it
+        own = alice_ws.receive_json()
+        assert own["type"] == "message_updated"
+        assert own["id"] == message_id
+        assert own["content"] == EDITED
+
+
+@pytest.mark.parametrize("act, frame_type", [
+    pytest.param(lambda c, mid: c.patch(f"/messages/{mid}", json={"content": EDITED}),
+                 "message_updated", id="edit"),
+    pytest.param(lambda c, mid: c.delete(f"/messages/{mid}"), "message_deleted", id="delete"),
+])
+def test_the_actors_other_socket_receives_the_frame(client, new_client, act, frame_type):
+    server, channel, bob_client = setup_server_with_two_members(client, new_client)
+
+    with client.websocket_connect("/ws", headers=HEADERS) as alice_ws, \
+            client.websocket_connect("/ws", headers=HEADERS) as alice_other_ws:
+        ws_ready(alice_ws)
+        ws_ready(alice_other_ws)
+
+        message_id = str(uuid.uuid4())
+        alice_ws.send_json(chat_frame(server["id"], channel["id"], message_id))
+        assert next_of_type(alice_other_ws, "message")["id"] == message_id
+
+        assert act(client, message_id).status_code in (200, 204)
+
+        for ws in (alice_other_ws, alice_ws):
+            assert next_of_type(ws, frame_type)["id"] == message_id
 
 
 def test_only_author_can_edit(client, new_client):
@@ -124,6 +156,10 @@ def test_author_deletes_and_members_receive_delete(client, new_client):
         assert frame["type"] == "message_deleted"
         assert frame["id"] == message_id
         assert frame["channel_id"] == channel["id"]
+
+        own = alice_ws.receive_json()
+        assert own["type"] == "message_deleted"
+        assert own["id"] == message_id
 
 
 def test_owner_can_delete_others_message(client, new_client):

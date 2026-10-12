@@ -78,7 +78,7 @@ def test_new_server_has_exactly_default_and_admin_roles(client):
         ("Admin", False, str(int(ADMIN_PERMISSIONS)), "0", None, 1, None),
         ("@everyone", True, str(int(MEMBER_PERMISSIONS)), "0", None, 0, None),
     ]
-    assert (int(MEMBER_PERMISSIONS), int(ADMIN_PERMISSIONS), int(ALL_PERMISSIONS)) == (123, 13311, 16383)
+    assert (int(MEMBER_PERMISSIONS), int(ADMIN_PERMISSIONS), int(ALL_PERMISSIONS)) == (123, 13311, 65535)
 
 
 def test_roles_are_hidden_from_non_members(client, new_client):
@@ -102,7 +102,7 @@ def test_server_responses_carry_the_callers_permissions(team):
 
 def test_creating_a_server_returns_owner_permissions(client):
     register(client)
-    assert create_server(client)["permissions"] == "16383"
+    assert create_server(client)["permissions"] == "65535"
 
 
 def test_members_list_shows_assigned_roles_only(team, client):
@@ -500,7 +500,7 @@ def test_permissions_init_lists_every_server_the_user_is_in(team, client):
         ws_ready_frames = [ws.receive_json(), ws.receive_json()]
         assert ws_ready_frames[1] == {
             "type": "permissions_init",
-            "servers": {str(sid): "16383", str(other["id"]): "16383"},
+            "servers": {str(sid): "65535", str(other["id"]): "65535"},
             "channels": {str(sid): {}, str(other["id"]): {}},
         }
 

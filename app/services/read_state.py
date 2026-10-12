@@ -1,16 +1,21 @@
 import logging
 from collections.abc import Collection, Mapping
+from uuid import UUID
 
 from pypika_tortoise import Order
 from tortoise.exceptions import IntegrityError
-from tortoise.expressions import Expression, ResolveContext, ResolveResult
-from tortoise.functions import Max
+from tortoise.expressions import Expression, Q, ResolveContext, ResolveResult
+from tortoise.functions import Count
 
+from app.models.Channel import Channel
+from app.models.Conversation import Conversation
 from app.models.Message import Message
 from app.models.ReadState import ReadState
 from app.services.push import push
 
 logger = logging.getLogger("app.services.read_state")
+
+UNREAD_BATCH = 200
 
 
 async def advance(
@@ -97,23 +102,40 @@ async def resolve_marker_uuid(
     return str(row["uuid"]) if row else None
 
 
-async def last_message_uuid(
-    *, channel_id: int | None = None, conversation_id: int | None = None
-) -> str | None:
-    query = Message.filter(channel_id=channel_id) if channel_id is not None \
-        else Message.filter(conversation_id=conversation_id)
-    row = await query.order_by("-id").first().values("uuid")
-    return str(row["uuid"]) if row else None
+class _NewestMessage(Expression):
+    """One column of the newest message in a channel or conversation, as a
+    subquery correlated to its row."""
+
+    def __init__(self, thread_field: str, column: str):
+        self.thread_field = thread_field
+        self.column = column
+
+    def resolve(self, resolve_context: ResolveContext) -> ResolveResult:
+        thread, message = resolve_context.table, Message._meta.basetable
+        newest_id = (
+            message.select(message.id)
+            .where(message.field(self.thread_field) == thread.id)
+            .orderby(message.id, order=Order.desc)
+            .limit(1))
+        if self.column == "id":
+            return ResolveResult(term=newest_id)
+        # Looked up by id: ordered directly, Postgres walks the primary key
+        # and filters on the thread instead of using the (thread, id) index.
+        return ResolveResult(
+            term=message.select(message.field(self.column)).where(message.id == newest_id))
 
 
 async def _last_messages(thread_field: str, thread_ids: list[int]) -> dict[int, dict]:
-    """{thread_id: {"id", "uuid"}} of the newest message in each thread, via one
-    grouped MAX(id) plus one lookup, instead of scanning every message."""
-    newest = await Message.filter(**{f"{thread_field}__in": thread_ids}).annotate(
-        max_id=Max("id")).group_by(thread_field).values(thread_field, "max_id")
-    rows = await Message.filter(
-        id__in=[n["max_id"] for n in newest]).values(thread_field, "id", "uuid")
-    return {row[thread_field]: row for row in rows}
+    """{thread_id: {"id", "uuid"}} of the newest message in each thread, from
+    one query on the thread table. Threads without messages are left out."""
+    thread_model = Channel if thread_field == "channel_id" else Conversation
+    rows = await thread_model.filter(id__in=thread_ids).annotate(
+        newest_id=_NewestMessage(thread_field, "id"),
+        newest_uuid=_NewestMessage(thread_field, "uuid"),
+    ).values("id", "newest_id", "newest_uuid")
+    return {
+        row["id"]: {"id": row["newest_id"], "uuid": UUID(str(row["newest_uuid"]))}
+        for row in rows if row["newest_id"] is not None}
 
 
 async def _resolve_markers(
@@ -239,21 +261,27 @@ async def batch_conversation_state(user_id: int, conversation_ids: list[int]) ->
     last_read = await _resolve_markers(
         "conversation_id", conversation_ids, markers, last_by_convo)
 
+    behind = [
+        cid for cid, last in last_by_convo.items()
+        if markers.get(cid) is None or last["id"] > markers[cid]]
+    unread_counts = {}
+    for start in range(0, len(behind), UNREAD_BATCH):
+        # One (conversation, id > marker) range per conversation, so each is an
+        # index seek rather than a scan of the whole conversation.
+        past_marker = Q(*(
+            Q(conversation_id=cid, id__gt=markers.get(cid) or 0)
+            for cid in behind[start:start + UNREAD_BATCH]), join_type="OR")
+        rows = await Message.filter(past_marker).exclude(author_id=user_id) \
+            .group_by("conversation_id").annotate(unread=Count("id")) \
+            .values("conversation_id", "unread")
+        unread_counts.update((row["conversation_id"], row["unread"]) for row in rows)
+
     result = {}
     for cid in conversation_ids:
-        marker = markers.get(cid)
         last_row = last_by_convo.get(cid)
-        if last_row is None or (marker is not None and last_row["id"] <= marker):
-            unread_count = 0
-        else:
-            unread_query = Message.filter(conversation_id=cid).exclude(author_id=user_id)
-            if marker is not None:
-                unread_query = unread_query.filter(id__gt=marker)
-            unread_count = await unread_query.count()
-
         result[cid] = {
             "last_read_message_id": last_read[cid],
             "last_message_id": str(last_row["uuid"]) if last_row else None,
-            "unread_count": unread_count,
+            "unread_count": unread_counts.get(cid, 0),
         }
     return result
