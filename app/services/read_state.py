@@ -3,9 +3,8 @@ from collections.abc import Collection, Mapping
 from uuid import UUID
 
 from pypika_tortoise import Order
-from pypika_tortoise.functions import Coalesce
 from tortoise.exceptions import IntegrityError
-from tortoise.expressions import Expression, ResolveContext, ResolveResult
+from tortoise.expressions import Expression, Q, ResolveContext, ResolveResult
 from tortoise.functions import Count
 
 from app.models.Channel import Channel
@@ -15,6 +14,8 @@ from app.models.ReadState import ReadState
 from app.services.push import push
 
 logger = logging.getLogger("app.services.read_state")
+
+UNREAD_BATCH = 200
 
 
 async def advance(
@@ -111,12 +112,17 @@ class _NewestMessage(Expression):
 
     def resolve(self, resolve_context: ResolveContext) -> ResolveResult:
         thread, message = resolve_context.table, Message._meta.basetable
-        newest = (
-            message.select(message.field(self.column))
+        newest_id = (
+            message.select(message.id)
             .where(message.field(self.thread_field) == thread.id)
             .orderby(message.id, order=Order.desc)
             .limit(1))
-        return ResolveResult(term=newest)
+        if self.column == "id":
+            return ResolveResult(term=newest_id)
+        # Looked up by id: ordered directly, Postgres walks the primary key
+        # and filters on the thread instead of using the (thread, id) index.
+        return ResolveResult(
+            term=message.select(message.field(self.column)).where(message.id == newest_id))
 
 
 async def _last_messages(thread_field: str, thread_ids: list[int]) -> dict[int, dict]:
@@ -239,23 +245,6 @@ async def batch_channel_state(user_id: int, channel_ids: list[int]) -> dict:
     return (await batch_channel_states({user_id: channel_ids})).get(user_id, {})
 
 
-class _ConversationMarker(Expression):
-    """*user_id*'s read marker for a message's conversation, as a subquery
-    correlated to the message. 0 when there is no marker row, so every message
-    compares as past it."""
-
-    def __init__(self, user_id: int):
-        self.user_id = user_id
-
-    def resolve(self, resolve_context: ResolveContext) -> ResolveResult:
-        message, read_state = resolve_context.table, ReadState._meta.basetable
-        marker = (
-            read_state.select(read_state.last_read_message_id)
-            .where(read_state.user_id == self.user_id)
-            .where(read_state.conversation_id == message.conversation_id))
-        return ResolveResult(term=Coalesce(marker, 0))
-
-
 async def batch_conversation_state(user_id: int, conversation_ids: list[int]) -> dict:
     """Read marker + last message + unread count per conversation.
 
@@ -272,14 +261,20 @@ async def batch_conversation_state(user_id: int, conversation_ids: list[int]) ->
     last_read = await _resolve_markers(
         "conversation_id", conversation_ids, markers, last_by_convo)
 
-    unread_counts = {
-        row["conversation_id"]: row["unread"]
-        for row in await Message.filter(conversation_id__in=conversation_ids)
-        .exclude(author_id=user_id)
-        .filter(id__gt=_ConversationMarker(user_id))
-        .group_by("conversation_id")
-        .annotate(unread=Count("id"))
-        .values("conversation_id", "unread")}
+    behind = [
+        cid for cid, last in last_by_convo.items()
+        if markers.get(cid) is None or last["id"] > markers[cid]]
+    unread_counts = {}
+    for start in range(0, len(behind), UNREAD_BATCH):
+        # One (conversation, id > marker) range per conversation, so each is an
+        # index seek rather than a scan of the whole conversation.
+        past_marker = Q(*(
+            Q(conversation_id=cid, id__gt=markers.get(cid) or 0)
+            for cid in behind[start:start + UNREAD_BATCH]), join_type="OR")
+        rows = await Message.filter(past_marker).exclude(author_id=user_id) \
+            .group_by("conversation_id").annotate(unread=Count("id")) \
+            .values("conversation_id", "unread")
+        unread_counts.update((row["conversation_id"], row["unread"]) for row in rows)
 
     result = {}
     for cid in conversation_ids:

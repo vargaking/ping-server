@@ -82,6 +82,11 @@ def _newer_than(order_field: str, at: datetime, row_id: int) -> Q:
         & ~(Q(**{order_field: at}) & Q(id__lte=row_id))
 
 
+def _not_older_than(order_field: str, at: datetime, row_id: int) -> Q:
+    return Q(**{f"{order_field}__gte": at}) \
+        & ~(Q(**{order_field: at}) & Q(id__lt=row_id))
+
+
 @dataclass
 class HistoryPage:
     rows: list[dict]  # newest first
@@ -158,7 +163,8 @@ async def history_page(
             cursor_at, cursor_id = _decode_cursor(before)
             older_than_cursor = _older_than(order_field, cursor_at, cursor_id)
             page_query = query.filter(older_than_cursor)
-            has_newer = await query.exclude(older_than_cursor).exists()
+            has_newer = await query.filter(
+                _not_older_than(order_field, cursor_at, cursor_id)).exists()
         # Fetch one extra row to tell whether an older page exists.
         rows = await page_query.order_by(*newest_first).limit(limit + 1).values(*fields)
         has_more = len(rows) > limit
