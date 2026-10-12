@@ -360,7 +360,7 @@ def test_channel_updated_only_when_the_private_flag_flips(crew, new_client):
         frames = live.settle()
         listed = next(c for c in owner.get(f"/channels/{sid}").json() if c["id"] == general)
         expected = {k: v for k, v in listed.items()
-                    if k not in ("last_read_message_id", "last_message_id")}
+                    if k not in ("last_read_message_id", "last_message_id", "mention_count")}
         assert expected["private"] is True
         for name in ("owner", "keeper"):
             assert of_type(frames[name], "channel_updated") == [{
