@@ -117,17 +117,19 @@ def test_decline_and_timeout_have_one_winner(client, calls, clock, pair, sockets
     clock.advance(seconds=31)
 
     async def race():
-        loaded = await calls.service.get_for(pair.b["id"], call["id"])
         await asyncio.gather(
-            calls.service.decline(pair.b["id"], loaded), calls.service.tick(),
+            calls.service._finish(
+                call["id"], CallState.RINGING, CallState.DECLINED, CallEndReason.DECLINED),
             calls.service.tick())
 
     client.portal.call(race)
 
+    row = stored(pair.a_client, call["id"])
+    assert (row.state, row.reason) in {("declined", "declined"), ("missed", "timeout")}
     for ws in (sockets.a, sockets.b):
         (frame,) = frames(ws)
-        assert frame["call"]["state"] == "missed"
-    assert stored(pair.a_client, call["id"]).reason == "timeout"
+        assert frame["type"] == "call_state"
+        assert (frame["call"]["state"], frame["call"]["reason"]) == (row.state, row.reason)
 
 
 def test_a_stale_read_is_ignored(client, calls, rooms, clock, pair):

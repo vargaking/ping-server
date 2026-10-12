@@ -245,7 +245,7 @@ def test_crossing_start_answers(calls, pair, sockets):
     assert callee_frames[1]["last_read_message_id"] == call["message_id"]
 
 
-def test_concurrent_starts_make_one_call(client, calls, pair):
+def test_concurrent_starts_make_one_call(client, calls, pair, sockets):
     async def both():
         conversation = await Conversation.get(id=pair.convo)
         return await asyncio.gather(
@@ -257,6 +257,12 @@ def test_concurrent_starts_make_one_call(client, calls, pair):
     assert first.id == second.id
     assert run(client, Call.all().count()) == 1
     assert run(client, Message.filter(conversation_id=pair.convo).count()) == 1
+    for ws in (sockets.a, sockets.b):
+        got = [f for f in frames(ws) if f["type"] != "read_state"]
+        assert [f["type"] for f in got][0] == "direct_message"
+        states = [f["call"]["state"] for f in got]
+        assert states[0] == states[1] == "ringing" and states[-1] == "active"
+        assert {f["call"]["id"] for f in got} == {first.id}
 
 
 @pytest.mark.parametrize("outsider", [False, True], ids=["unknown-conversation", "outsider"])
@@ -762,6 +768,28 @@ def test_ring_push_is_closed_once(calls, pair, subscribed, answer):
     assert close["payload"]["tag"] == f"call-{call['id']}"
     assert (close["topic"], close["urgency"]) == (f"call-{call['id']}", "normal")
     assert not close["endpoint"].startswith(APPLE)
+
+
+@pytest.mark.parametrize("answer", [
+    lambda pair, call: take_token(pair.b_client, call["id"]),
+    lambda pair, call: decline(pair.b_client, call["id"]),
+], ids=["token", "decline"])
+def test_ring_push_is_closed_after_a_restart(
+        client, calls, rooms, clock, pair, subscribed, monkeypatch, answer):
+    call = started(pair.a_client, pair.convo)
+    drain_push(pair.a_client)
+    restarted = CallService(client.app.state.comms, rooms, clock=clock.now, sleep=clock.sleep)
+    client.portal.call(restarted.reconcile)
+    monkeypatch.setattr(client.app.state, "calls", restarted)
+
+    try:
+        assert answer(pair, call).status_code == 200
+        drain_push(pair.a_client)
+    finally:
+        client.portal.call(restarted.aclose)
+
+    (close,) = close_pushes(subscribed)
+    assert close["payload"]["tag"] == f"call-{call['id']}"
 
 
 @pytest.mark.parametrize("how", ["timeout", "cancelled"])

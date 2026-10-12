@@ -1,6 +1,7 @@
 import asyncio
 import logging
 import math
+import weakref
 from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
@@ -236,6 +237,10 @@ class CallService:
         self._seq = 0
         self._applied: dict[int, int] = {}
         self._ring_pushed: set[int] = set()
+        # Held while a start looks for, creates and announces a call, so a start
+        # from the other person can't answer it before its row has been announced.
+        self._start_locks: weakref.WeakValueDictionary[int, asyncio.Lock] = (
+            weakref.WeakValueDictionary())
         self._tasks: set[asyncio.Task] = set()
         self._run_task: asyncio.Task | None = None
         self._refreshing: set[int] = set()
@@ -384,6 +389,13 @@ class CallService:
     async def start(self, user_id: int, conversation) -> Call:
         """Start a call in *conversation*, or return the one already open there.
         If the open call is ringing for this user, starting it answers it."""
+        lock = self._start_locks.get(conversation.id)
+        if lock is None:
+            lock = self._start_locks[conversation.id] = asyncio.Lock()
+        async with lock:
+            return await self._start(user_id, conversation)
+
+    async def _start(self, user_id: int, conversation) -> Call:
         other_id = conversation.other_user_id(user_id)
         for attempt in (1, 2):
             open_call = _loaded(
@@ -408,6 +420,7 @@ class CallService:
         except Exception:
             logger.warning("Failed to move the read marker for call %s", call.id, exc_info=True)
         async with self._lock(call.id):
+            call = await self._reload(call.id)
             await self._send(call, {
                 "type": "direct_message",
                 "id": str(call.message.uuid),
@@ -422,7 +435,7 @@ class CallService:
                 "call": call_meta(call),
             })
             await self._send_state(call)
-        self._watch[call.id] = Watch()
+        self._watch.setdefault(call.id, Watch())
         if push.enabled and not self._callee_active(other_id):
             push.schedule(self._push_ring(call, user_id))
         return call
@@ -554,6 +567,9 @@ class CallService:
                 await self._finish(call.id, ACTIVE, CallState.ENDED, CallEndReason.EXPIRED)
             else:
                 self._watch[call.id] = Watch.resumed(call, now, self.limits)
+                if call.state == RINGING and push.enabled:
+                    # The ring push went out before the restart; answering must still close it.
+                    self._ring_pushed.add(call.id)
 
     async def check(self, call_id: int) -> None:
         """Read the call's room and apply whatever transition is due."""
