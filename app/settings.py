@@ -87,6 +87,22 @@ def friend_request_rate_limit() -> str:
     """Per-user limit for POST /friends/requests."""
     return os.getenv("FRIEND_REQUEST_RATE_LIMIT", "20/hour")
 
+
+def game_frame_rate_limit() -> str:
+    """Per-integration limit for the game API."""
+    return os.getenv("GAME_FRAME_RATE_LIMIT", "30/second")
+
+
+def game_link_rate_limit() -> str:
+    """Per-user limit for looking up and claiming game link codes."""
+    return os.getenv("GAME_LINK_RATE_LIMIT", "20/minute")
+
+
+def app_url() -> str:
+    """Where the web app lives, for links sent outside it. Defaults to the first allowed origin."""
+    url = os.getenv("APP_URL", "").strip() or (ALLOWED_ORIGINS[0] if ALLOWED_ORIGINS else "")
+    return url.rstrip("/")
+
   
 def server_creation_mode() -> Literal["open", "waitlist"]:
     """SERVER_CREATION=open|waitlist. Anything else falls back to open."""

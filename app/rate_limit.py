@@ -14,6 +14,7 @@ from fastapi import Request
 from slowapi import Limiter
 from slowapi.util import get_remote_address
 
+from .services.game_sessions import bearer_token, hash_key
 from .settings import trusted_proxy_key
 
 CLIENT_IP_HEADER = "x-zet-client-ip"
@@ -49,3 +50,10 @@ def user_key(request: Request) -> str:
     """Rate-limit per signed-in user, falling back to the client IP."""
     user = getattr(request.state, "user", None)
     return f"user:{user.id}" if user else client_address(request)
+
+
+def game_key(request: Request) -> str:
+    """Rate-limit the game API per integration, by the hash of its key, so a game
+    behind one address isn't limited with others. No key: the client address."""
+    token = bearer_token(request.headers.get("authorization"))
+    return f"game:{hash_key(token)}" if token else client_address(request)
