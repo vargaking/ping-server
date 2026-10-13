@@ -7,6 +7,7 @@ from fastapi import FastAPI, HTTPException
 from fastapi.concurrency import asynccontextmanager
 
 from .models.Token import Token
+from .services.game_sessions import GameSessions, LinkCodes
 from .services.stats_history import StatsSampler, sampling_enabled
 from .services.voice_moderation import VoiceModeration
 from .services.voice_presence import create_voice_presence
@@ -74,6 +75,12 @@ async def lifespan(app: FastAPI):
     app.state.voice_presence = presence
     app.state.voice_moderation = VoiceModeration()
 
+    game_sessions = GameSessions(getattr(app.state, "comms", None))
+    app.state.game_sessions = game_sessions
+    app.state.link_codes = LinkCodes()
+    game_task = asyncio.create_task(game_sessions.run())
+    app.state.game_task = game_task
+
     stats_task = None
     try:
         comms = getattr(app.state, "comms", None)
@@ -123,6 +130,10 @@ async def lifespan(app: FastAPI):
         await imports.shutdown()
     except Exception:
         logger.warning("Failed to stop imports", exc_info=True)
+
+    game_task.cancel()
+    with suppress(asyncio.CancelledError):
+        await game_task
 
     if calls is not None:
         try:

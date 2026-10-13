@@ -27,9 +27,12 @@ from .MessageMention import MessageMention
 from .Announcement import Announcement
 from .AnnouncementDismissal import AnnouncementDismissal
 from .ServerImportAuthorChange import ServerImportAuthorChange
+from .GameIntegration import GameIntegration
+from .GameLink import GameLink
 
 __all__ = ["Role", "User", "Server", "RoleToUser", "UserToServer",
            "Channel", "ChannelGroup", "ForumPost", "ForumTag", "ForumPostTag", "Conversation", "Message", "Token", "Invite", "ReadState",
            "Attachment", "Reaction", "PushSubscription", "ServerRequest", "ServerImport", "StatSample",
            "PermissionOverwrite", "Friendship", "MessageTombstone",
-           "Call", "MessageMention", "Announcement", "AnnouncementDismissal", "ServerImportAuthorChange"]
+           "Call", "MessageMention", "Announcement", "AnnouncementDismissal", "ServerImportAuthorChange",
+           "GameIntegration", "GameLink"]
