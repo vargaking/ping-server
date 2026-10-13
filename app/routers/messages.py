@@ -90,6 +90,11 @@ async def _notify(
         await comms.broadcast_to_channel(server.id, frame["channel_id"], frame)
 
 
+def _is_call_row(message: Message) -> bool:
+    # Only DMs hold call rows; a channel message may carry a forged key from before it was blocked.
+    return message.conversation_id is not None and "call" in (message.metadata or {})
+
+
 def _wire_message(
     message: Message,
     content: Any,
@@ -101,7 +106,7 @@ def _wire_message(
     frame. content is the raw (un-stringified) form the client sees."""
     edited_at = message.edited_at
     timestamp = message.timestamp
-    return {
+    payload = {
         "id": str(message.uuid),
         "server_id": message.server_id,
         "channel_id": message.channel_id,
@@ -117,6 +122,9 @@ def _wire_message(
         "embeds": (message.metadata or {}).get("embeds", []),
         "imported_author": (message.metadata or {}).get("imported_author"),
     }
+    if _is_call_row(message):
+        payload["call"] = message.metadata["call"]
+    return payload
 
 
 @router.patch("/{message_id}")
@@ -129,6 +137,8 @@ async def edit_message(
     """Edit a message's content. Only the author may edit; sets edited_at."""
     message, server, conversation, _ = await _load_message_and_scope(
         message_id, current_user)
+    if _is_call_row(message):
+        raise HTTPException(status_code=403, detail="Call messages can't be changed")
 
     if message.author_id != current_user.id:
         raise HTTPException(status_code=403, detail="You can only edit your own messages")
@@ -166,6 +176,8 @@ async def delete_message(
     so author only."""
     message, server, conversation, mask = await _load_message_and_scope(
         message_id, current_user)
+    if _is_call_row(message):
+        raise HTTPException(status_code=403, detail="Call messages can't be changed")
 
     is_author = message.author_id == current_user.id
     is_moderator = server is not None and bool(mask & Permission.MANAGE_MESSAGES)
@@ -208,6 +220,8 @@ async def _load_reactable_message(
     message_id: str, emoji: str, user: User
 ) -> tuple[Message, Server | None, Conversation | None, str]:
     message, server, conversation, _ = await _load_message_and_scope(message_id, user)
+    if _is_call_row(message):
+        raise HTTPException(status_code=400, detail="Call messages can't be reacted to")
     normalized = normalize_emoji(emoji)
     if normalized is None:
         raise HTTPException(status_code=400, detail="Invalid emoji")

@@ -1,3 +1,4 @@
+import logging
 import os
 import uuid
 from datetime import datetime, timedelta, timezone
@@ -16,6 +17,8 @@ from ..services.usernames import Username
 from ..services.voice_presence import remove_from_voice
 from ..settings import auth_rate_limit
 from .users import UserResponse
+
+logger = logging.getLogger("app.routers.auth")
 
 router = APIRouter(prefix="/auth", tags=["authentication"])
 
@@ -145,6 +148,12 @@ async def logout(request: Request, response: Response):
             presence = getattr(request.app.state, "voice_presence", None)
             if presence is not None:
                 await remove_from_voice(presence, presence.channels_of(user_id), user_id)
+            calls = getattr(request.app.state, "calls", None)
+            if calls is not None:
+                try:
+                    await calls.end_for_logout(user_id)
+                except Exception:
+                    logger.warning("Failed to end calls of user %s on logout", user_id, exc_info=True)
     response.delete_cookie("access_token", path="/")
     return {"detail": "Logged out"}
 
