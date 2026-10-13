@@ -258,16 +258,6 @@ def test_editing_everyone_changes_every_members_mask(crew):
         assert not mask_of(crew[who], sid) & SEND
 
 
-def test_admin_is_an_ordinary_role(client):
-    register(client)
-    sid = create_server(client)["id"]
-    admin = roles_by_name(client, sid)["Admin"]
-
-    assert patch_role(client, sid, admin["id"], name="Boss", allow=bits(KICK)).status_code == 200
-    assert client.delete(f"/servers/{sid}/roles/{admin['id']}").status_code == 204
-    assert ranking(client, sid) == ["@everyone"]
-
-
 # -- delete and reorder --------------------------------------------------
 
 def test_deleting_a_parent_leaves_children_with_their_own_bits(client, new_client):

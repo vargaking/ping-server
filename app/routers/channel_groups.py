@@ -165,7 +165,7 @@ async def delete_group(
     group_id: int,
     request: Request,
     current_user: User = Depends(get_current_user),
-    server: Server = Depends(_manage_channels()),
+    server: Server = Depends(check_permission(Permission.DELETE_CHANNELS, hide=True)),
 ):
     """Delete a category. Its channels move to the end of the ungrouped list,
     and lose the category's permission overwrites."""
