@@ -1,8 +1,9 @@
 #!/usr/bin/env bash
 #
 # Server-side deploy script for ping-server.
-# Executed on the remote Ubuntu server by the GitHub Actions workflow
-# (piped in over SSH). Assumes the one-time setup in DEPLOYMENT.md is done:
+# Run on the server by the self-hosted GitHub Actions runner, from the target
+# environment's own checkout ($APP_DIR/scripts/deploy.sh). Assumes the one-time
+# setup in DEPLOYMENT.md is done:
 #   - repo cloned at $APP_DIR
 #   - venv created at $APP_DIR/venv
 #   - .env present at $APP_DIR/.env (NOT in git)

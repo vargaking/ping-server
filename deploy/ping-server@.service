@@ -1,7 +1,7 @@
 [Unit]
 # systemd template unit. Instantiate per environment:
-#   ping-server@production  ->  /opt/ping-server,         port 8000
-#   ping-server@staging     ->  /opt/ping-server-staging, port 8001
+#   ping-server@production  ->  /opt/ping-server-production, port 8000
+#   ping-server@staging     ->  /opt/ping-server-staging,    port 8001
 # The instance name (%i) selects the directory and env file.
 Description=ping-server [%i] (FastAPI + Gunicorn/Uvicorn)
 After=network.target
@@ -32,6 +32,9 @@ NoNewPrivileges=true
 PrivateTmp=true
 ProtectSystem=full
 ProtectHome=true
+# ProtectSystem=full leaves /opt writable, so the media, attachments and imports
+# roots set in .env (under /opt/ping-server-%i) need no entry here. Media does not
+# live under /var/lib/ping-server; the entry below is stale.
 ReadWritePaths=/opt/ping-server-%i/logs /var/lib/ping-server/%i/media
 
 [Install]

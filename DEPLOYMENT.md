@@ -1,31 +1,45 @@
 # Deploying ping-server
 
-CI/CD: **GitHub Actions → SSH → Ubuntu server**, running the app via
-**systemd + venv** behind **Nginx (HTTPS)**. Two environments on one server:
+CI/CD: **GitHub Actions → self-hosted runner on the server**, running the app
+via **systemd + venv** behind **Nginx (HTTPS)**. Two environments on one server:
 
 | Env | Branch | Directory | systemd unit | Port | DB |
 |-----|--------|-----------|--------------|------|----|
 | production | `master`  | `/opt/ping-server-production` | `ping-server@production` | 8000 | prod DB |
 | staging    | `staging` | `/opt/ping-server-staging`    | `ping-server@staging`    | 8001 | **shares prod DB** |
 
+> **To be confirmed:** that `staging` is the branch in use and that staging
+> still shares the production database. The workflow and `deploy.sh` are
+> written on both assumptions.
+
 ## How it works
 
 ```
-push to master  ──► GitHub Actions ──► SSH ──► deploy.sh (ENVIRONMENT=production)
-push to staging ──► GitHub Actions ──► SSH ──► deploy.sh (ENVIRONMENT=staging)
-                        │
-                        ├─ test job:   install deps + compile-check (add pytest here)
-                        └─ deploy job: git reset --hard origin/<branch>
-                                        pip install -r requirements.txt
-                                        aerich upgrade   (prod only by default)
-                                        sudo systemctl restart ping-server@<env>
+push to master    ──► Test ──► Deploy ──► deploy.sh (ENVIRONMENT=production)
+push to staging   ──► Test ──► Deploy ──► deploy.sh (ENVIRONMENT=staging)
+manual run        ──► Test ──► Deploy ──► master = production, any other ref = staging
+
+Test    GitHub-hosted (ubuntu-latest, Python 3.13):
+          pip install -r requirements-dev.txt, compileall, pytest
+Deploy  self-hosted runner on the server (labels self-hosted, ping-server), runs locally:
+          bash /opt/ping-server-<env>/scripts/deploy.sh
+            git fetch, git reset --hard origin/<branch>
+            pip install -r requirements.txt
+            aerich upgrade   (production always; staging only if asked, see below)
+            sudo systemctl restart ping-server@<env>, then check the unit is active
 ```
+
+Deploy waits for Test. Deploys are serialized per branch and never cancelled
+midway. The runner is on the server, so nothing connects in from GitHub.
+`deploy.sh` runs from the environment's own checkout, before that deploy's
+`git reset`: a change to the script takes effect on the deploy after the one
+that pulls it.
 
 Each env is served by Gunicorn (Uvicorn workers) on `127.0.0.1:<port>`, managed
 by a systemd **template** unit, with Nginx reverse-proxying and handling TLS +
 the `/ws` WebSocket upgrade.
 
-> ⚠️ **Single Gunicorn worker required (ZET-6).** `deploy/gunicorn.conf.py`
+> ⚠️ **Single Gunicorn worker required.** `deploy/gunicorn.conf.py`
 > pins `workers = 1` (overridable via `GUNICORN_WORKERS`, but leave it at 1).
 > Live WebSocket connections are tracked in an in-process `ConnectionManager`
 > dict that is **not** shared across workers, so with >1 worker a message or
@@ -38,17 +52,19 @@ the `/ws` WebSocket upgrade.
 > **skips migrations on staging by default** (`RUN_MIGRATIONS=false`) so a WIP
 > migration on the `staging` branch can't alter prod data. To run a migration
 > from staging deliberately, trigger the workflow manually (Actions → Run
-> workflow → check "Run migrations").
+> workflow → check "Run migrations"; the input defaults to off). Production
+> always migrates, including on a manual run.
 
 Files that make this up:
 
 | File | Purpose |
 |------|---------|
-| `.github/workflows/deploy.yml` | Pipeline; maps branch → environment |
+| `.github/workflows/deploy.yml` | Pipeline: Test, then Deploy on the self-hosted runner; maps branch → environment |
 | `scripts/deploy.sh` | Server-side deploy, parameterized by `ENVIRONMENT` |
 | `deploy/gunicorn.conf.py` | Gunicorn/Uvicorn config (`GUNICORN_BIND` from env) |
 | `deploy/ping-server@.service` | systemd **template** unit (`@production` / `@staging`) |
-| `deploy/nginx.conf` | Nginx reverse proxy (prod + staging, WebSocket-aware) |
+| `deploy/nginx.conf` | Nginx reverse proxy (prod + staging API and LiveKit WSS, WebSocket-aware) |
+| `deploy/cloudflare/worker.js` | Cloudflare Worker in front of the API, see [Behind the Cloudflare Worker](#behind-the-cloudflare-worker) |
 
 ---
 
@@ -68,8 +84,9 @@ sudo apt install -y python3.13 python3.13-venv python3.13-dev git nginx
 
 ### 2. Service user
 
-A locked-down `ping` system user *runs* the app; the deploy user (the SSH login,
-e.g. `dpkbeta`) *owns and deploys* the code.
+A locked-down `ping` system user *runs* the app; the deploy user (the account the
+runner runs as, see [Runner and secrets](#runner-and-secrets)) *owns and deploys*
+the code.
 
 ```bash
 sudo useradd --system --shell /usr/sbin/nologin --home-dir /opt/ping-server-production ping
@@ -160,6 +177,19 @@ chmod 600 /opt/ping-server-$ENV/.env
 > **Behind the Cloudflare Worker:** set `TRUSTED_PROXY_KEY` in production's `.env` to the
 > same value as the Worker's `PROXY_KEY` secret (`deploy/cloudflare/worker.js`), or every login shares one rate limit.
 
+### Behind the Cloudflare Worker
+
+In production the API sits behind a Cloudflare Worker (`deploy/cloudflare/worker.js`,
+tests in `worker.test.mjs`). It forwards every request to the address in its
+`ORIGIN` binding and adds `X-Zet-Client-IP` (the visitor's `CF-Connecting-IP`)
+and `X-Zet-Proxy-Key` (its `PROXY_KEY` secret); it strips both from incoming
+requests first. The server believes the client address only when the key matches
+`TRUSTED_PROXY_KEY`. Without that, rate limits key on the connecting address,
+so every client behind the Worker shares one limit.
+
+> **To be confirmed:** where the Worker runs (account, route or domain), and
+> whether it is also in front of staging.
+
 ### Web Push (VAPID)
 
 Generate the keys once, from the env directory:
@@ -188,50 +218,74 @@ sudo systemctl status ping-server@production
 
 ### 6. Let the deploy user restart the services without a password
 
-`deploy.sh` runs `sudo systemctl restart ping-server@<env>`. Grant just that:
+`deploy.sh` runs `sudo systemctl restart ping-server@<env>`, then
+`sudo systemctl is-active --quiet ping-server@<env>`, and on failure
+`sudo journalctl -u ping-server@<env> -n 40 --no-pager`. Grant just those:
 
 ```bash
 sudo tee /etc/sudoers.d/ping-server >/dev/null <<'EOF'
-<deploy-user> ALL=(root) NOPASSWD: /usr/bin/systemctl restart ping-server@production, /usr/bin/systemctl restart ping-server@staging, /usr/bin/systemctl is-active ping-server@production, /usr/bin/systemctl is-active ping-server@staging, /usr/bin/journalctl -u ping-server@production *, /usr/bin/journalctl -u ping-server@staging *
+<deploy-user> ALL=(root) NOPASSWD: /usr/bin/systemctl restart ping-server@production, /usr/bin/systemctl restart ping-server@staging, /usr/bin/systemctl is-active --quiet ping-server@production, /usr/bin/systemctl is-active --quiet ping-server@staging, /usr/bin/journalctl -u ping-server@production *, /usr/bin/journalctl -u ping-server@staging *
 EOF
 sudo chmod 440 /etc/sudoers.d/ping-server
 sudo visudo -cf /etc/sudoers.d/ping-server   # validate
 ```
 
+> **To be confirmed:** that this is the rule on the box, and which user the
+> runner runs as (`<deploy-user>` here).
+
 ### 7. Nginx + HTTPS
+
+`deploy/nginx.conf` terminates TLS with one certificate and key pair,
+`/etc/ssl/ping/ping.crt` and `ping.key` (its header calls it self-signed, for VPN
+and IP access). Every server block uses `server_name _`, so there are no domains
+to fill in. Nginx fails `nginx -t` until the pair exists.
 
 ```bash
 sudo cp /opt/ping-server-production/deploy/nginx.conf /etc/nginx/sites-available/ping-server
-# set your real domains:
-sudo sed -i 's/api.example.com/YOUR_DOMAIN/; s/staging.api.example.com/STAGING_DOMAIN/' \
-  /etc/nginx/sites-available/ping-server
 sudo ln -sf /etc/nginx/sites-available/ping-server /etc/nginx/sites-enabled/ping-server
 sudo rm -f /etc/nginx/sites-enabled/default
 sudo nginx -t && sudo systemctl reload nginx
-
-sudo apt install -y certbot python3-certbot-nginx
-sudo certbot --nginx -d YOUR_DOMAIN -d STAGING_DOMAIN
 ```
+
+What it listens on:
+
+| Port | Does |
+|------|------|
+| 443 | production API (`127.0.0.1:8000`) |
+| 8443 | staging API (`127.0.0.1:8001`) |
+| 7444 | production LiveKit WSS (`127.0.0.1:7882`) |
+| 7443 | staging LiveKit WSS (`127.0.0.1:7880`) |
+| 80 | redirect to HTTPS |
+| 8080 | redirect to HTTPS on 8443 (staging) |
+
+> **To be confirmed:** which TLS setup production and staging really use:
+> the self-signed pair above behind the Worker, Cloudflare in front with an
+> origin certificate, or Let's Encrypt on the box (an earlier version of this
+> guide used certbot with real domains; nothing in the repo configures it).
+> Also how the pair at `/etc/ssl/ping/` was made.
+
+> **To be confirmed:** that all six ports are in use, and what each is for
+> beyond the comments in `nginx.conf`.
 
 ---
 
-## GitHub setup
+## Runner and secrets
 
-### Deploy SSH key
+`deploy.yml` needs:
 
-The workflow SSHes in as the deploy user with a dedicated key. Its **public**
-half must be in `~<deploy-user>/.ssh/authorized_keys` on the server.
+- A self-hosted runner on this server with the label `ping-server`. The Deploy
+  job is `runs-on: [self-hosted, ping-server]`.
+- The two checkouts at `/opt/ping-server-production` and
+  `/opt/ping-server-staging`, each with its `venv` and `.env` (steps 3 and 4).
+  The paths are hardcoded in the workflow.
+- A runner user that can write to both checkouts and run the `sudo systemctl`
+  commands from step 6.
 
-### Repository secrets
+The workflow uses no repository secrets and no deploy key. Any left from the
+earlier setup can be removed.
 
-Repo → **Settings → Secrets and variables → Actions**:
-
-| Secret | Value |
-|--------|-------|
-| `DEPLOY_HOST` | server IP / hostname |
-| `DEPLOY_USER` | the deploy user (e.g. `dpkbeta`) |
-| `DEPLOY_SSH_KEY` | the **private** deploy key |
-| `DEPLOY_SSH_PORT` | *(optional)* SSH port if not `22` |
+> **To be confirmed:** how the runner was installed (the user it runs as, its
+> labels, and whether one runner serves both environments).
 
 ---
 
@@ -240,7 +294,9 @@ Repo → **Settings → Secrets and variables → Actions**:
 - **Production:** push/merge to `master`.
 - **Staging:** push to `staging`.
 - **Manual (+ optional migration on staging):** Actions → *Deploy ping-server* →
-  Run workflow → pick branch, optionally check **Run migrations**.
+  Run workflow → pick branch, optionally check **Run migrations**. `master`
+  deploys production and always migrates. Any other branch deploys staging,
+  which resets to `origin/staging` whatever branch you picked.
 
 ## Frontend (Vercel)
 
