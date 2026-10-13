@@ -7,8 +7,8 @@ class GameIntegration(models.Model):
     server = fields.ForeignKeyField(
         "models.Server", related_name="game_integrations", on_delete=fields.CASCADE)
     name = fields.CharField(max_length=32)
-    voice_channel = fields.ForeignKeyField(
-        "models.Channel", related_name="game_integrations",
+    voice_channel = fields.OneToOneField(
+        "models.Channel", related_name="game_integration",
         null=True, on_delete=fields.SET_NULL)
     players_hear_spectators = fields.BooleanField(default=False)
     key_hash = fields.CharField(max_length=64, unique=True)
