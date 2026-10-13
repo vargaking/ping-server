@@ -14,6 +14,7 @@ from tests.conftest import ORIGIN, drain_jobs, ws_ready
 from tests.test_game_integrations import bearer, integration, make_integration, team  # noqa: F401
 from tests.test_game_sessions import Clock
 from tests.test_permissions import roles_by_name
+from tests.test_realtime_events import invite_and_join
 
 HEADERS = {"origin": ORIGIN}
 LINK_CODES = "/api/game/v1/link-codes"
@@ -143,7 +144,7 @@ def test_the_cookie_session_is_not_a_game_key(client, team, integration):  # noq
 
 def test_the_key_is_limited_per_integration_not_per_address(
         monkeypatch, game, team, key, fresh_limits, client):  # noqa: F811
-    other = make_integration(client, team["server"]["id"], team["lobby"]["id"], name="Other")
+    other = make_integration(client, team["server"]["id"], team["lounge"]["id"], name="Other")
     monkeypatch.setenv("GAME_FRAME_RATE_LIMIT", "3/minute")
 
     statuses = [game.post(FRAMES, json={"players": []}, headers=bearer(key)).status_code
@@ -318,7 +319,7 @@ def test_claiming_takes_a_player_from_whoever_held_it(client, game, team, integr
 
 
 def test_links_are_per_integration(client, game, team, integration, key):  # noqa: F811
-    other = make_integration(client, team["server"]["id"], team["lobby"]["id"], name="Other")
+    other = make_integration(client, team["server"]["id"], team["lounge"]["id"], name="Other")
     link_player(game, key, client, "p1")
     link_player(game, other["key"], client, "p1")
 
@@ -584,6 +585,29 @@ def test_unlinking_oneself_updates_the_session_on_the_next_frame(
     assert res.status_code == 204
     assert result == {"linked": ["p1"]}
     assert [[p["user_id"] for p in f["players"]] for f in frames] == [[team["owner"]["id"]]]
+
+
+def test_a_kicked_member_drops_out_of_the_mix_and_keeps_the_link(
+        client, game, team, players, integration, key, sockets):  # noqa: F811
+    owner_ws, member_ws = sockets("owner"), sockets("member")
+    owner_id, member_id = team["owner"]["id"], team["member"]["id"]
+    mix = {"p1": {"p2": 1}, "p2": {"p1": 1}}
+    send_frame(game, key, ["p1", "p2"], mix)
+    received(client, owner_ws, owner_id)
+    received(client, member_ws, member_id)
+
+    kicked = client.delete(f"/servers/{team['server']['id']}/members/{member_id}")
+    result = send_frame(game, key, ["p1", "p2"], mix)
+    owner_frames = received(client, owner_ws, owner_id)
+
+    assert kicked.status_code == 204
+    assert result == {"linked": ["p1"]}
+    assert [[p["user_id"] for p in f["players"]] for f in sessions_of(owner_frames)] == [[owner_id]]
+    assert mixes_of(received(client, member_ws, member_id)) == []
+    assert list(linked_players(client, integration["id"])) == ["p1", "p2"]
+
+    invite_and_join(client, team["member_client"], team["server"]["id"])
+    assert send_frame(game, key, ["p1", "p2"], mix) == {"linked": ["p1", "p2"]}
 
 
 def test_claiming_a_link_joins_the_session_on_the_next_frame(

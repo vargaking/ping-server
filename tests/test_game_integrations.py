@@ -40,6 +40,7 @@ def team(client, new_client):
     text = create_channel(client, server["id"], "general")
     lobby = create_channel(client, server["id"], "Lobby", "voice")
     lounge = create_channel(client, server["id"], "Lounge", "voice")
+    spare = [create_channel(client, server["id"], f"Spare {n}", "voice") for n in range(4)]
     member_client, member = join(client, new_client, server["id"])
     manager_client, manager = join(client, new_client, server["id"])
     role = client.post(
@@ -53,7 +54,7 @@ def team(client, new_client):
     elsewhere = create_server(outsider_client, "Elsewhere")
     foreign_voice = create_channel(outsider_client, elsewhere["id"], "Away", "voice")
     return {
-        "owner": owner, "server": server, "text": text, "lobby": lobby, "lounge": lounge,
+        "owner": owner, "server": server, "text": text, "lobby": lobby, "lounge": lounge, "spare": spare,
         "member_client": member_client, "member": member,
         "manager_client": manager_client, "manager": manager,
         "outsider_client": outsider_client, "outsider": outsider,
@@ -179,6 +180,30 @@ def test_the_channel_must_be_a_voice_channel_of_the_server(client, team, integra
     ).json()[0]["voice_channel_id"] == team["lobby"]["id"]
 
 
+def test_a_channel_serves_one_game(client, team, integration):
+    sid = team["server"]["id"]
+    other = make_integration(client, sid, team["lounge"]["id"], name="Other")
+    taken = {"detail": "Another game already uses this voice channel"}
+
+    created = client.post(
+        f"/api/servers/{sid}/game-integrations",
+        json={"name": "Third", "voice_channel_id": team["lobby"]["id"]})
+    moved = client.patch(
+        f"/api/game-integrations/{other['id']}", json={"voice_channel_id": team["lobby"]["id"]})
+
+    assert (created.status_code, created.json()) == (400, taken)
+    assert (moved.status_code, moved.json()) == (400, taken)
+    assert client.patch(
+        f"/api/game-integrations/{integration['id']}",
+        json={"voice_channel_id": team["lobby"]["id"], "name": "Same"}).status_code == 200
+    freed = client.patch(
+        f"/api/game-integrations/{integration['id']}", json={"voice_channel_id": team["spare"][0]["id"]})
+    assert freed.status_code == 200
+    assert client.patch(
+        f"/api/game-integrations/{other['id']}",
+        json={"voice_channel_id": team["lobby"]["id"]}).status_code == 200
+
+
 def test_the_channel_cannot_be_cleared(client, integration):
     res = client.patch(
         f"/api/game-integrations/{integration['id']}", json={"voice_channel_id": None})
@@ -187,12 +212,13 @@ def test_the_channel_cannot_be_cleared(client, integration):
 
 def test_a_server_holds_five_integrations(client, team):
     sid = team["server"]["id"]
-    for index in range(5):
-        make_integration(client, sid, team["lobby"]["id"], name=f"Game {index}")
+    channels = [team["lobby"], team["lounge"], *team["spare"][:3]]
+    for index, channel in enumerate(channels):
+        make_integration(client, sid, channel["id"], name=f"Game {index}")
 
     res = client.post(
         f"/api/servers/{sid}/game-integrations",
-        json={"name": "Sixth", "voice_channel_id": team["lobby"]["id"]})
+        json={"name": "Sixth", "voice_channel_id": team["spare"][3]["id"]})
     assert res.status_code == 400
     assert "5" in res.json()["detail"]
     assert len(client.get(f"/api/servers/{sid}/game-integrations").json()) == 5
@@ -246,7 +272,7 @@ def test_deleting_removes_the_integration_and_its_links(client, team, integratio
 
 def test_the_list_counts_linked_players_per_integration(client, team, integration):
     sid = team["server"]["id"]
-    second = make_integration(client, sid, team["lobby"]["id"], name="Second")
+    second = make_integration(client, sid, team["lounge"]["id"], name="Second")
     for user, player in ((team["owner"], "p1"), (team["member"], "p2")):
         db(client, lambda user=user, player=player: GameLink.create(
             integration_id=integration["id"], user_id=user["id"],

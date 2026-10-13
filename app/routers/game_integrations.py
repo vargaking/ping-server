@@ -23,6 +23,7 @@ MAX_INTEGRATIONS_PER_SERVER = 5
 Name = Annotated[str, StringConstraints(strip_whitespace=True, min_length=1, max_length=32)]
 NOT_FOUND = "Integration not found"
 BAD_CHANNEL = "Pick a voice channel of this server"
+CHANNEL_TAKEN = "Another game already uses this voice channel"
 
 
 class IntegrationOut(BaseModel):
@@ -112,6 +113,14 @@ async def voice_channel_of(server: Server | int, channel_id: int) -> Channel:
     return channel
 
 
+async def ensure_channel_free(channel: Channel, *, except_id: int | None = None) -> None:
+    taken = GameIntegration.filter(voice_channel_id=channel.id)
+    if except_id is not None:
+        taken = taken.exclude(id=except_id)
+    if await taken.exists():
+        raise HTTPException(status_code=400, detail=CHANNEL_TAKEN)
+
+
 @router.get("/api/servers/{server_id}/game-integrations", response_model=list[IntegrationOut])
 async def list_integrations(
     request: Request, server: Server = Depends(managed_server),
@@ -131,6 +140,7 @@ async def create_integration(
     current_user: User = Depends(get_current_user),
 ) -> IntegrationCreated:
     channel = await voice_channel_of(server, body.voice_channel_id)
+    await ensure_channel_free(channel)
     if await GameIntegration.filter(server_id=server.id).count() >= MAX_INTEGRATIONS_PER_SERVER:
         raise HTTPException(
             status_code=400,
@@ -155,6 +165,7 @@ async def update_integration(
         if body.voice_channel_id is None:
             raise HTTPException(status_code=400, detail=BAD_CHANNEL)
         channel = await voice_channel_of(integration.server_id, body.voice_channel_id)
+        await ensure_channel_free(channel, except_id=integration.id)
         channel_changed = channel.id != integration.voice_channel_id
         integration.voice_channel_id = channel.id
     if body.name is not None:
