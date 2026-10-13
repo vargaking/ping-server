@@ -25,9 +25,11 @@ from app.models.PermissionOverwrite import PermissionOverwrite
 from app.models.Role import Role
 from app.models.Server import Server
 from app.models.ServerImport import ServerImport
+from app.models.ServerImportAuthorChange import ServerImportAuthorChange
 from app.models.User import User
 from app.models.UserToServer import UserToServer
 from app.permissions import Permission
+from app.routers import server_imports
 from app.routers.server_imports import ATTACHMENT_SPACE_MARGIN
 from app.services.bundle import importer
 from app.services.bundle.importer import ImportAborted, ImportOptions, import_bundle, message_uuid
@@ -37,7 +39,7 @@ from app.services.imports.runner import ImportRunner
 from app.services.system_user import IMPORTED_PASSWORD_HASH, IMPORTED_USERNAME
 from tests.conftest import ORIGIN, create_server, register, ws_ready
 from tests.test_channel_permissions import VIEW, chat_frame, overwrite
-from tests.test_permissions import join
+from tests.test_permissions import join, set_roles
 
 FIXTURE = Path(__file__).parent / "fixtures" / "bundle"
 HEADERS = {"origin": ORIGIN}
@@ -71,6 +73,17 @@ def world(client, new_client):
     return SimpleNamespace(
         owner=client, owner_user=owner, sid=server["id"], alice=alice_client, alice_user=alice,
         bob=bob_client, bob_user=bob, carol=carol_client, carol_user=carol)
+
+
+@pytest.fixture
+def matcher(client, world):
+    """bob, given a role that holds only Match imported authors."""
+    res = client.post(f"/servers/{world.sid}/roles", json={
+        "name": "Matcher", "allow": str(int(Permission.MAP_IMPORTED_AUTHORS))})
+    assert res.status_code == 201, res.text
+    world.matcher_role = res.json()
+    assert set_roles(client, world.sid, world.bob_user["id"], [res.json()["id"]]).status_code == 200
+    return world.bob
 
 
 def runner() -> ImportRunner:
@@ -187,18 +200,17 @@ def authors_by_id(got) -> dict:
 
 # Access
 
-def test_only_the_owner_can_use_the_routes(client, world, new_client):
+def test_only_the_owner_can_use_the_routes(client, world, matcher):
     imp = create(client, world.sid, 100).json()
     routes = [
         ("GET", url(world.sid), {}),
         ("POST", url(world.sid), {"json": {"filename": "a.zip", "size": 5}}),
         ("PUT", url(world.sid, imp["id"], "data") + "?offset=0", {"content": b"x"}),
-        ("PUT", url(world.sid, imp["id"], "authors"), {"json": {"authors": {}}}),
         ("POST", url(world.sid, imp["id"], "start"), {}),
         ("DELETE", url(world.sid, imp["id"]), {}),
     ]
 
-    for who in (world.alice, world.carol):
+    for who in (world.alice, world.carol, matcher):
         for method, path, kwargs in routes:
             res = who.request(method, path, **kwargs)
             assert (res.status_code, res.json()["detail"]) == (
@@ -226,7 +238,7 @@ def test_an_import_of_another_server_is_a_404(client, world):
 
 def test_get_without_an_import(client, world):
     assert client.get(url(world.sid)).json() == {
-        "limits": {"max_bytes": 5 * 1024**3, "chunk_bytes": 2048}, "import": None}
+        "limits": {"max_bytes": 5 * 1024**3, "chunk_bytes": 2048}, "import": None, "changes": []}
 
 
 # Creating
@@ -1836,3 +1848,429 @@ def test_a_rerun_leaves_the_overwrites_of_an_existing_category_alone(client, wor
     assert settle(client, sid, second["id"])["status"] == "done"
 
     assert run(client, PermissionOverwrite.filter(group_id=group.id).count()) == 0
+
+
+# Matching authors without owning the server
+
+def authors_url(sid) -> str:
+    return url(sid, "authors")
+
+
+def logged(client, sid) -> list[tuple]:
+    rows = run(client, ServerImportAuthorChange.filter(server_id=sid).order_by("id").values_list(
+        "author_id", "from_user_id", "to_user_id", "actor_id"))
+    return [tuple(row) for row in rows]
+
+
+def users_by_name(world) -> dict:
+    return {"alice": world.alice_user["id"], "bob": world.bob_user["id"],
+            "owner": world.owner_user["id"], None: None}
+
+
+HOLDER_KEYS = {"id", "status", "progress", "error", "updated_at"}
+
+
+@pytest.mark.parametrize("method", ["GET", "PUT"])
+@pytest.mark.parametrize("who, code, detail", [
+    ("owner", 200, None),
+    ("bob", 200, None),
+    ("alice", 403, "Missing permission"),
+    ("carol", 403, "Not a member of this server"),
+])
+def test_who_may_list_and_change_the_authors(client, world, matcher, who, code, detail, method):
+    done = done_import(world)
+    clients = {"owner": client, "bob": matcher, "alice": world.alice, "carol": world.carol}
+
+    if method == "GET":
+        res = clients[who].get(authors_url(world.sid))
+    else:
+        res = set_authors(clients[who], world.sid, done["id"], {})
+
+    assert res.status_code == code, res.text
+    if detail:
+        assert res.json()["detail"] == detail
+
+
+def test_an_unknown_server_is_a_404_for_the_authors_routes(client, world):
+    assert client.get(authors_url(999999)).status_code == 404
+    assert set_authors(client, 999999, uuid.uuid4(), {}).status_code == 404
+
+
+def test_a_holder_lists_and_remaps_the_authors(client, world, matcher):
+    done = done_import(world, {"a1": world.alice_user["id"]})
+
+    got = matcher.get(authors_url(world.sid))
+    assert got.status_code == 200
+    body = got.json()
+    assert set(body) == {"import", "changes"} and body["changes"] == []
+    assert set(body["import"]) == HOLDER_KEYS | {"source", "authors"}
+    assert body["import"]["id"] == done["id"] and body["import"]["status"] == "done"
+    assert body["import"]["source"] == done["source"]
+    assert body["import"]["authors"] == done["authors"]
+
+    res = set_authors(matcher, world.sid, done["id"], {
+        "a1": world.alice_user["id"], "a2": world.bob_user["id"]})
+    assert res.status_code == 200
+    assert set(res.json()) == HOLDER_KEYS | {"source", "authors"}
+    assert res.json()["status"] == "importing" and res.json()["progress"]["label"] is None
+    settle(client, world.sid, done["id"])
+    assert message(client, "1002").author_id == world.bob_user["id"]
+
+    after = matcher.get(authors_url(world.sid)).json()
+    assert after["import"]["status"] == "done"
+    assert [set(c) for c in after["changes"]] == [{
+        "id", "author_id", "author_name", "actor_id", "from_user_id", "to_user_id", "created_at"}]
+
+
+def test_a_holder_is_refused_when_imports_are_off(client, world, matcher, monkeypatch):
+    done = done_import(world)
+    monkeypatch.setenv("IMPORT_MAX_BYTES", "0")
+
+    res = set_authors(matcher, world.sid, done["id"], {})
+
+    assert (res.status_code, res.json()["detail"]) == (403, "Imports are turned off on this server")
+    assert matcher.get(authors_url(world.sid)).status_code == 200
+
+
+def test_a_holder_gets_404_for_an_unknown_import(client, world, matcher):
+    done_import(world)
+
+    for path in (uuid.uuid4(), "not-an-id"):
+        assert set_authors(matcher, world.sid, path, {}).status_code == 404
+
+
+@pytest.mark.parametrize("status", ["uploading", "unpacking", "ready", "failed", "importing"])
+def test_a_holder_cannot_map_an_import_that_has_not_run(client, world, matcher, status):
+    imp = create(client, world.sid, 100).json()
+    force(client, imp["id"], status=status)
+
+    res = set_authors(matcher, world.sid, imp["id"], {})
+
+    assert (res.status_code, res.json()["detail"]) == (403, "Only the server owner can do this")
+
+
+def test_a_holder_cannot_change_the_mapping_while_its_hand_over_runs(client, world, matcher):
+    done = done_import(world)
+    force(client, done["id"], status="importing")
+
+    res = set_authors(matcher, world.sid, done["id"], {})
+
+    assert (res.status_code, res.json()["detail"]) == (
+        409, "The import can't be changed right now")
+    assert matcher.get(authors_url(world.sid)).json()["import"]["status"] == "importing"
+
+
+@pytest.mark.parametrize("newer", ["upload", "ready"])
+def test_a_newer_import_makes_the_old_one_read_only_for_holders(client, world, matcher, newer):
+    done = done_import(world)
+    if newer == "upload":
+        create(client, world.sid, 100)
+    else:
+        ready_import(client, world.sid)
+
+    listed = matcher.get(authors_url(world.sid))
+    assert (listed.status_code, listed.json()["import"]["id"]) == (200, done["id"])
+    res = set_authors(matcher, world.sid, done["id"], {"a2": world.bob_user["id"]})
+    assert (res.status_code, res.json()["detail"]) == (409, "A newer import is in progress")
+    assert logged(client, world.sid) == []
+
+    assert set_authors(client, world.sid, done["id"], {"a2": world.bob_user["id"]}).status_code == 200
+
+
+def test_an_older_finished_import_is_read_only_for_holders(client, world, matcher):
+    old = done_import(world)
+    newer = run(client, ServerImport.create(
+        server_id=world.sid, created_by_id=world.owner_user["id"], status="done",
+        filename="later.zip", size=1, result={}))
+
+    assert matcher.get(authors_url(world.sid)).json()["import"]["id"] == str(newer.id)
+    res = set_authors(matcher, world.sid, old["id"], {"a2": world.bob_user["id"]})
+    assert (res.status_code, res.json()["detail"]) == (409, "A newer import is in progress")
+
+
+@pytest.mark.parametrize("setup", ["none", "ready", "discarded"])
+def test_listing_the_authors_needs_a_finished_import(client, world, matcher, setup):
+    if setup == "ready":
+        ready_import(client, world.sid)
+    elif setup == "discarded":
+        done = done_import(world)
+        assert client.delete(url(world.sid, done["id"])).status_code == 204
+
+    res = matcher.get(authors_url(world.sid))
+
+    assert (res.status_code, res.json()["detail"]) == (404, "No finished import")
+
+
+@pytest.mark.parametrize("stored, sent, rows", [
+    ({}, {"a1": "alice"}, [("a1", None, "alice")]),
+    ({"a1": "alice", "a2": "bob"}, {"a1": "alice"}, [("a2", "bob", None)]),
+    ({"a1": "alice"}, {"a1": "bob"}, [("a1", "alice", "bob")]),
+    ({"a1": "alice"}, {"a1": "alice", "a2": None}, []),
+    ({"a1": "alice", "a2": "bob"}, {"a1": "bob", "a2": "alice"}, [
+        ("a1", "alice", "bob"), ("a2", "bob", "alice")]),
+])
+@pytest.mark.parametrize("actor", ["owner", "bob"])
+def test_a_change_is_logged_per_author(client, world, matcher, stored, sent, rows, actor):
+    users = users_by_name(world)
+    done = done_import(world, {a: users[u] for a, u in stored.items()})
+    assert logged(client, world.sid) == []
+
+    res = set_authors(client if actor == "owner" else matcher, world.sid, done["id"],
+                      {a: users[u] for a, u in sent.items()})
+    settle(client, world.sid, done["id"])
+
+    assert res.status_code == 200
+    assert sorted(logged(client, world.sid)) == sorted(
+        (author, users[before], users[after], users[actor]) for author, before, after in rows)
+    assert res.json()["status"] == ("importing" if rows else "done")
+
+
+def test_the_log_lists_the_newest_first_and_keeps_the_name_of_the_author(client, world, matcher):
+    done = done_import(world)
+    set_authors(matcher, world.sid, done["id"], {"a2": world.alice_user["id"]})
+    settle(client, world.sid, done["id"])
+    set_authors(client, world.sid, done["id"], {"a2": world.bob_user["id"]})
+    settle(client, world.sid, done["id"])
+
+    changes = client.get(url(world.sid)).json()["changes"]
+
+    assert [(c["author_id"], c["author_name"], c["from_user_id"], c["to_user_id"], c["actor_id"])
+            for c in changes] == [
+        ("a2", "bob", world.alice_user["id"], world.bob_user["id"], world.owner_user["id"]),
+        ("a2", "bob", None, world.alice_user["id"], world.bob_user["id"])]
+    assert changes == matcher.get(authors_url(world.sid)).json()["changes"]
+
+
+def test_the_owners_draft_in_ready_is_not_logged(client, world):
+    done_import(world, {"a1": world.alice_user["id"]})
+
+    assert logged(client, world.sid) == []
+    assert client.get(url(world.sid)).json()["changes"] == []
+
+
+def test_a_failed_hand_over_logs_once_and_a_retry_adds_nothing(client, world, matcher, monkeypatch):
+    done = done_import(world)
+    mapping = {"a2": world.bob_user["id"]}
+    real = runner_module.import_bundle
+
+    async def aborts(*args, **kwargs):
+        raise ImportAborted("Nothing could be handed over")
+
+    monkeypatch.setattr(runner_module, "import_bundle", aborts)
+    set_authors(matcher, world.sid, done["id"], mapping)
+    settle(client, world.sid, done["id"])
+    assert len(logged(client, world.sid)) == 1
+
+    monkeypatch.setattr(runner_module, "import_bundle", real)
+    assert set_authors(matcher, world.sid, done["id"], mapping).json()["status"] == "importing"
+    assert settle(client, world.sid, done["id"])["error"] is None
+    assert len(logged(client, world.sid)) == 1
+
+
+def test_a_mapped_user_who_is_gone_is_logged_as_not_mapped(client, world):
+    done = done_import(world, {"a1": world.alice_user["id"]})
+    run(client, User.filter(id=world.alice_user["id"]).delete())
+
+    res = set_authors(client, world.sid, done["id"], {"a1": world.bob_user["id"]})
+    settle(client, world.sid, done["id"])
+
+    assert res.status_code == 200
+    assert logged(client, world.sid) == [
+        ("a1", None, world.bob_user["id"], world.owner_user["id"])]
+
+
+@pytest.mark.parametrize("extra, code", [({}, 200), ({"a2": "alice"}, 422)])
+def test_a_mapping_to_a_member_who_left_can_be_sent_back_unchanged(client, world, extra, code):
+    done = done_import(world, {"a1": world.alice_user["id"]})
+    run(client, UserToServer.filter(
+        server_id=world.sid, user_id=world.alice_user["id"]).delete())
+    sent = {"a1": world.alice_user["id"]} | {a: world.alice_user["id"] for a in extra}
+
+    res = set_authors(client, world.sid, done["id"], sent)
+
+    assert res.status_code == code, res.text
+    assert logged(client, world.sid) == []
+
+
+def test_the_log_outlives_the_import(client, world, matcher):
+    done = done_import(world)
+    set_authors(matcher, world.sid, done["id"], {"a2": world.alice_user["id"]})
+    settle(client, world.sid, done["id"])
+
+    assert client.delete(url(world.sid, done["id"])).status_code == 204
+
+    got = client.get(url(world.sid)).json()
+    assert got["import"] is None and len(got["changes"]) == 1
+    assert matcher.get(authors_url(world.sid)).status_code == 404
+
+
+def after_the_first_check(monkeypatch, action) -> None:
+    """Run *action* once, right after the PUT has validated its mapping and
+    before its transaction starts: what another request could do in between."""
+    real = server_imports._checked_mapping
+    calls = []
+
+    async def checked(*args, **kwargs):
+        mapping = await real(*args, **kwargs)
+        if not calls:
+            calls.append(1)
+            await action()
+        return mapping
+
+    monkeypatch.setattr(server_imports, "_checked_mapping", checked)
+
+
+@pytest.mark.parametrize("rival, detail", [
+    ("hand_over", "The import can't be changed right now"),
+    ("new_upload", "A newer import is in progress"),
+])
+def test_a_change_that_loses_a_race_logs_and_starts_nothing(
+        client, world, matcher, monkeypatch, rival, detail):
+    done = done_import(world)
+    started = []
+    monkeypatch.setattr(ImportRunner, "start_handover", lambda self, i: started.append(i))
+
+    async def hand_over():
+        await ServerImport.filter(id=done["id"]).update(status="importing")
+
+    async def new_upload():
+        await ServerImport.create(
+            server_id=world.sid, created_by_id=world.owner_user["id"], status="uploading",
+            filename="later.zip", size=1)
+
+    after_the_first_check(monkeypatch, {"hand_over": hand_over, "new_upload": new_upload}[rival])
+
+    res = set_authors(matcher, world.sid, done["id"], {"a2": world.alice_user["id"]})
+
+    assert (res.status_code, res.json()["detail"]) == (409, detail)
+    assert logged(client, world.sid) == [] and started == []
+    assert import_row(client, done["id"]).authors == {}
+
+
+def test_a_member_who_left_is_refused_when_the_stored_mapping_changed_meanwhile(
+        client, world, matcher, monkeypatch):
+    done = done_import(world, {"a1": world.alice_user["id"]})
+    run(client, UserToServer.filter(
+        server_id=world.sid, user_id=world.alice_user["id"]).delete())
+
+    async def owner_remaps():
+        await ServerImport.filter(id=done["id"]).update(authors={"a1": world.owner_user["id"]})
+
+    after_the_first_check(monkeypatch, owner_remaps)
+
+    res = set_authors(matcher, world.sid, done["id"], {"a1": world.alice_user["id"]})
+
+    assert (res.status_code, res.json()["detail"]) == (
+        422, f"User {world.alice_user['id']} is not a member of this server")
+    assert logged(client, world.sid) == []
+    assert import_row(client, done["id"]).authors == {"a1": world.owner_user["id"]}
+
+
+def test_an_author_id_over_255_characters_is_refused(client, world):
+    done = done_import(world)
+    long_id = "x" * 256
+
+    res = set_authors(client, world.sid, done["id"], {long_id: None})
+
+    assert (res.status_code, res.json()["detail"]) == (
+        422, "Author ids can't be longer than 255 characters")
+
+
+def test_a_long_author_name_is_cut_in_the_log(client, world):
+    done = done_import(world)
+    plan = dict(import_row(client, done["id"]).plan)
+    plan["authors"] = [{**a, "name": "n" * 300} if a["id"] == "a2" else a for a in plan["authors"]]
+    force(client, done["id"], plan=plan)
+
+    set_authors(client, world.sid, done["id"], {"a2": world.bob_user["id"]})
+    settle(client, world.sid, done["id"])
+
+    assert client.get(url(world.sid)).json()["changes"][0]["author_name"] == "n" * 200
+
+
+def test_only_the_last_50_changes_are_listed(client, world, matcher):
+    done_import(world)
+    start_at = datetime.now(timezone.utc)
+    run(client, ServerImportAuthorChange.bulk_create([
+        ServerImportAuthorChange(
+            server_id=world.sid, author_id=f"n{i}", author_name=f"n{i}",
+            created_at=start_at + timedelta(seconds=i)) for i in range(1, 52)]))
+
+    ids = [c["author_id"] for c in matcher.get(authors_url(world.sid)).json()["changes"]]
+
+    assert ids == [f"n{i}" for i in range(51, 1, -1)]
+
+
+def test_a_holder_who_loses_the_role_is_refused(client, world, matcher):
+    done = done_import(world)
+    assert set_roles(client, world.sid, world.bob_user["id"], []).status_code == 200
+
+    assert (set_authors(matcher, world.sid, done["id"], {}).json()["detail"]
+            == matcher.get(authors_url(world.sid)).json()["detail"] == "Missing permission")
+
+
+def handover_frames(ws) -> list[dict]:
+    return updated(frames_until(ws, lambda f: f["type"] == "server_import_finished"))
+
+
+def test_holders_get_the_narrow_frames_of_a_hand_over_and_no_one_else(
+        client, world, matcher, monkeypatch):
+    monkeypatch.setattr(runner_module, "PROGRESS_INTERVAL", 0)
+    monkeypatch.setattr(importer, "BATCH_SIZE", 2)
+    with matcher.websocket_connect("/ws", headers=HEADERS) as holder_ws, \
+            world.alice.websocket_connect("/ws", headers=HEADERS) as alice_ws:
+        ws_ready(holder_ws)
+        ws_ready(alice_ws)
+        done = done_import(world)
+        assert not updated(quiet(holder_ws))
+
+        set_authors(client, world.sid, done["id"], {"a2": world.alice_user["id"]})
+        frames = handover_frames(holder_ws)
+
+        assert frames and all(f["server_id"] == world.sid for f in frames)
+        assert all(set(f["import"]) == HOLDER_KEYS for f in frames)
+        assert all((f["import"]["progress"] or {}).get("label") is None for f in frames)
+        assert {f["import"]["status"] for f in frames} == {"importing", "done"}
+        assert frames[-1]["import"]["status"] == "done"
+        assert not updated(frames_until(alice_ws, lambda f: f["type"] == "server_import_finished"))
+
+
+def test_a_holder_gets_the_end_of_a_hand_over_resumed_after_a_restart(client, world, matcher):
+    done = done_import(world)
+    force(client, done["id"], status="importing", authors={"a2": world.alice_user["id"]},
+          progress={"phase": "authors", "done": 0, "total": 13, "label": None})
+
+    with matcher.websocket_connect("/ws", headers=HEADERS) as holder_ws:
+        ws_ready(holder_ws)
+        client.portal.call(runner().resume)
+        frames = handover_frames(holder_ws)
+
+    assert frames[-1]["import"]["status"] == "done"
+    assert set(frames[-1]["import"]) == HOLDER_KEYS
+
+
+def test_a_failed_hand_over_tells_holders_a_fixed_text_and_the_owner_the_reason(
+        client, world, matcher, monkeypatch):
+    done = done_import(world)
+
+    async def aborts(*args, **kwargs):
+        raise ImportAborted("Channel 4242 is not in the bundle")
+
+    monkeypatch.setattr(runner_module, "import_bundle", aborts)
+    with matcher.websocket_connect("/ws", headers=HEADERS) as holder_ws, \
+            client.websocket_connect("/ws", headers=HEADERS) as owner_ws:
+        ws_ready(holder_ws)
+        ws_ready(owner_ws)
+        set_authors(client, world.sid, done["id"], {"a2": world.alice_user["id"]})
+        settle(client, world.sid, done["id"])
+
+        holder_last = frames_until(
+            holder_ws, lambda f: f["type"] == "server_import_updated"
+            and f["import"]["status"] == "done")[-1]
+        owner_last = frames_until(
+            owner_ws, lambda f: f["type"] == "server_import_updated"
+            and f["import"]["status"] == "done")[-1]
+
+    assert holder_last["import"]["error"] == (
+        "Updating the authors failed. Try again or ask the server owner.")
+    assert owner_last["import"]["error"] == "Channel 4242 is not in the bundle"

@@ -20,6 +20,7 @@ from ...models.Server import Server
 from ...models.ServerImport import ServerImport
 from ...models.User import User
 from ...models.UserToServer import UserToServer
+from ...permissions import Permission
 from ...settings import import_max_unpacked_bytes, imports_root
 from ..attachments import max_attachment_bytes
 from ..bundle import format as bundle_format
@@ -27,8 +28,9 @@ from ..bundle.format import BundleError
 from ..bundle.importer import ImportAborted, ImportOptions, import_bundle
 from ..bundle.plan import offer_private, plan_json
 from ..channel_visibility import send_per_member
+from ..permissions import server_masks
 from . import storage
-from .serialize import import_json, planned_messages
+from .serialize import holder_import_json, import_json, planned_messages
 from .unpack import UnpackError, unpack_bundle
 
 logger = logging.getLogger("app.services.imports")
@@ -47,16 +49,19 @@ def _now() -> datetime:
 
 
 class _Job:
-    """What a running job tells the owner: progress, at most once a second,
-    and every change of status."""
+    """What a running job tells the owner, and the holders of a hand-over:
+    progress, at most once a second, and every change of status."""
 
     def __init__(self, runner: "ImportRunner", import_id: UUID, server_id: int,
-                 owner_id: int | None, status: str):
+                 owner_id: int | None, status: str, kind: str,
+                 holders: frozenset[int] = frozenset()):
         self.runner = runner
         self.import_id = import_id
         self.server_id = server_id
         self.owner_id = owner_id
         self.status = status
+        self.kind = kind
+        self.holders = holders
         self._last = float("-inf")
         self.touched: set[int] = set()
 
@@ -82,14 +87,19 @@ class _Job:
 
     async def _announce(self) -> None:
         comms = self.runner.comms
-        if comms is None or self.owner_id is None:
+        if comms is None or (self.owner_id is None and not self.holders):
             return
         row = await ServerImport.get_or_none(id=self.import_id)
         if row is None:
             return
-        await comms.send_to_user(self.owner_id, {
-            "type": "server_import_updated", "server_id": self.server_id,
-            "import": import_json(row, light=True)})
+        if self.owner_id is not None:
+            await comms.send_to_user(self.owner_id, {
+                "type": "server_import_updated", "server_id": self.server_id,
+                "import": import_json(row, light=True)})
+        if self.holders:
+            await comms.send_to_users(self.holders, {
+                "type": "server_import_updated", "server_id": self.server_id,
+                "import": holder_import_json(row)})
 
 
 class ImportRunner:
@@ -185,8 +195,10 @@ class ImportRunner:
             return
         server = await Server.get_or_none(id=row.server_id)
         job = _Job(self, import_id, row.server_id, server.owner_id if server else None,
-                   _RUNNING_STATUS[kind])
+                   _RUNNING_STATUS[kind], kind)
         try:
+            if kind == "authors" and server is not None and self.comms is not None:
+                job.holders = await self._holders(server)
             if self._lock.locked():
                 await job.progress("queued", 0, 0, force=True)
             async with self._lock:
@@ -197,6 +209,13 @@ class ImportRunner:
             raise
         except Exception as exc:
             await self._fail(job, kind, exc)
+
+    @staticmethod
+    async def _holders(server: Server) -> frozenset[int]:
+        """Who may match authors without owning the server, as of now."""
+        return frozenset(
+            user_id for user_id, mask in (await server_masks(server)).items()
+            if user_id != server.owner_id and mask & Permission.MAP_IMPORTED_AUTHORS)
 
     async def _unpack(self, job: _Job) -> None:
         row = await ServerImport.get_or_none(id=job.import_id)

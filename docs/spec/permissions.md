@@ -48,8 +48,8 @@ Test names are short: server tests are `file::test` under `tests/` in this repo;
 
 - **PERM-15** The owner has every permission, sees every channel, and can't be given roles, kicked, muted or disconnected.
   - permissions::test_creating_a_server_returns_owner_permissions, test_admin_cannot_kick_another_admin_or_the_owner; channel_permissions::test_the_owner_sees_everything; voice_moderation::test_nobody_can_moderate_the_owner
-- **PERM-16** Importing history, including matching authors to members, is owner only. *(open: a permission for matching imported authors)*
-  - server_import::test_only_the_owner_can_use_the_routes
+- **PERM-16** Importing history is owner only: upload, plan, start, discard, and the mapping before the first run. Match imported authors (a danger permission, off by default) lets a member list and re-map the finished import. It is read-only for them while a newer import is pending.
+  - server_import::test_only_the_owner_can_use_the_routes, test_who_may_list_and_change_the_authors, test_a_holder_lists_and_remaps_the_authors, test_a_holder_cannot_map_an_import_that_has_not_run, test_a_holder_cannot_change_the_mapping_while_its_hand_over_runs, test_a_newer_import_makes_the_old_one_read_only_for_holders, test_an_older_finished_import_is_read_only_for_holders, test_listing_the_authors_needs_a_finished_import, test_a_holder_who_loses_the_role_is_refused
 - **PERM-17** Manage Channels lets a member create, edit and move channels and categories and manage forum tags. Deleting a channel or a category needs Delete Channels, without Manage Channels.
   - permissions::test_admin_manages_channels; channel_groups::test_plain_member_cannot_write_categories_or_layout; channel_crud::test_non_owner_cannot_update_or_delete; channel_permissions::test_manage_and_delete_channels_are_separate_bits
 - **PERM-18** Server name, settings and icon need Manage Server, which @everyone doesn't have by default.
@@ -107,6 +107,13 @@ Test names are short: server tests are `file::test` under `tests/` in this repo;
   - overwrite_fanout::test_overwrite_row_frame_reaches_role_managers_who_see_the_target, test_overwrite_row_frame_names_a_category_and_a_member; fe: overwritesState.test (applyFrame); e2e: channel-permissions.spec (another manager's change shows up live)
 - **PERM-39** Rule frames go out after the write, in commit order. A failed fan-out keeps the write; a rejected write sends nothing. No frame names a channel the receiver can't see.
   - overwrite_fanout::test_two_quick_writes_fan_out_in_commit_order, test_a_failing_fan_out_is_logged_and_the_write_stands, test_a_rejected_write_queues_nothing, test_a_member_who_leaves_before_the_job_gets_nothing
+
+## Matching imported authors
+
+- **PERM-45** Every mapping change on a finished import is logged (who, author, from, to). The log outlives the import, and the last 50 entries are listed. Two changes at once log once.
+  - server_import::test_a_change_is_logged_per_author, test_the_log_lists_the_newest_first_and_keeps_the_name_of_the_author, test_the_owners_draft_in_ready_is_not_logged, test_a_failed_hand_over_logs_once_and_a_retry_adds_nothing, test_a_mapped_user_who_is_gone_is_logged_as_not_mapped, test_the_log_outlives_the_import, test_a_change_that_loses_a_race_logs_and_starts_nothing, test_only_the_last_50_changes_are_listed
+- **PERM-46** A hand-over tells holders its status in a narrow frame (no file name, plan, result, channel names or error text); other members get only the end.
+  - server_import::test_holders_get_the_narrow_frames_of_a_hand_over_and_no_one_else, test_a_holder_gets_the_end_of_a_hand_over_resumed_after_a_restart, test_a_failed_hand_over_tells_holders_a_fixed_text_and_the_owner_the_reason
 
 ## The Permissions tab (client only)
 
