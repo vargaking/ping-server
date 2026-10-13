@@ -40,3 +40,19 @@ jobs:
 
       - name: Run tests
         run: pytest
+
+  docker:
+    name: Docker image
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build image
+        run: docker build -t ping-server:ci .
+
+      - name: Validate compose file
+        run: |
+          cp deploy/docker/.env.example .env
+          sed -i -E 's/^(POSTGRES_PASSWORD|ATTACHMENT_URL_KEY|TRUSTED_PROXY_KEY|LIVEKIT_API_KEY|LIVEKIT_API_SECRET)=$/\1=ci/' .env
+          docker compose config -q
