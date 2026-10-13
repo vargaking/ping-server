@@ -551,6 +551,49 @@ def test_two_quick_writes_fan_out_in_commit_order(crew, monkeypatch):
         SEND | SPEAK)
 
 
+def test_the_kept_row_fans_out_after_the_requested_one(crew):
+    sid, general = crew.sid, crew.general["id"]
+    everyone = channel_rule(general, "roles", crew.everyone["id"])
+    with listening(crew.owner_client, owner=crew.owner_client, mod=crew.mod_client,
+                   member=crew.member_client) as live:
+        assert overwrite(crew.mod_client, everyone, deny=VIEW).status_code == 200
+        frames = live.settle()
+
+    requested = row_frame(sid, "channel", general, "role", crew.everyone["id"], {
+        "role_id": crew.everyone["id"], "allow": "0", "deny": str(VIEW)})
+    kept = row_frame(sid, "channel", general, "member", crew.mod["id"], {
+        "user_id": crew.mod["id"], "allow": str(VIEW), "deny": "0"})
+    for name in ("owner", "mod"):
+        assert of_type(frames[name], ROW_FRAME) == [requested, kept]
+    assert of_type(frames["member"], ROW_FRAME) == []
+    assert of_type(frames["mod"], "channel_deleted") == []
+    assert [f["channel_id"] for f in of_type(frames["member"], "channel_deleted")] == [general]
+
+
+def test_keeping_the_actor_in_costs_one_query(crew):
+    owner, sid, general = crew.owner_client, crew.sid, crew.general["id"]
+    low = owner.post(f"/servers/{sid}/roles", json={"name": "Low"}).json()
+    counts = []
+    for subject, bits in ((low["id"], {"deny": SEND}), (crew.everyone["id"], {"deny": VIEW})):
+        warm(owner, sid)
+        assert crew.mod_client.get(f"/servers/{sid}/channels").status_code == 200
+        res = put(crew.mod_client, channel_rule(general, "roles", subject), **bits)
+        assert res.status_code == 200, res.text
+        counts.append(query_count(res))
+    assert counts[1] == counts[0] + 1
+
+
+def test_the_job_of_a_kept_row_costs_what_a_plain_write_does(crew, caplog):
+    owner, sid, general = crew.owner_client, crew.sid, crew.general["id"]
+    low = owner.post(f"/servers/{sid}/roles", json={"name": "Low"}).json()
+    with caplog.at_level(logging.DEBUG, logger=LOGGER):
+        for subject, bits in ((low["id"], {"deny": SEND}), (crew.everyone["id"], {"deny": VIEW})):
+            warm(owner, sid)
+            assert overwrite(crew.mod_client, channel_rule(general, "roles", subject), **bits).status_code == 200
+    plain, kept = job_query_counts(caplog)[-2:]
+    assert kept == plain
+
+
 def test_a_failing_fan_out_is_logged_and_the_write_stands(crew, monkeypatch, caplog):
     owner, general = crew.owner_client, crew.general["id"]
     comms = owner.app.state.comms
@@ -584,7 +627,7 @@ def test_a_rejected_write_queues_nothing(crew, caplog):
 
     with caplog.at_level(logging.DEBUG, logger=LOGGER), \
             listening(owner, owner=owner, mod=crew.mod_client) as live:
-        put(crew.mod_client, channel_rule(general, "roles", crew.everyone["id"]), deny=VIEW)
+        put(crew.mod_client, channel_rule(general, "members", crew.mod["id"]), deny=VIEW)
         put(crew.mod_client, channel_rule(general, "members", crew.member["id"]),
             allow=MANAGE_MESSAGES)
         assert live.settle() == {"owner": [], "mod": []}

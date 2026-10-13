@@ -27,10 +27,9 @@ class OverwriteChange:
     """A saved overwrite write, as its fan-out needs it."""
     server_id: int
     owner_id: int
-    key: RowKey
+    writes: tuple[tuple[RowKey, Bits], ...]  # rows saved in order, one target; NO_ROW = removed
     rows: OverwriteRows  # every row of the server right before the write
     channel_ids: frozenset[int]  # the channels of the server at that moment
-    bits: Bits  # the row's new (allow, deny); NO_ROW when it was removed
     token: int  # from permissions.drop_views, for the refill guard
 
 
@@ -42,13 +41,12 @@ def row_json(key: RowKey, bits: Bits) -> dict | None:
     return {**subject, "allow": str(bits[0]), "deny": str(bits[1])}
 
 
-def overwrite_frame(change: OverwriteChange) -> dict:
-    key = change.key
+def overwrite_frame(server_id: int, key: RowKey, bits: Bits) -> dict:
     return {
-        "type": "permission_overwrite_updated", "server_id": change.server_id,
+        "type": "permission_overwrite_updated", "server_id": server_id,
         "target": key.target, "target_id": key.target_id,
         "subject": key.subject, "subject_id": key.subject_id,
-        "overwrite": row_json(key, change.bits),
+        "overwrite": row_json(key, bits),
     }
 
 
@@ -74,7 +72,7 @@ async def _send_row(app_state: Any, change: OverwriteChange, views: Mapping[int,
     comms = getattr(app_state, "comms", None)
     if comms is None:
         return
-    key = change.key
+    key = change.writes[0][0]
 
     def sees_target(view: MemberView) -> bool:
         return view.can_view(key.target_id) if key.target == "channel" else key.target_id in view.groups
@@ -82,12 +80,13 @@ async def _send_row(app_state: Any, change: OverwriteChange, views: Mapping[int,
     readers = sorted(
         user_id for user_id, view in views.items()
         if view.mask & Permission.MANAGE_ROLES and sees_target(view))
-    await comms.send_to_users(readers, overwrite_frame(change))
+    for row_key, bits in change.writes:
+        await comms.send_to_users(readers, overwrite_frame(change.server_id, row_key, bits))
 
 
 async def announce_overwrite(app_state: Any, change: OverwriteChange) -> None:
-    """Tell members what one saved overwrite changed for them and the role
-    managers who can see its target the new row, then refill the views the
+    """Tell members what a saved overwrite write changed for them and the role
+    managers who can see its target the new rows, then refill the views the
     write dropped. Runs after the response, in the server's queue."""
     server_id = change.server_id
     roles = {role.id: role for role in await Role.filter(server_id=server_id)}
@@ -103,13 +102,15 @@ async def announce_overwrite(app_state: Any, change: OverwriteChange) -> None:
     before = ServerRules(
         change.owner_id, roles, {channel.id: channel.group_id for channel in channels},
         [group.id for group in groups], change.rows)
-    after = before.with_row(change.key, change.bits)
+    after = before
+    for key, bits in change.writes:
+        after = after.with_row(key, bits)
     old_views = views_of(before, member_ids, assigned)
     new_views = views_of(after, member_ids, assigned)
     permissions.refill_views(server_id, new_views, change.token)
 
     by_id = {channel.id: channel for channel in channels}
-    flipped_channels, flipped_groups = _private_flips(before, after, change.key, by_id)
+    flipped_channels, flipped_groups = _private_flips(before, after, change.writes[0][0], by_id)
     private_channels, private_groups = after.private_flags()
     state = ServerState(
         by_id, {group.id: group for group in groups}, channel_layout.layout_of(channels, groups),

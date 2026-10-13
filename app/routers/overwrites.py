@@ -34,10 +34,12 @@ from ..services.server_queue import server_queue
 router = APIRouter(tags=["permission overwrites"])
 
 LOSE_OWN_ACCESS = "You would lose access to this channel"
+CATEGORY_UNSEEN = "You can't change a category's permissions without seeing the category itself"
 MEMBER_ABOVE_YOU = "That member's highest role is at or above yours"
 SUBJECTS = {"roles": "role", "members": "member"}
 NOT_FOUND = {"roles": "Role not found", "members": "Member not found"}
 INT_IDS = range(-(2**31), 2**31)  # the id columns are 32-bit
+KEEP_IN: Bits = (int(Permission.VIEW_CHANNEL), 0)
 
 
 class OverwriteBody(BaseModel):
@@ -133,7 +135,7 @@ async def _listing(target: Target, user: User) -> dict:
 
 async def _check_subject(
     target: Target, standing: Standing, roles: dict[int, Role],
-    kind: Literal["roles", "members"], subject_id: int,
+    kind: Literal["roles", "members"], subject_id: int, drops_keep_in: bool = False,
 ) -> None:
     server = target.server
     if kind == "roles":
@@ -144,7 +146,7 @@ async def _check_subject(
         return
     if not await UserToServer.filter(user_id=subject_id, server_id=server.id).exists():
         raise HTTPException(status_code=404, detail="Member not found")
-    if standing.is_owner:
+    if standing.is_owner or drops_keep_in:
         return
     if subject_id == server.owner_id:
         raise HTTPException(status_code=403, detail=MEMBER_ABOVE_YOU)
@@ -157,29 +159,38 @@ async def _check_subject(
 
 async def _authorize(
     target: Target, user: User, actor_mask: Permission,
-    kind: Literal["roles", "members"], subject_id: int,
+    kind: Literal["roles", "members"], subject_id: int, drops_keep_in: bool = False,
 ) -> tuple[dict[int, Role], Standing]:
     """The rank and subject rules (404s and 403s)."""
     roles = {role.id: role for role in await Role.filter(server_id=target.server.id)}
     standing = await standing_of(user, target.server, actor_mask, roles)
-    await _check_subject(target, standing, roles, kind, subject_id)
+    await _check_subject(target, standing, roles, kind, subject_id, drops_keep_in)
     return roles, standing
 
 
 def _check_bits(
     target: Target, user: User, roles: Mapping[int, Role], standing: Standing,
     rows: OverwriteRows, key: RowKey, bits: Bits,
-) -> None:
-    """A non-owner may only change bits they hold there, and may not lose View."""
+) -> tuple[RowKey, Bits] | None:
+    """A non-owner may only change bits they hold there. A write that would take
+    their View returns their own member row allowing View, to save with it."""
     rules = target.rules(roles, rows)
     base = member_mask(roles, standing.assigned)
+    before = rules.target_mask(user.id, base, standing.assigned, key)
+    if key.target == "group" and not before & Permission.VIEW_CHANNEL:
+        raise HTTPException(status_code=403, detail=CATEGORY_UNSEEN)
     old = rows.bits(key)
     changed = (old[0] ^ bits[0]) | (old[1] ^ bits[1])
-    if changed & ~int(rules.target_mask(user.id, base, standing.assigned, key)):
+    if changed & ~int(before):
         raise HTTPException(status_code=403, detail=BITS_YOU_LACK)
     after = rules.with_row(key, bits).target_mask(user.id, base, standing.assigned, key)
-    if not after & Permission.VIEW_CHANNEL:
+    if after & Permission.VIEW_CHANNEL:
+        return None
+    own = target.key("members", user.id)
+    if key == own or not before & Permission.VIEW_CHANNEL:
         raise HTTPException(status_code=403, detail=LOSE_OWN_ACCESS)
+    allow, deny = rows.bits(own)
+    return own, (allow | KEEP_IN[0], deny & ~KEEP_IN[0])
 
 
 async def _save(server_id: int, key: RowKey, old: Bits, bits: Bits) -> None:
@@ -198,7 +209,8 @@ async def _write(
     kind: Literal["roles", "members"], subject_id: int, body: OverwriteBody,
 ) -> dict | None:
     """Set one overwrite row (or delete it when both masks are empty) under the
-    rules for who may edit. What it changed is announced after the response."""
+    rules for who may edit, with the actor's own View row when the write would
+    take their View. What it changed is announced after the response."""
     server = target.server
     actor_mask = await require_permission(user, server, Permission.MANAGE_ROLES)
     if subject_id not in INT_IDS:
@@ -218,13 +230,20 @@ async def _write(
         async with channel_layout.locked_server(server.id):
             channel_groups = dict(await Channel.filter(server_id=server.id).values_list("id", "group_id"))
             rows = await load_rows(server.id)
-            roles, standing = await _authorize(target, user, actor_mask, kind, subject_id)
+            drops_keep_in = (
+                kind == "members" and subject_id == user.id
+                and rows.bits(key) == KEEP_IN and bits == NO_ROW)
+            roles, standing = await _authorize(
+                target, user, actor_mask, kind, subject_id, drops_keep_in)
+            keep = None
             if not standing.is_owner:
-                _check_bits(
+                keep = _check_bits(
                     target.current(channel_groups), user, roles, standing, rows, key, bits)
             if rows.bits(key) == bits:
                 return row_json(key, bits)
-            await _save(server.id, key, rows.bits(key), bits)
+            writes = ((key, bits),) + ((keep,) if keep else ())
+            for row_key, row_bits in writes:
+                await _save(server.id, row_key, rows.bits(row_key), row_bits)
             # Reserved under the lock so jobs run in commit order.
             slot = server_queue.reserve(server.id)
     except BaseException:
@@ -235,7 +254,7 @@ async def _write(
         raise
     token = permissions.drop_views(server.id)
     slot.run(partial(announce_overwrite, request.app.state, OverwriteChange(
-        server.id, server.owner_id, key, rows, frozenset(channel_groups), bits, token)))
+        server.id, server.owner_id, writes, rows, frozenset(channel_groups), token)))
     return row_json(key, bits)
 
 

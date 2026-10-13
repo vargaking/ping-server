@@ -79,17 +79,17 @@ Test names are short: server tests are `file::test` under `tests/` in this repo;
   - channel_permissions::test_a_hidden_member_gets_none_of_the_channels_frames, test_a_hidden_member_cant_send_or_type, test_send_denied_on_one_channel; push::test_a_mention_in_a_private_channel_pushes_only_its_viewers; client mention filter: no test
 - **PERM-44** The changes feed and the lookup of messages by id only list messages in channels the member can view and in their own DMs.
   - message_changes::test_changes_the_caller_cant_view_are_left_out, test_lookup_hides_what_the_caller_cant_view
-- **PERM-29** Reading or writing rules needs Manage Roles and a target you can see. A non-owner writes rules only for roles and members below their rank. A manager who sees a private category only through Manage Channels can read its rules but every write is refused (403); the same channel answers 404. *(open: a manager who sees a category only through Manage Channels)*
-  - channel_permissions::test_listing_shows_rows_to_role_managers_only, test_a_manager_cant_touch_roles_or_members_at_or_above_them, test_a_manager_who_sees_a_category_reads_and_writes_its_rules, test_category_rules_are_for_role_managers_who_can_see_the_category, test_a_manager_who_cant_view_a_private_category_reads_its_rules_but_cant_write_them; overwrite_fanout::test_a_put_that_changes_nothing_still_checks_permissions
-- **PERM-30** A non-owner can't change a bit they lack in that channel, or save a change that takes away their own View. So a non-owner manager can make a channel private only if a lower role they may edit keeps them in. *(open: non-owner manager making a channel private)*
-  - channel_permissions::test_a_manager_cant_grant_a_bit_they_dont_hold_there, test_a_manager_cant_take_away_their_own_view; e2e: channel-permissions.spec (a manager who would lose access is told before anything is sent; a manager can turn Private on while the View write for a lower role is still saving)
+- **PERM-29** Reading or writing rules needs Manage Roles and a target you can see. A non-owner writes rules only for roles and members below their rank. To write a category's rules a non-owner must see the category itself (its own View). A manager who sees it only through Manage Channels or through one of its channels can read its rules, but every write is refused (403). In the Manage Channels case the category's channel answers 404; in the other, 200.
+  - channel_permissions::test_listing_shows_rows_to_role_managers_only, test_a_manager_cant_touch_roles_or_members_at_or_above_them, test_a_manager_who_sees_a_category_reads_and_writes_its_rules, test_category_rules_are_for_role_managers_who_can_see_the_category, test_a_manager_who_cant_view_a_private_category_reads_its_rules_but_cant_write_them, test_a_manager_who_sees_a_category_only_through_a_channel_cant_write_its_rules; overwrite_fanout::test_a_put_that_changes_nothing_still_checks_permissions
+- **PERM-30** A non-owner can't change a bit they lack in that channel. A write that would take away their own View also saves their own member rule allowing View, in the same save; other bits of an existing own rule stay. It grants nothing they didn't have. A write on your own rule is never kept; one that takes your own View is refused (403). You may remove your own rule while it allows only View, unless that takes your View. Only View is protected: Send can still be lost.
+  - channel_permissions::test_a_manager_cant_grant_a_bit_they_dont_hold_there, test_making_something_private_keeps_the_manager_in, test_a_manager_cant_write_their_own_row, test_an_existing_own_row_keeps_its_other_bits, test_no_extra_row_when_nothing_is_lost, test_the_kept_row_grants_nothing, test_removing_your_own_row, test_only_your_own_view_row_can_be_removed_without_outranking, test_adding_to_your_own_kept_row_is_refused; e2e: channel-permissions.spec (the manager turns Private on)
 - **PERM-31** A channel imported as "only me" gets one @everyone-denied-View rule (and its new category too). A re-run leaves the rules alone.
   - bundle_import::test_only_me_creates_one_overwrite_hiding_the_channel_from_everyone, test_a_rerun_leaves_the_owners_edits_to_the_overwrites_alone; server_import::test_the_category_of_an_only_me_channel_is_hidden_from_members_too
 
 ## Categories
 
-- **PERM-32** A category's rules apply to its channels unless a channel has its own. A member sees a category if they have Manage Channels, can view it, or can view one channel in it. *(open: a manager who sees a category only through one channel)*
-  - channel_permissions::test_a_private_category_hides_its_channels_until_one_moves_out; overwrite_fanout::test_a_category_write_leaves_channels_with_their_own_rule_alone; channel_permissions::test_a_manager_who_cant_view_a_private_category_reads_its_rules_but_cant_write_them (the Manage Channels clause)
+- **PERM-32** A category's rules apply to its channels unless a channel has its own. A member sees a category if they have Manage Channels, can view it, or can view one channel in it. Reading its rules needs only that; writing needs the category's own View (PERM-29).
+  - channel_permissions::test_a_private_category_hides_its_channels_until_one_moves_out; overwrite_fanout::test_a_category_write_leaves_channels_with_their_own_rule_alone; channel_permissions::test_a_manager_who_cant_view_a_private_category_reads_its_rules_but_cant_write_them (the Manage Channels clause), test_a_manager_who_sees_a_category_only_through_a_channel_cant_write_its_rules
 - **PERM-33** Moving a channel out of a private category shows it; creating one inside shows it only to viewers. Moving a channel into a private category hides it.
   - channel_permissions::test_a_private_category_hides_its_channels_until_one_moves_out, test_a_new_channel_in_a_private_category_goes_only_to_its_viewers, test_moving_a_channel_into_a_private_category_hides_it_from_who_cant_view_the_category
 - **PERM-34** Deleting a category keeps its channels and removes its rules, so a formerly private category's channels become visible, and members who keep a channel are told it is public. Delete Channels is enough, even for a private category you can't see into.
@@ -105,8 +105,8 @@ Test names are short: server tests are `file::test` under `tests/` in this repo;
   - channel_permissions::test_losing_and_gaining_view_over_the_socket; overwrite_fanout::test_a_gained_channel_carries_its_read_state; e2e: channel-permissions.spec (making a channel private takes it away from a member without a reload)
 - **PERM-38** Role managers who can see the target get `permission_overwrite_updated`, and an open Permissions tab applies it without refetching.
   - overwrite_fanout::test_overwrite_row_frame_reaches_role_managers_who_see_the_target, test_overwrite_row_frame_names_a_category_and_a_member; fe: overwritesState.test (applyFrame); e2e: channel-permissions.spec (another manager's change shows up live)
-- **PERM-39** Rule frames go out after the write, in commit order. A failed fan-out keeps the write; a rejected write sends nothing. No frame names a channel the receiver can't see.
-  - overwrite_fanout::test_two_quick_writes_fan_out_in_commit_order, test_a_failing_fan_out_is_logged_and_the_write_stands, test_a_rejected_write_queues_nothing, test_a_member_who_leaves_before_the_job_gets_nothing
+- **PERM-39** Rule frames go out after the write, in commit order. A write and the rule kept with it go out as one job: the requested rule's frame first, then the kept one, and the actor is never told they lost the channel. A failed fan-out keeps the write; a rejected write sends nothing. No frame names a channel the receiver can't see.
+  - overwrite_fanout::test_two_quick_writes_fan_out_in_commit_order, test_the_kept_row_fans_out_after_the_requested_one, test_a_failing_fan_out_is_logged_and_the_write_stands, test_a_rejected_write_queues_nothing, test_a_member_who_leaves_before_the_job_gets_nothing
 
 ## The Permissions tab (client only)
 
@@ -116,8 +116,8 @@ The client copies the server's resolution (PERM-10, 11, 25) to drive the editor.
   - fe: channelResolution.test (visibleTo, inheritedForRole, inheritedForMember, opinions), overwrites.test (visibilityLine, roleInheritedText, memberInheritedText, rowSummary); e2e: channel-permissions.spec (each toggle names where its value comes from; private with nobody allowed)
 - **PERM-41** A click shows at once and is marked busy until saved. Writes to one target go one at a time in click order and quick clicks collapse to the last. A failed write flips back with one toast. Logout settles pending saves silently.
   - fe: overwritesState.test (save, reset, load); e2e: channel-permissions.spec (one click sends one request; the toggle changes before a slow server answers; quick clicks on one row; a failed save flips back with one toast)
-- **PERM-42** The tab disables what the manager may not change: bits they lack, roles or members at or above them, @everyone without outranking it, a change that would lose their own View.
-  - e2e: channel-permissions.spec (a manager who would lose access is told before anything is sent) covers only the last; the rest: no test
+- **PERM-42** The tab disables what the manager may not change: bits they lack, roles or members at or above them, @everyone without outranking it, and a change to their own rule that would lose their own View. Their kept rule is locked except Remove. A category they can't view shows a note instead of controls.
+  - e2e: channel-permissions.spec (the manager turns Private on) covers the kept rule; the rest: no test
 - **PERM-43** Rows stay open or closed as left, and nothing overflows on a phone.
   - e2e: channel-permissions.spec (rows stay open or closed as the user left them; nothing overflows on a phone; rows open and close from the keyboard)
 
@@ -140,6 +140,6 @@ The client copies the server's resolution (PERM-10, 11, 25) to drive the editor.
 
 **Untested, worst regression first**
 1. PERM-35 client side: `serversState.canIn` and the masks from `permissions_init` / `permissions_updated` gate the composer, voice, stream and message menus, with only Send exercised (one e2e).
-2. PERM-42: the tab's guards other than losing your own View; they live inside the component.
+2. PERM-42: the tab's guards other than the kept rule; they live inside the component.
 3. PERM-23 client: which members show mute, move and kick.
 4. PERM-28 client: the @mention list in a private channel.
