@@ -16,6 +16,7 @@ from dataclasses import dataclass, field
 
 from ..models.GameIntegration import GameIntegration
 from ..models.GameLink import GameLink
+from ..models.UserToServer import UserToServer
 
 logger = logging.getLogger("app.game_sessions")
 
@@ -139,6 +140,21 @@ class GameSessions:
             self._links[integration_id] = links
         return links
 
+    @staticmethod
+    async def _linked(
+        integration: GameIntegration, players: Sequence[str], links: Mapping[str, LinkedPlayer],
+    ) -> list[str]:
+        """The players with a link whose user is still a member. Checked on every
+        frame, so a kick or a leave takes effect at once and a rejoin needs no relink."""
+        known = [player_id for player_id in players if player_id in links]
+        if not known:
+            return []
+        members = set(await UserToServer.filter(
+            server_id=integration.server_id,
+            user_id__in=[links[player_id].user_id for player_id in known],
+        ).values_list("user_id", flat=True))
+        return [player_id for player_id in known if links[player_id].user_id in members]
+
     async def frame(
         self,
         integration: GameIntegration,
@@ -149,7 +165,7 @@ class GameSessions:
         async with self._lock(integration.id):
             now = self.clock()
             links = await self._link_map(integration.id)
-            linked = [player_id for player_id in players if player_id in links]
+            linked = await self._linked(integration, players, links)
             roster = {links[player_id].user_id: links[player_id].player_name
                       for player_id in linked}
 

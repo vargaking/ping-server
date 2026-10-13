@@ -6,6 +6,7 @@ from types import SimpleNamespace
 import pytest
 
 from app.models.GameLink import GameLink
+from app.models.UserToServer import UserToServer
 from app.services.game_sessions import (
     CODE_ALPHABET,
     CODE_LENGTH,
@@ -84,13 +85,23 @@ class Rows:
                 for player_id, link in self.service.links.items()]
 
 
+class Members:
+    def __init__(self, service, user_id__in, **kwargs):
+        self.ids = [user_id for user_id in user_id__in if user_id in service.members]
+
+    async def values_list(self, *fields, **kwargs):
+        return self.ids
+
+
 @pytest.fixture
 def sessions(comms, clock, monkeypatch):
     service = GameSessions(comms, clock)
     service.loads = 0
     service.links = dict(LINKS)
     service.on_load = None
+    service.members = {1, 2, 3}
     monkeypatch.setattr(GameLink, "filter", lambda **kwargs: Rows(service))
+    monkeypatch.setattr(UserToServer, "filter", lambda **kwargs: Members(service, **kwargs))
     return service
 
 
@@ -118,6 +129,25 @@ def test_a_listener_only_gets_their_own_gains(sessions, comms):
 
     by_user = {user_id: f["gains"] for user_id, f in comms.sent}
     assert by_user == {1: {"2": 0.5}, 2: {"1": 0.9}}
+
+
+def test_a_linked_user_who_left_the_server_is_treated_as_unlinked(sessions, comms, clock):
+    assert frame(sessions, ["a", "b"], {"a": {"b": 1}, "b": {"a": 1}}) == ["a", "b"]
+    comms.sent.clear()
+
+    sessions.members.discard(2)
+    clock.advance(0.2)
+    linked = frame(sessions, ["a", "b"], {"a": {"b": 1}, "b": {"a": 1}})
+
+    assert linked == ["a"]
+    assert comms.mixes(2) == []
+    assert comms.mixes(1) == [{}]
+    assert [p["user_id"] for p in comms.sessions()[-1]["players"]] == [1]
+
+    sessions.members.add(2)
+    clock.advance(0.2)
+    assert frame(sessions, ["a", "b"], {"a": {"b": 1}}) == ["a", "b"]
+    assert comms.mixes(1)[-1] == {"2": 1.0}
 
 
 def test_players_are_deduplicated_in_the_answer_order(sessions):
