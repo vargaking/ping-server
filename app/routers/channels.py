@@ -267,6 +267,7 @@ class ChannelResponse(BaseModel):
     position: int = 0
     last_read_message_id: Optional[str] = None
     last_message_id: Optional[str] = None
+    mention_count: int = 0
     # @everyone can't view it.
     private: bool = False
 
@@ -277,6 +278,7 @@ class ChannelResponse(BaseModel):
         *,
         last_read_message_id: Optional[str] = None,
         last_message_id: Optional[str] = None,
+        mention_count: int = 0,
         private: bool = False,
     ):
         return cls(
@@ -289,8 +291,12 @@ class ChannelResponse(BaseModel):
             position=channel.position,
             last_read_message_id=last_read_message_id,
             last_message_id=last_message_id,
+            mention_count=mention_count,
             private=private,
         )
+
+
+PER_USER_FIELDS = {"last_read_message_id", "last_message_id", "mention_count"}
 
 
 class ReadMarkerUpdate(BaseModel):
@@ -400,12 +406,14 @@ async def get_channels(
         if view.can_view(channel.id)]
     state = await read_state.batch_channel_state(
         current_user.id, [c.id for c in channels])
+    mentions = await read_state.mention_counts(current_user.id, [c.id for c in channels])
     private_channels, _ = await private_flags(server.id)
     return [
         ChannelResponse.from_channel(
             channel,
             last_read_message_id=state.get(channel.id, {}).get("last_read_message_id"),
             last_message_id=state.get(channel.id, {}).get("last_message_id"),
+            mention_count=mentions.get(channel.id, 0),
             private=channel.id in private_channels,
         )
         for channel in channels
@@ -509,7 +517,7 @@ async def update_channel(
             "type": "channel_updated",
             "server_id": server.id,
             "channel": channel_response_.model_dump(
-                mode="json", exclude={"last_read_message_id", "last_message_id"}),
+                mode="json", exclude=PER_USER_FIELDS),
         }, exclude_user_id=current_user.id)
 
     return channel_response_

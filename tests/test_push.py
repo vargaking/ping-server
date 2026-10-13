@@ -1590,14 +1590,16 @@ def test_a_deeply_nested_document_is_rejected_and_sends_no_push(channel_team, pu
     assert push_on.calls == []
 
 
-def test_a_failing_mention_scan_does_not_break_delivery(channel_team, push_on, monkeypatch):
+def test_a_failing_mention_push_does_not_break_delivery(channel_team, push_on, monkeypatch):
     team = channel_team
 
-    def boom(content):
-        raise RuntimeError("scan failed")
+    def boom(task):
+        task.close()
+        raise RuntimeError("schedule failed")
 
-    monkeypatch.setattr("app.services.chat_service.mentioned_user_ids", boom)
+    monkeypatch.setattr(push, "schedule", boom)
+    content = doc(mention(team.bob.user["id"]))
     frame = hostile_message_is_delivered_without_push(
         team, push_on,
-        lambda ws: ws.send_json(channel_frame(team.server["id"], team.channel["id"], doc(text("hi")))))
+        lambda ws: ws.send_json(channel_frame(team.server["id"], team.channel["id"], content)))
     assert frame["channel_id"] == team.channel["id"]

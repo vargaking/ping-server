@@ -663,7 +663,7 @@ def test_deleting_a_private_category_tells_who_kept_its_channels_they_are_public
         frames = live.settle()
 
     listed = next(c for c in owner.get(f"/channels/{sid}").json() if c["id"] == plans)
-    expected = {k: v for k, v in listed.items() if k not in ("last_read_message_id", "last_message_id")}
+    expected = {k: v for k, v in listed.items() if k not in ("last_read_message_id", "last_message_id", "mention_count")}
     assert (expected["private"], expected["group_id"]) == (False, None)
     updated = {"type": "channel_updated", "server_id": sid, "channel": expected}
     assert frames["owner"] == [updated]

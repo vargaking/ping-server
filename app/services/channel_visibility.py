@@ -115,7 +115,7 @@ async def announce_visibility(
     the response) gets only lost channels and mask changes. Channels and
     categories in *flipped_channels* / *flipped_groups* changed their private
     flag: those who keep seeing them get the new object."""
-    from ..routers.channels import ChannelResponse
+    from ..routers.channels import PER_USER_FIELDS, ChannelResponse
 
     comms = getattr(app_state, "comms", None)
     presence = getattr(app_state, "voice_presence", None)
@@ -127,9 +127,11 @@ async def announce_visibility(
                   else (new.visible_channels() - old.visible_channels()) & set(state.channels))
         for user_id, old, new in members}
     read_states = {}
+    mention_counts = {}
     if comms is not None:
-        read_states = await read_state.batch_channel_states({
-            user_id: sorted(ids) for user_id, ids in gained.items() if ids})
+        gained_wanted = {user_id: sorted(ids) for user_id, ids in gained.items() if ids}
+        read_states = await read_state.batch_channel_states(gained_wanted)
+        mention_counts = await read_state.batch_mention_counts(gained_wanted)
     channel_payloads: dict[int, dict] = {}
     group_payloads: dict[int, dict] = {}
 
@@ -153,6 +155,7 @@ async def announce_visibility(
                     state.channels[channel_id],
                     last_read_message_id=read_states[user_id][channel_id]["last_read_message_id"],
                     last_message_id=read_states[user_id][channel_id]["last_message_id"],
+                    mention_count=mention_counts[user_id][channel_id],
                     private=channel_id in state.private_channels,
                 )
                 await comms.send_to_user(user_id, {
@@ -179,7 +182,7 @@ async def announce_visibility(
                         channel_payloads[channel_id] = ChannelResponse.from_channel(
                             state.channels[channel_id],
                             private=channel_id in state.private_channels).model_dump(
-                            mode="json", exclude={"last_read_message_id", "last_message_id"})
+                            mode="json", exclude=PER_USER_FIELDS)
                     await comms.send_to_user(user_id, {
                         "type": "channel_updated", "server_id": server_id,
                         "channel": channel_payloads[channel_id]})

@@ -1,5 +1,6 @@
 import logging
 import time
+from collections.abc import Collection
 from dataclasses import dataclass
 from uuid import UUID
 
@@ -13,6 +14,7 @@ from app.models.Channel import Channel
 from app.models.Conversation import Conversation
 from app.models.ForumPost import ForumPost
 from app.models.Message import Message
+from app.models.MessageMention import MessageMention
 from app.models.User import User
 from app.permissions import Permission
 from app.services import forum, read_state
@@ -148,6 +150,10 @@ class ChatService:
         if reply_to_uuid is _INVALID_REPLY:
             raise MessageRejected("invalid_reply")
 
+        member_ids = await permissions.viewers(server_id, channel_id)
+        mentioned = mentioned_user_ids(content)
+        mention_ids = (mentioned & member_ids) - {sender_id}
+
         # Persist first: never show other people a message that was not stored.
         try:
             created = await self._create_message(
@@ -162,6 +168,7 @@ class ChatService:
                 timestamp=fields.timestamp,
                 metadata=self._stored_metadata(fields),
                 reply_to_uuid=reply_to_uuid,
+                mention_ids=mention_ids,
             )
         except IntegrityError:
             # A concurrent send of the same id won the unique constraint.
@@ -199,8 +206,6 @@ class ChatService:
             "imported_author": None,
         }
 
-        member_ids = await permissions.viewers(server_id, channel_id)
-
         exclude_user_id = sender_id if skip_sender else None
         if post is not None:
             await self._fan_out(
@@ -216,7 +221,6 @@ class ChatService:
             # Runs in the sender's socket path: a push problem must never
             # break message delivery.
             try:
-                mentioned = mentioned_user_ids(content)
                 if mentioned:
                     push.schedule(self._push_mentions(
                         sender_id, server_id, channel_id, created.post_id, created.id,
@@ -574,6 +578,7 @@ class ChatService:
         *,
         new_post: forum.NewPost | None = None,
         reply_post: ForumPost | None = None,
+        mention_ids: Collection[int] = (),
         **fields,
     ) -> Message | None:
         """Store the message, link its attachments and keep its post in step,
@@ -587,6 +592,10 @@ class ChatService:
                         fields["channel_id"], fields["author_id"], new_post)
                 created = await Message.create(
                     post_id=post.id if post else None, **fields)
+                if mention_ids:
+                    await MessageMention.bulk_create([MessageMention(
+                        message_id=created.id, user_id=uid, channel_id=fields["channel_id"])
+                        for uid in sorted(mention_ids)])
                 if attachments:
                     linked = await Attachment.filter(
                         id__in=[a.id for a in attachments], message_id__isnull=True,
