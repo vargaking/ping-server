@@ -1,0 +1,17 @@
+# DOMAIN must point at this host. Caddy gets and renews the certificate itself.
+{$DOMAIN} {
+	request_body {
+		max_size 30MB
+	}
+	# Caddy upgrades /ws to a WebSocket on its own and sets no read timeout.
+	# The app rate-limits on the address in these headers when the key matches.
+	reverse_proxy api:8000 {
+		header_up X-Zet-Proxy-Key {$TRUSTED_PROXY_KEY}
+		header_up X-Zet-Client-Ip {remote_host}
+	}
+}
+
+# LiveKit signalling over WSS, same certificate.
+{$DOMAIN}:7443 {
+	reverse_proxy livekit:7880
+}
