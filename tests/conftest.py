@@ -38,6 +38,7 @@ os.environ.setdefault("FRIEND_REQUEST_RATE_LIMIT", "10000/minute")
 os.environ.setdefault("START_CALL_RATE_LIMIT", "10000/minute")
 os.environ.setdefault("GAME_FRAME_RATE_LIMIT", "10000/second")
 os.environ.setdefault("GAME_LINK_RATE_LIMIT", "10000/minute")
+os.environ.setdefault("GAME_AUTH_FAIL_RATE_LIMIT", "10000/minute")
 
 import anyio  # noqa: E402
 import bcrypt  # noqa: E402

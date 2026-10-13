@@ -6,7 +6,10 @@ from types import SimpleNamespace
 import pytest
 
 from app.models.GameLink import GameLink
-from app.models.UserToServer import UserToServer
+from app.models.GameIntegration import GameIntegration
+from app.models.Server import Server
+from app.permissions import Permission
+from app.services.permissions import permissions
 from app.services.game_sessions import (
     CODE_ALPHABET,
     CODE_LENGTH,
@@ -14,8 +17,10 @@ from app.services.game_sessions import (
     IDLE_SECONDS,
     RESEND_SECONDS,
     GameSessions,
+    IntegrationChanged,
     LinkCodes,
     LinkedPlayer,
+    NoVoiceChannel,
 )
 
 
@@ -57,7 +62,7 @@ LINKS = {
 
 def integration(**overrides):
     values = dict(id=7, server_id=1, voice_channel_id=9, name="Minecraft",
-                  players_hear_spectators=False)
+                  players_hear_spectators=False, key_hash="hash")
     return SimpleNamespace(**{**values, **overrides})
 
 
@@ -85,28 +90,42 @@ class Rows:
                 for player_id, link in self.service.links.items()]
 
 
-class Members:
-    def __init__(self, service, user_id__in, **kwargs):
-        self.ids = [user_id for user_id in user_id__in if user_id in service.members]
-
-    async def values_list(self, *fields, **kwargs):
-        return self.ids
-
-
 @pytest.fixture
 def sessions(comms, clock, monkeypatch):
     service = GameSessions(comms, clock)
     service.loads = 0
     service.links = dict(LINKS)
     service.on_load = None
-    service.members = {1, 2, 3}
+    service.viewers = {1, 2, 3}
+    service.stored = None
+    asked = []
+
+    async def effective(user_id, server, channel_id=None):
+        asked.append(channel_id)
+        return Permission.VIEW_CHANNEL if user_id in service.viewers else None
+
+    async def stored(**kwargs):
+        return service.stored
+
+    async def server(**kwargs):
+        return SimpleNamespace(id=kwargs["id"])
+
+    service.asked = asked
     monkeypatch.setattr(GameLink, "filter", lambda **kwargs: Rows(service))
-    monkeypatch.setattr(UserToServer, "filter", lambda **kwargs: Members(service, **kwargs))
+    monkeypatch.setattr(GameIntegration, "get_or_none", stored)
+    monkeypatch.setattr(Server, "get_or_none", server)
+    monkeypatch.setattr(permissions, "effective", effective)
     return service
 
 
-def frame(sessions, players, mix, **overrides):
-    return asyncio.run(sessions.frame(integration(**overrides), players, mix))
+SAME = object()
+
+
+def frame(sessions, players, mix, stored=SAME, **overrides):
+    """One frame. The integration the database holds is the one sent, unless *stored* says otherwise."""
+    sent = integration(**overrides)
+    sessions.stored = sent if stored is SAME else stored
+    return asyncio.run(sessions.frame(sent, players, mix))
 
 
 def test_gains_are_translated_clamped_rounded_and_filtered(sessions, comms):
@@ -131,11 +150,11 @@ def test_a_listener_only_gets_their_own_gains(sessions, comms):
     assert by_user == {1: {"2": 0.5}, 2: {"1": 0.9}}
 
 
-def test_a_linked_user_who_left_the_server_is_treated_as_unlinked(sessions, comms, clock):
+def test_a_linked_user_who_cannot_view_the_channel_is_treated_as_unlinked(sessions, comms, clock):
     assert frame(sessions, ["a", "b"], {"a": {"b": 1}, "b": {"a": 1}}) == ["a", "b"]
     comms.sent.clear()
 
-    sessions.members.discard(2)
+    sessions.viewers.discard(2)
     clock.advance(0.2)
     linked = frame(sessions, ["a", "b"], {"a": {"b": 1}, "b": {"a": 1}})
 
@@ -143,8 +162,9 @@ def test_a_linked_user_who_left_the_server_is_treated_as_unlinked(sessions, comm
     assert comms.mixes(2) == []
     assert comms.mixes(1) == [{}]
     assert [p["user_id"] for p in comms.sessions()[-1]["players"]] == [1]
+    assert set(sessions.asked) == {9}
 
-    sessions.members.add(2)
+    sessions.viewers.add(2)
     clock.advance(0.2)
     assert frame(sessions, ["a", "b"], {"a": {"b": 1}}) == ["a", "b"]
     assert comms.mixes(1)[-1] == {"2": 1.0}
@@ -348,6 +368,33 @@ def test_the_sweeper_loop_survives_a_failed_sweep(sessions, monkeypatch):
     with pytest.raises(asyncio.CancelledError):
         asyncio.run(sessions.run())
     assert len(calls) == 2
+
+
+@pytest.mark.parametrize(
+    "stored", [None, integration(key_hash="rotated")], ids=["deleted", "rotated"])
+def test_a_frame_for_an_integration_that_changed_starts_no_session(sessions, comms, stored):
+    with pytest.raises(IntegrationChanged):
+        frame(sessions, ["a"], {}, stored=stored)
+
+    assert not sessions.is_active(7)
+    assert comms.broadcasts == [] and comms.sent == []
+
+
+def test_a_frame_uses_the_integration_as_stored_now(sessions, comms):
+    frame(sessions, ["a"], {}, stored=integration(voice_channel_id=10, name="Moved"))
+
+    assert comms.sessions()[0]["channel_id"] == 10
+    assert comms.sessions()[0]["name"] == "Moved"
+
+
+def test_a_frame_for_an_integration_that_lost_its_channel_ends_the_session(sessions, comms):
+    frame(sessions, ["a"], {})
+
+    with pytest.raises(NoVoiceChannel):
+        frame(sessions, ["a"], {}, voice_channel_id=None)
+
+    assert not sessions.is_active(7)
+    assert comms.sessions()[-1]["active"] is False
 
 
 # --- link codes ----------------------------------------------------------

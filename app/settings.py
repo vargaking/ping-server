@@ -93,6 +93,11 @@ def game_frame_rate_limit() -> str:
     return os.getenv("GAME_FRAME_RATE_LIMIT", "30/second")
 
 
+def game_auth_fail_rate_limit() -> str:
+    """Per-IP limit for game API requests with a missing or unknown key."""
+    return os.getenv("GAME_AUTH_FAIL_RATE_LIMIT", "30/minute")
+
+
 def game_link_rate_limit() -> str:
     """Per-user limit for looking up and claiming game link codes."""
     return os.getenv("GAME_LINK_RATE_LIMIT", "20/minute")

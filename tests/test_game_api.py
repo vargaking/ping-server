@@ -7,6 +7,8 @@ from fastapi.testclient import TestClient
 from starlette.requests import Request
 
 from app.app import app
+from app.models.GameIntegration import GameIntegration
+from app.routers import game as game_router
 from app.permissions import Permission
 from app.rate_limit import game_key, limiter
 from app.services.game_sessions import CODE_ALPHABET, CODE_TTL_SECONDS, IDLE_SECONDS
@@ -154,6 +156,21 @@ def test_the_key_is_limited_per_integration_not_per_address(
 
     assert statuses == [200, 200, 200, 429]
     assert other_status == 200
+
+
+def test_failed_authentication_is_limited_per_address(
+        monkeypatch, game, key, fresh_limits):  # noqa: F811
+    monkeypatch.setenv("GAME_AUTH_FAIL_RATE_LIMIT", "3/minute")
+    for _ in range(5):
+        assert game.post(FRAMES, json={"players": []}, headers=bearer(key)).status_code == 200
+
+    failures = [
+        game.post(FRAMES, json={"players": []}, headers=headers)
+        for headers in (bearer("zgk_wrong"), {}, bearer("zgk_wrong"), bearer("zgk_wrong"))]
+
+    assert [res.status_code for res in failures] == [401, 401, 401, 429]
+    assert int(failures[-1].headers["Retry-After"]) > 0
+    assert game.post(FRAMES, json={"players": []}, headers=bearer(key)).status_code == 200
 
 
 def request_from(address, authorization=None):
@@ -553,6 +570,16 @@ def test_rotating_the_key_ends_the_session(client, game, team, players, integrat
     assert game.post(FRAMES, json={"players": []}, headers=bearer(key)).status_code == 401
 
 
+def test_rotating_the_key_voids_codes_minted_with_the_old_one(client, game, integration, key):  # noqa: F811
+    code = game.post(LINK_CODES, json={"player_id": "p", "player_name": "Steve"},
+                     headers=bearer(key)).json()["code"]
+
+    client.post(f"/api/game-integrations/{integration['id']}/key")
+
+    assert client.get(f"/api/game/link-codes/{code}").status_code == 404
+    assert client.post(f"/api/game/link-codes/{code}/claim").status_code == 404
+
+
 def test_deleting_the_integration_ends_the_session_and_forgets_its_codes(
         client, game, team, players, integration, key, sockets):  # noqa: F811
     owner_ws = sockets("owner")
@@ -610,6 +637,31 @@ def test_a_kicked_member_drops_out_of_the_mix_and_keeps_the_link(
     assert send_frame(game, key, ["p1", "p2"], mix) == {"linked": ["p1", "p2"]}
 
 
+def test_a_player_who_cannot_view_the_channel_is_left_out(
+        client, game, team, players, key, sockets):  # noqa: F811
+    owner_ws, member_ws = sockets("owner"), sockets("member")
+    owner_id, member_id = team["owner"]["id"], team["member"]["id"]
+    mix = {"p1": {"p2": 1}, "p2": {"p1": 1}}
+    channel_id = team["lobby"]["id"]
+    everyone = roles_by_name(client, team["server"]["id"])["@everyone"]
+    hidden = client.put(
+        f"/channels/{channel_id}/permissions/roles/{everyone['id']}",
+        json={"allow": "0", "deny": str(int(Permission.VIEW_CHANNEL))})
+    assert hidden.status_code == 200, hidden.text
+    drain_jobs(client)
+    received(client, owner_ws, owner_id)
+    received(client, member_ws, member_id)
+
+    result = send_frame(game, key, ["p1", "p2"], mix)
+
+    assert result == {"linked": ["p1"]}
+    assert mixes_of(received(client, owner_ws, owner_id)) == [{
+        "type": "game_mix", "channel_id": channel_id,
+        "integration_id": client.app.state.game_sessions.session_for_channel(channel_id)["integration_id"],
+        "gains": {}}]
+    assert mixes_of(received(client, member_ws, member_id)) == []
+
+
 def test_claiming_a_link_joins_the_session_on_the_next_frame(
         client, game, team, integration, key, sockets):  # noqa: F811
     owner_ws = sockets("owner")
@@ -640,6 +692,27 @@ def test_a_game_that_goes_quiet_loses_its_session_after_ten_seconds(
     frames = sessions_of(received(client, owner_ws, team["owner"]["id"]))
     assert [(f["channel_id"], f["active"]) for f in frames] == [(team["lobby"]["id"], False)]
     assert client.get(lookup).status_code == 204
+
+
+@pytest.mark.parametrize("change", ["rotated", "deleted"])
+def test_a_frame_in_flight_when_the_integration_changes_starts_no_session(
+        monkeypatch, client, game, team, players, integration, key, change):  # noqa: F811
+    read_limited = game_router.read_limited
+
+    async def read_then_change(request, limit):
+        body = await read_limited(request, limit)
+        if change == "rotated":
+            await GameIntegration.filter(id=integration["id"]).update(key_hash="0" * 64)
+        else:
+            await GameIntegration.filter(id=integration["id"]).delete()
+        return body
+
+    monkeypatch.setattr(game_router, "read_limited", read_then_change)
+
+    res = game.post(FRAMES, json={"players": ["p1"]}, headers=bearer(key))
+
+    assert (res.status_code, res.json()) == (409, {"detail": "Integration changed, retry"})
+    assert client.get(f"/api/game/sessions/{team['lobby']['id']}").status_code == 204
 
 
 def test_the_session_lookup_returns_the_frame_body_or_nothing(

@@ -7,6 +7,7 @@ from datetime import datetime
 
 from fastapi import APIRouter, Depends, HTTPException, Request, Response
 from fastapi.responses import JSONResponse
+from limits import parse
 from pydantic import BaseModel, Field, ValidationError
 from tortoise.expressions import Q
 from tortoise.transactions import in_transaction
@@ -18,10 +19,21 @@ from ..models.GameLink import GameLink
 from ..models.Server import Server
 from ..models.User import User
 from ..permissions import Permission
-from ..rate_limit import game_key, limiter, user_key
-from ..services.game_sessions import CODE_TTL_SECONDS, bearer_token, hash_key
+from ..rate_limit import client_address, game_key, limiter, user_key
+from ..services.game_sessions import (
+    CODE_TTL_SECONDS,
+    IntegrationChanged,
+    NoVoiceChannel,
+    bearer_token,
+    hash_key,
+)
 from ..services.permissions import permissions
-from ..settings import app_url, game_frame_rate_limit, game_link_rate_limit
+from ..settings import (
+    app_url,
+    game_auth_fail_rate_limit,
+    game_frame_rate_limit,
+    game_link_rate_limit,
+)
 
 router = APIRouter(prefix="/api/game", tags=["game"])
 
@@ -51,6 +63,13 @@ async def game_integration(request: Request) -> GameIntegration:
     integration = (
         await GameIntegration.get_or_none(key_hash=hash_key(token)) if token else None)
     if integration is None:
+        # Per-key limits only see requests that authenticate, so failures are
+        # counted per address here.
+        failures = parse(game_auth_fail_rate_limit())
+        if not limiter.limiter.hit(failures, "game_auth_fail", client_address(request)):
+            raise HTTPException(
+                status_code=429, detail="Too many failed attempts",
+                headers={"Retry-After": str(failures.get_expiry())})
         raise HTTPException(
             status_code=401, detail="Invalid game key",
             headers={"WWW-Authenticate": "Bearer"})
@@ -143,10 +162,12 @@ async def post_frame(
             status_code=422, detail=f"At most {MAX_FRAME_PLAYERS} players per frame")
 
     sessions = request.app.state.game_sessions
-    if integration.voice_channel_id is None:
-        await sessions.end(integration.id)
+    try:
+        linked = await sessions.frame(integration, players, frame.mix)
+    except NoVoiceChannel:
         raise HTTPException(status_code=409, detail="No voice channel set")
-    linked = await sessions.frame(integration, players, frame.mix)
+    except IntegrationChanged:
+        raise HTTPException(status_code=409, detail="Integration changed, retry")
     return FrameResult(linked=linked)
 
 

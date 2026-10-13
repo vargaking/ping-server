@@ -4,6 +4,7 @@ from typing import Annotated
 
 from fastapi import APIRouter, Depends, HTTPException, Request, Response
 from pydantic import BaseModel, StringConstraints
+from tortoise.exceptions import IntegrityError
 from tortoise.functions import Count
 
 from ..middleware import get_current_user
@@ -146,10 +147,13 @@ async def create_integration(
             status_code=400,
             detail=f"A server can have at most {MAX_INTEGRATIONS_PER_SERVER} game integrations")
     key = generate_key()
-    integration = await GameIntegration.create(
-        server_id=server.id, name=body.name, voice_channel_id=channel.id,
-        players_hear_spectators=body.players_hear_spectators,
-        key_hash=hash_key(key), key_prefix=key_prefix(key), created_by_id=current_user.id)
+    try:
+        integration = await GameIntegration.create(
+            server_id=server.id, name=body.name, voice_channel_id=channel.id,
+            players_hear_spectators=body.players_hear_spectators,
+            key_hash=hash_key(key), key_prefix=key_prefix(key), created_by_id=current_user.id)
+    except IntegrityError:
+        raise HTTPException(status_code=400, detail=CHANNEL_TAKEN)
     return IntegrationCreated(**integration_out(request, integration, 0).model_dump(), key=key)
 
 
@@ -172,7 +176,10 @@ async def update_integration(
         integration.name = body.name
     if body.players_hear_spectators is not None:
         integration.players_hear_spectators = body.players_hear_spectators
-    await integration.save()
+    try:
+        await integration.save()
+    except IntegrityError:
+        raise HTTPException(status_code=400, detail=CHANNEL_TAKEN)
 
     if channel_changed:
         await sessions.end(integration.id)
@@ -192,6 +199,7 @@ async def rotate_key(
     integration.key_prefix = key_prefix(key)
     await integration.save(update_fields=["key_hash", "key_prefix"])
     await request.app.state.game_sessions.end(integration.id)
+    request.app.state.link_codes.forget_integration(integration.id)
     return RotatedKey(key=key, key_prefix=integration.key_prefix)
 
 
@@ -201,8 +209,8 @@ async def delete_integration(
     integration: GameIntegration = Depends(managed_integration),
 ) -> Response:
     sessions = request.app.state.game_sessions
-    await sessions.end(integration.id)
     await integration.delete()
+    await sessions.end(integration.id)
     sessions.links_changed(integration.id)
     request.app.state.link_codes.forget_integration(integration.id)
     return Response(status_code=204)

@@ -16,7 +16,9 @@ from dataclasses import dataclass, field
 
 from ..models.GameIntegration import GameIntegration
 from ..models.GameLink import GameLink
-from ..models.UserToServer import UserToServer
+from ..models.Server import Server
+from ..permissions import Permission
+from .permissions import permissions
 
 logger = logging.getLogger("app.game_sessions")
 
@@ -31,6 +33,14 @@ CODE_LENGTH = 8
 CODE_TTL_SECONDS = 600.0
 
 Clock = Callable[[], float]
+
+
+class NoVoiceChannel(Exception):
+    """The integration has no voice channel to drive."""
+
+
+class IntegrationChanged(Exception):
+    """The integration was deleted or got a new key while a frame was in flight."""
 
 
 def generate_key() -> str:
@@ -144,16 +154,18 @@ class GameSessions:
     async def _linked(
         integration: GameIntegration, players: Sequence[str], links: Mapping[str, LinkedPlayer],
     ) -> list[str]:
-        """The players with a link whose user is still a member. Checked on every
-        frame, so a kick or a leave takes effect at once and a rejoin needs no relink."""
+        """The players with a link whose user can still view the channel. Checked on
+        every frame (the masks are cached), so a kick, a leave or a hidden channel
+        takes effect at once and a rejoin needs no relink."""
         known = [player_id for player_id in players if player_id in links]
-        if not known:
-            return []
-        members = set(await UserToServer.filter(
-            server_id=integration.server_id,
-            user_id__in=[links[player_id].user_id for player_id in known],
-        ).values_list("user_id", flat=True))
-        return [player_id for player_id in known if links[player_id].user_id in members]
+        server = await Server.get_or_none(id=integration.server_id) if known else None
+        linked = []
+        for player_id in known if server else ():
+            mask = await permissions.effective(
+                links[player_id].user_id, server, channel_id=integration.voice_channel_id)
+            if mask is not None and mask & Permission.VIEW_CHANNEL:
+                linked.append(player_id)
+        return linked
 
     async def frame(
         self,
@@ -161,8 +173,20 @@ class GameSessions:
         players: Sequence[str],
         mix: Mapping[str, Mapping[str, float]],
     ) -> list[str]:
-        """Apply one frame from the game and return which of *players* are linked."""
+        """Apply one frame from the game and return which of *players* are linked.
+
+        The integration is read again under the lock: a delete, a key rotation
+        or a channel change that landed while the frame was in flight must not
+        bring a session back.
+        """
         async with self._lock(integration.id):
+            current = await GameIntegration.get_or_none(id=integration.id)
+            if current is None or current.key_hash != integration.key_hash:
+                raise IntegrationChanged
+            if current.voice_channel_id is None:
+                await self._end(current.id)
+                raise NoVoiceChannel
+            integration = current
             now = self.clock()
             links = await self._link_map(integration.id)
             linked = await self._linked(integration, players, links)

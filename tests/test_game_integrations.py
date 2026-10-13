@@ -4,6 +4,7 @@ import pytest
 from app.models.GameIntegration import GameIntegration
 from app.models.GameLink import GameLink
 from app.permissions import Permission
+from app.routers import game_integrations
 from app.settings import app_url
 from tests.conftest import create_channel, create_server, register
 from tests.test_permissions import join, set_roles
@@ -202,6 +203,26 @@ def test_a_channel_serves_one_game(client, team, integration):
     assert client.patch(
         f"/api/game-integrations/{other['id']}",
         json={"voice_channel_id": team["lobby"]["id"]}).status_code == 200
+
+
+def test_a_race_for_one_channel_is_caught_by_the_database(monkeypatch, client, team, integration):
+    async def no_check(*args, **kwargs):
+        pass
+
+    monkeypatch.setattr(game_integrations, "ensure_channel_free", no_check)
+    sid = team["server"]["id"]
+    other = make_integration(client, sid, team["lounge"]["id"], name="Other")
+    taken = {"detail": "Another game already uses this voice channel"}
+
+    created = client.post(
+        f"/api/servers/{sid}/game-integrations",
+        json={"name": "Third", "voice_channel_id": team["lobby"]["id"]})
+    moved = client.patch(
+        f"/api/game-integrations/{other['id']}", json={"voice_channel_id": team["lobby"]["id"]})
+
+    assert (created.status_code, created.json()) == (400, taken)
+    assert (moved.status_code, moved.json()) == (400, taken)
+    assert len(client.get(f"/api/servers/{sid}/game-integrations").json()) == 2
 
 
 def test_the_channel_cannot_be_cleared(client, integration):
