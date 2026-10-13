@@ -1,3 +1,4 @@
+import re
 from datetime import datetime
 from typing import List, Optional
 
@@ -41,6 +42,7 @@ router = APIRouter(prefix="/servers", tags=["servers"])
 
 SERVER_NAME_MAX = 100
 WELCOME_MESSAGE_MAX = 1000
+ACCENT_PATTERN = re.compile(r"#[0-9a-fA-F]{6}")
 
 
 def _clean_name(value: Optional[str]) -> Optional[str]:
@@ -276,6 +278,11 @@ def _clean_profile_update(profile: dict) -> dict:
                 detail=f"Welcome message must be at most {WELCOME_MESSAGE_MAX} characters",
             )
         profile["welcome_message"] = message or None
+    accent = profile.get("accent")
+    if accent is not None:
+        if not isinstance(accent, str) or not ACCENT_PATTERN.fullmatch(accent):
+            raise HTTPException(status_code=422, detail="Accent must be a colour like #1a2b3c")
+        profile["accent"] = accent.lower()
     return profile
 
 

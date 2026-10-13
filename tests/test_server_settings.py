@@ -1,4 +1,6 @@
 """Server name validation and the server_updated / server_deleted frames."""
+import pytest
+
 from app.permissions import Permission
 from tests.conftest import ORIGIN, create_channel, create_server, register, ws_ready
 from tests.test_permissions import join, set_roles
@@ -346,3 +348,61 @@ def test_welcome_and_landing_need_manage_server(client, new_client):
     res = bob.put(f"/servers/{sid}", json={"server_profile": {"welcome_message": "hi"}})
     assert res.status_code == 403
     assert "welcome_message" not in client.get(f"/servers/{sid}").json()["server_profile"]
+
+
+def test_accent_is_stored_lowercase_and_broadcast(client, new_client):
+    register(client, "alice-ac")
+    sid = create_server(client)["id"]
+    bob = new_client()
+    register(bob, "bob-ac")
+    _join(client, bob, sid)
+
+    with client.websocket_connect("/ws", headers=HEADERS) as alice_ws, \
+            bob.websocket_connect("/ws", headers=HEADERS) as bob_ws:
+        ws_ready(alice_ws)
+        ws_ready(bob_ws)
+        alice_ws.receive_json()  # bob online
+
+        res = client.put(f"/servers/{sid}", json={"server_profile": {"accent": "#1A2B3C"}})
+        assert res.status_code == 200, res.text
+        assert res.json()["server_profile"]["accent"] == "#1a2b3c"
+        frame = bob_ws.receive_json()
+        assert frame["type"] == "server_updated"
+        assert frame["server"]["server_profile"]["accent"] == "#1a2b3c"
+    assert bob.get(f"/servers/{sid}").json()["server_profile"]["accent"] == "#1a2b3c"
+
+
+@pytest.mark.parametrize("bad", ["red", "#fff", "#12345g", "#1234567", " #123456", 5, ["#123456"], "#" + "a" * 299])
+def test_accent_rejects_bad_values(client, bad):
+    register(client)
+    sid = create_server(client)["id"]
+    client.put(f"/servers/{sid}", json={"server_profile": {"accent": "#123456"}})
+
+    res = client.put(f"/servers/{sid}", json={"server_profile": {"accent": bad}})
+    assert res.status_code == 422, res.text
+    assert client.get(f"/servers/{sid}").json()["server_profile"]["accent"] == "#123456"
+
+
+def test_accent_null_removes_it_and_keeps_other_profile_keys(client):
+    register(client)
+    sid = create_server(client)["id"]
+    client.put(f"/servers/{sid}", json={"server_profile": {"welcome_message": "hi"}})
+
+    res = client.put(f"/servers/{sid}", json={"server_profile": {"accent": "#abcdef"}})
+    assert res.json()["server_profile"]["welcome_message"] == "hi"
+    res = client.put(f"/servers/{sid}", json={"server_profile": {"accent": None}})
+    assert res.status_code == 200, res.text
+    assert "accent" not in res.json()["server_profile"]
+    assert res.json()["server_profile"]["welcome_message"] == "hi"
+
+
+def test_accent_needs_manage_server(client, new_client):
+    register(client, "alice-acm")
+    sid = create_server(client)["id"]
+    bob = new_client()
+    register(bob, "bob-acm")
+    _join(client, bob, sid)
+
+    res = bob.put(f"/servers/{sid}", json={"server_profile": {"accent": "#123456"}})
+    assert res.status_code == 403
+    assert "accent" not in client.get(f"/servers/{sid}").json()["server_profile"]

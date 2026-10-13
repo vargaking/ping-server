@@ -30,7 +30,7 @@ logger = logging.getLogger("app.services.chat_service")
 
 _INVALID_REPLY = object()
 
-_CLIENT_FORBIDDEN_KEYS = {"embeds", "imported_author", "import"}
+_CLIENT_FORBIDDEN_KEYS = {"embeds", "imported_author", "import", "call"}
 
 TYPING_MIN_INTERVAL = 2.0
 _TYPING_PRUNE_THRESHOLD = 1024

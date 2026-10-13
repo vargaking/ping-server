@@ -291,7 +291,7 @@ async def _serialize_all(rows: list[dict]) -> list[dict]:
 def _serialize(
     message: dict, attachments: list[dict], reactions: list[dict], refs: dict[UUID, dict]
 ) -> dict:
-    return {
+    row = {
         "id": message["uuid"],
         "content": message["content"],
         "user_id": message["author_id"],
@@ -304,3 +304,6 @@ def _serialize(
         "embeds": (message["metadata"] or {}).get("embeds", []),
         "imported_author": None,
     }
+    if "call" in (message["metadata"] or {}):
+        row["call"] = message["metadata"]["call"]
+    return row

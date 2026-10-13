@@ -20,6 +20,7 @@ from app.services.message_text import mentioned_user_ids, plain_text  # noqa: F4
 logger = logging.getLogger("app.services.push")
 
 PUSH_TTL_SECONDS = 4 * 24 * 60 * 60
+CALL_PUSH_TTL_SECONDS = 60
 DELIVER_TIMEOUT_SECONDS = 10
 MAX_TRACKED_THREADS = 10_000
 VAPID_CLAIM_LIFETIME_SECONDS = 12 * 60 * 60
@@ -93,6 +94,10 @@ def channel_tag(channel_id: int) -> str:
     return f"ch-{channel_id}"
 
 
+def call_tag(call_id: int) -> str:
+    return f"call-{call_id}"
+
+
 def _message_payload(
     kind: str, *, tag: str, title: str, body: str, url: str, count: int,
     message_id: int, message_uuid: str,
@@ -118,6 +123,16 @@ def dm_payload(
     return _message_payload(
         "dm", tag=dm_tag(conversation_id), title=sender_name, body=body,
         url=f"/app/direct/{conversation_id}/", count=count,
+        message_id=message_id, message_uuid=message_uuid)
+
+
+def call_payload(
+    *, call_id: int, conversation_id: int, caller_name: str,
+    message_id: int, message_uuid: str,
+) -> dict:
+    return _message_payload(
+        "dm", tag=call_tag(call_id), title=caller_name, body="Incoming call",
+        url=f"/app/direct/{conversation_id}/", count=1,
         message_id=message_id, message_uuid=message_uuid)
 
 
@@ -267,13 +282,16 @@ class PushService:
 
     async def deliver(
         self, sub: PushSubscription, payload: dict, *, topic: str, urgency: str,
+        ttl: int = PUSH_TTL_SECONDS,
     ) -> DeliveryResult:
         """Encrypt and POST *payload* to one subscription; returns the push
         service's HTTP status and body. The only place that talks to the network."""
-        return await asyncio.to_thread(self._deliver_blocking, sub, payload, topic, urgency)
+        return await asyncio.to_thread(
+            self._deliver_blocking, sub, payload, topic, urgency, ttl)
 
     def _deliver_blocking(
         self, sub: PushSubscription, payload: dict, topic: str, urgency: str,
+        ttl: int = PUSH_TTL_SECONDS,
     ) -> DeliveryResult:
         session = requests.Session()
         # The endpoint was allowlisted; never follow it somewhere else.
@@ -292,7 +310,7 @@ class PushService:
                     "exp": int(time.time()) + VAPID_CLAIM_LIFETIME_SECONDS,
                 },
                 content_encoding="aes128gcm",
-                ttl=PUSH_TTL_SECONDS,
+                ttl=ttl,
                 headers={"Topic": topic, "Urgency": urgency},
                 timeout=DELIVER_TIMEOUT_SECONDS,
                 requests_session=session,
@@ -307,10 +325,11 @@ class PushService:
 
     async def send_to_user(
         self, user_id: int, payload: dict, *, topic: str, urgency: str,
-        skip_apple: bool = False,
+        skip_apple: bool = False, ttl: int | None = None,
     ) -> None:
         """Push *payload* to every subscription of *user_id*, except Apple's
-        when *skip_apple*. Gone subscriptions (404/410) are deleted; other
+        when *skip_apple*, kept by the push service for *ttl* seconds (the
+        default when unset). Gone subscriptions (404/410) are deleted; other
         failures are only logged."""
         subs = await PushSubscription.filter(user_id=user_id)
         if not subs:
@@ -319,7 +338,7 @@ class PushService:
         if skip_apple:
             subs = [sub for sub in subs if not is_apple_endpoint(sub.endpoint)]
         await asyncio.gather(*(
-            self._send_one(sub, payload, topic, urgency) for sub in subs))
+            self._send_one(sub, payload, topic, urgency, ttl) for sub in subs))
 
     async def send_test(self, user_id: int) -> list[SendResult]:
         """Send a test push to every subscription of *user_id* right now and
@@ -331,10 +350,13 @@ class PushService:
 
     async def _send_one(
         self, sub: PushSubscription, payload: dict, topic: str, urgency: str,
+        ttl: int | None = None,
     ) -> SendResult:
         host = endpoint_host(sub.endpoint)
+        # Passed only when set, so a deliver without the parameter keeps working.
+        extra = {} if ttl is None else {"ttl": ttl}
         try:
-            result = await self.deliver(sub, payload, topic=topic, urgency=urgency)
+            result = await self.deliver(sub, payload, topic=topic, urgency=urgency, **extra)
         except Exception as exc:
             logger.warning(
                 "Push to user %s via %s raised", sub.user_id, host, exc_info=True)

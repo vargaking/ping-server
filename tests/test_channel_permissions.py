@@ -618,10 +618,13 @@ def test_a_manager_who_cant_view_a_private_category_reads_its_rules_but_cant_wri
     assert overwrite(manager, f"{channel_rules}/roles/{low['id']}", deny=SEND).status_code == 404
 
 
-def test_a_manage_channels_holder_can_delete_a_private_category_they_cant_see_into(crew, new_client):
+@pytest.mark.parametrize("allow", [
+    Permission.DELETE_CHANNELS, Permission.MANAGE_CHANNELS | Permission.DELETE_CHANNELS])
+def test_a_delete_channels_holder_can_delete_a_private_category_they_cant_see_into(
+        crew, new_client, allow):
     owner, sid = crew.owner_client, crew.sid
     floor = owner.post(f"/servers/{sid}/roles", json={
-        "name": "Floor", "allow": str(int(Permission.MANAGE_CHANNELS))}).json()
+        "name": "Floor", "allow": str(int(allow))}).json()
     assert set_roles(owner, sid, crew.member["id"], [floor["id"]]).status_code == 200
     bystander_client, _ = join(owner, new_client, sid)
     staff = category_with_a_channel(crew, private=True)
@@ -634,6 +637,40 @@ def test_a_manage_channels_holder_can_delete_a_private_category_they_cant_see_in
     for client in (manager, bystander_client):
         assert plans in [c["id"] for c in client.get(f"/channels/{sid}").json()]
         assert client.get(f"/channels/{plans}/messages").status_code == 200
+
+
+@pytest.mark.parametrize("allow,writes,deletes", [
+    (Permission.MANAGE_CHANNELS, True, False),
+    (Permission.DELETE_CHANNELS, False, True),
+])
+def test_manage_and_delete_channels_are_separate_bits(crew, allow, writes, deletes):
+    owner, sid, member = crew.owner_client, crew.sid, crew.member_client
+    role = owner.post(f"/servers/{sid}/roles", json={
+        "name": "Janitor", "allow": str(int(allow))}).json()
+    assert set_roles(owner, sid, crew.member["id"], [role["id"]]).status_code == 200
+    doomed_channel = create_channel(owner, sid, "doomed")
+    doomed_group = owner.post(f"/servers/{sid}/channel-groups", json={"name": "Doomed"}).json()
+    made_or_denied = 201 if writes else 403
+    changed_or_denied = 200 if writes else 403
+
+    assert member.post(
+        f"/channels/{sid}/create", json={"name": "fresh"}).status_code == made_or_denied
+    assert member.patch(
+        f"/channels/{doomed_channel['id']}", json={"name": "renamed"}).status_code == changed_or_denied
+    assert member.post(
+        f"/servers/{sid}/channel-groups", json={"name": "Fresh"}).status_code == made_or_denied
+    assert member.patch(
+        f"/servers/{sid}/channel-groups/{doomed_group['id']}",
+        json={"name": "Renamed"}).status_code == changed_or_denied
+
+    deleted_or_denied = 204 if deletes else 403
+    assert member.delete(f"/channels/{doomed_channel['id']}").status_code == deleted_or_denied
+    assert member.delete(
+        f"/servers/{sid}/channel-groups/{doomed_group['id']}").status_code == deleted_or_denied
+
+    if deletes:
+        staff = category_with_a_channel(crew, private=True)
+        assert member.delete(f"/channels/{staff.channel['id']}").status_code == 404
 
 
 def test_reordering_without_seeing_every_channel_keeps_the_hidden_ones(crew):

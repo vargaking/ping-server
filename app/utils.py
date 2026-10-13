@@ -103,6 +103,21 @@ async def lifespan(app: FastAPI):
     except Exception:
         logger.warning("Failed to resume imports on startup", exc_info=True)
 
+    calls = None
+    try:
+        # Imported here because the calls service imports models that import this module.
+        from .services.calls import create_call_service
+        calls = create_call_service(getattr(app.state, "comms", None))
+    except Exception:
+        logger.warning("Failed to create the call service", exc_info=True)
+    if calls is not None:
+        try:
+            await calls.reconcile()
+        except Exception:
+            logger.warning("Failed to reconcile open calls on startup", exc_info=True)
+        calls.start_watcher()
+    app.state.calls = calls
+
     yield
 
     from .services.server_queue import server_queue
@@ -119,6 +134,12 @@ async def lifespan(app: FastAPI):
     game_task.cancel()
     with suppress(asyncio.CancelledError):
         await game_task
+
+    if calls is not None:
+        try:
+            await calls.aclose()
+        except Exception:
+            logger.warning("Failed to stop calls", exc_info=True)
 
     if stats_task is not None:
         stats_task.cancel()

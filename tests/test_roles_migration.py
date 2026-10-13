@@ -7,10 +7,10 @@ from tortoise import connections
 
 from app.models.Role import Role
 from app.models.RoleToUser import RoleToUser
-from app.permissions import ADMIN_PERMISSIONS, Permission
+from app.permissions import Permission
 from app.services.permissions import permissions, server_masks
 from app.models.Server import Server
-from tests.conftest import create_server, register
+from tests.conftest import ADMIN_ROLE_PERMISSIONS, create_server, register
 from tests.test_permissions import join, run
 
 MIGRATION = next(Path(__file__).parent.parent.glob("migrations/models/37_*_role_position_color.py"))
@@ -88,7 +88,7 @@ def test_every_member_keeps_exactly_the_mask_they_had(client, new_client, migrat
     before_positions = run(client, _positions, server["id"])
     assert {position for _, position in before_positions} == {0}
     expected, roles = run(client, _expected_masks, server["id"])
-    assert expected[members[1]] == ADMIN_PERMISSIONS
+    assert expected[members[1]] == ADMIN_ROLE_PERMISSIONS
     assert expected[members[2]] != expected[members[3]]
 
     run(client, migration.number_roles, connections.get("default"))

@@ -70,10 +70,10 @@ class Recorder:
         self.bodies: dict[str, str] = {}
         self.errors: dict[str, Exception] = {}
 
-    async def deliver(self, sub, payload, *, topic, urgency):
+    async def deliver(self, sub, payload, *, topic, urgency, ttl=None):
         self.calls.append({
             "endpoint": sub.endpoint, "user_id": sub.user_id, "payload": payload,
-            "topic": topic, "urgency": urgency})
+            "topic": topic, "urgency": urgency, "ttl": ttl})
         if sub.endpoint in self.errors:
             raise self.errors[sub.endpoint]
         return DeliveryResult(
@@ -1459,6 +1459,35 @@ def test_deliver_sends_an_encrypted_vapid_signed_request(client, monkeypatch, va
     assert claims["aud"] == endpoint.rsplit("/push/", 1)[0]
     assert claims["sub"] == "mailto:admin@example.com"
     assert abs(claims["exp"] - (time.time() + 12 * 60 * 60)) < 60
+
+
+def test_deliver_with_ttl_sets_the_header(client, monkeypatch, vapid_env, push_endpoint):
+    for key, value in vapid_env.items():
+        monkeypatch.setenv(key, value)
+    push.configure()
+    handler, endpoint = push_endpoint
+    try:
+        client.portal.call(lambda: push.deliver(
+            real_sub(endpoint), {"v": 1}, topic="call-1", urgency="high", ttl=60))
+    finally:
+        monkeypatch.undo()
+        push.configure()
+
+    assert handler.seen[0][0]["ttl"] == "60"
+
+
+def test_ttl_is_passed_only_when_set(dm_pair, push_on, monkeypatch):
+    seen = []
+
+    async def deliver_without_ttl(sub, payload, *, topic, urgency):
+        seen.append(topic)
+        return DeliveryResult(201)
+
+    monkeypatch.setattr(push, "deliver", deliver_without_ttl)
+    run(dm_pair.alice_client, push.send_to_user(
+        dm_pair.bob["id"], {"v": 1}, topic="dm-1", urgency="high"))
+
+    assert seen == ["dm-1"]
 
 
 def test_deliver_returns_the_error_status_of_the_push_service(client, monkeypatch, vapid_env, push_endpoint):
